@@ -43,14 +43,14 @@ export default function App() {
         <EngineControl />
       </header>
 
-      <nav className="bg-gray-900 border-b border-gray-800 px-6">
-        <div className="flex gap-1">
+      <nav className="bg-gray-900 border-b border-gray-800 px-3 sm:px-6 py-1">
+        <div className="flex flex-wrap gap-1">
           {TABS.map(t => (
             <button
               key={t.key}
               onClick={() => setTab(t.key)}
               className={clsx(
-                'px-4 py-2 text-sm font-medium rounded-t transition-colors',
+                'px-3 py-1.5 text-xs sm:text-sm font-medium rounded-t transition-colors whitespace-nowrap',
                 tab === t.key
                   ? 'bg-gray-800 text-white border-b-2 border-blue-500'
                   : 'text-gray-400 hover:text-white hover:bg-gray-800/50'
