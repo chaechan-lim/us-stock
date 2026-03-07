@@ -1,6 +1,7 @@
 """Backtest API endpoints."""
 
 import logging
+import math
 
 from fastapi import APIRouter, Request
 from pydantic import BaseModel
@@ -46,21 +47,28 @@ async def run_backtest(req: BacktestRequest, request: Request):
         return {"error": str(e)}
 
     m = result.metrics
+
+    def safe(v: float) -> float:
+        """Replace inf/nan with 0 for JSON serialization."""
+        if math.isinf(v) or math.isnan(v):
+            return 0.0
+        return v
+
     return {
         "strategy": result.strategy_name,
         "symbol": result.symbol,
-        "passed": result.passed,
+        "passed": bool(result.passed),
         "metrics": {
-            "total_return_pct": round(m.total_return_pct, 2),
-            "cagr": round(m.cagr * 100, 2),
-            "sharpe_ratio": round(m.sharpe_ratio, 2),
-            "sortino_ratio": round(m.sortino_ratio, 2),
-            "max_drawdown_pct": round(m.max_drawdown_pct, 2),
+            "total_return_pct": round(safe(m.total_return_pct), 2),
+            "cagr": round(safe(m.cagr * 100), 2),
+            "sharpe_ratio": round(safe(m.sharpe_ratio), 2),
+            "sortino_ratio": round(safe(m.sortino_ratio), 2),
+            "max_drawdown_pct": round(safe(m.max_drawdown_pct), 2),
             "max_drawdown_days": m.max_drawdown_days,
             "total_trades": m.total_trades,
-            "win_rate": round(m.win_rate, 1),
-            "profit_factor": round(m.profit_factor, 2),
-            "final_equity": round(m.final_equity, 2),
+            "win_rate": round(safe(m.win_rate), 1),
+            "profit_factor": round(safe(m.profit_factor), 2),
+            "final_equity": round(safe(m.final_equity), 2),
             "start_date": m.start_date,
             "end_date": m.end_date,
             "trading_days": m.trading_days,
@@ -73,14 +81,14 @@ async def run_backtest(req: BacktestRequest, request: Request):
                 "quantity": t.quantity,
                 "entry_price": t.entry_price,
                 "exit_price": t.exit_price,
-                "pnl": round(t.pnl, 2),
-                "pnl_pct": round(t.pnl_pct, 2),
+                "pnl": round(safe(t.pnl), 2),
+                "pnl_pct": round(safe(t.pnl_pct), 2),
                 "holding_days": t.holding_days,
             }
             for t in result.trades[-50:]  # last 50 trades
         ],
         "equity_curve": [
-            {"date": str(date), "equity": round(float(val), 2)}
+            {"date": str(date), "equity": round(safe(float(val)), 2)}
             for date, val in result.equity_curve.items()
         ][-200:],  # last 200 data points
     }
