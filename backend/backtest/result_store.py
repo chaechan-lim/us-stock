@@ -1,0 +1,201 @@
+"""Persistent backtest result storage with deduplication.
+
+Stores results as JSON files indexed by a hash of
+(strategy, symbol, period, params). Prevents re-running identical backtests.
+"""
+
+import hashlib
+import json
+import logging
+import math
+import os
+from dataclasses import asdict
+from datetime import datetime
+from pathlib import Path
+
+logger = logging.getLogger(__name__)
+
+DEFAULT_STORE_DIR = Path(__file__).parent.parent.parent / "data" / "backtest_results"
+
+
+def _make_safe(obj):
+    """Recursively replace inf/nan with None for JSON serialization."""
+    if isinstance(obj, float):
+        if math.isinf(obj) or math.isnan(obj):
+            return None
+        return obj
+    if isinstance(obj, dict):
+        return {k: _make_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_make_safe(v) for v in obj]
+    return obj
+
+
+class BacktestResultStore:
+    """Persistent store for backtest results with dedup."""
+
+    def __init__(self, store_dir: str | Path | None = None):
+        self._store_dir = Path(store_dir) if store_dir else DEFAULT_STORE_DIR
+        self._store_dir.mkdir(parents=True, exist_ok=True)
+        self._index_path = self._store_dir / "index.json"
+        self._index = self._load_index()
+
+    def _load_index(self) -> dict:
+        if self._index_path.exists():
+            try:
+                return json.loads(self._index_path.read_text())
+            except (json.JSONDecodeError, OSError):
+                logger.warning("Corrupted index, rebuilding")
+        return {}
+
+    def _save_index(self) -> None:
+        self._index_path.write_text(
+            json.dumps(self._index, indent=2, default=str)
+        )
+
+    @staticmethod
+    def make_key(
+        strategy_name: str,
+        symbol: str,
+        period: str,
+        params: dict | None = None,
+        mode: str = "single",
+    ) -> str:
+        """Create a deterministic hash key for a backtest run."""
+        key_data = {
+            "strategy": strategy_name,
+            "symbol": symbol,
+            "period": period,
+            "params": params or {},
+            "mode": mode,
+        }
+        raw = json.dumps(key_data, sort_keys=True)
+        return hashlib.sha256(raw.encode()).hexdigest()[:16]
+
+    def exists(
+        self,
+        strategy_name: str,
+        symbol: str,
+        period: str,
+        params: dict | None = None,
+        mode: str = "single",
+    ) -> bool:
+        """Check if a backtest result already exists."""
+        key = self.make_key(strategy_name, symbol, period, params, mode)
+        return key in self._index
+
+    def get(
+        self,
+        strategy_name: str,
+        symbol: str,
+        period: str,
+        params: dict | None = None,
+        mode: str = "single",
+    ) -> dict | None:
+        """Get a stored backtest result."""
+        key = self.make_key(strategy_name, symbol, period, params, mode)
+        if key not in self._index:
+            return None
+        result_path = self._store_dir / f"{key}.json"
+        if not result_path.exists():
+            del self._index[key]
+            self._save_index()
+            return None
+        try:
+            return json.loads(result_path.read_text())
+        except (json.JSONDecodeError, OSError):
+            return None
+
+    def save(
+        self,
+        strategy_name: str,
+        symbol: str,
+        period: str,
+        result_data: dict,
+        params: dict | None = None,
+        mode: str = "single",
+    ) -> str:
+        """Save a backtest result. Returns the key."""
+        key = self.make_key(strategy_name, symbol, period, params, mode)
+
+        record = {
+            "key": key,
+            "strategy": strategy_name,
+            "symbol": symbol,
+            "period": period,
+            "mode": mode,
+            "params": params or {},
+            "timestamp": datetime.now().isoformat(),
+            "result": _make_safe(result_data),
+        }
+
+        result_path = self._store_dir / f"{key}.json"
+        result_path.write_text(json.dumps(record, indent=2, default=str))
+
+        self._index[key] = {
+            "strategy": strategy_name,
+            "symbol": symbol,
+            "period": period,
+            "mode": mode,
+            "timestamp": record["timestamp"],
+        }
+        self._save_index()
+
+        logger.info("Saved backtest result: %s/%s [%s]", strategy_name, symbol, key)
+        return key
+
+    def list_results(
+        self,
+        strategy_name: str | None = None,
+        symbol: str | None = None,
+        mode: str | None = None,
+    ) -> list[dict]:
+        """List stored results with optional filters."""
+        results = []
+        for key, meta in self._index.items():
+            if strategy_name and meta["strategy"] != strategy_name:
+                continue
+            if symbol and meta["symbol"] != symbol:
+                continue
+            if mode and meta.get("mode") != mode:
+                continue
+            results.append({"key": key, **meta})
+        return sorted(results, key=lambda x: x.get("timestamp", ""), reverse=True)
+
+    def get_by_key(self, key: str) -> dict | None:
+        """Get result by its hash key."""
+        if key not in self._index:
+            return None
+        result_path = self._store_dir / f"{key}.json"
+        if not result_path.exists():
+            return None
+        try:
+            return json.loads(result_path.read_text())
+        except (json.JSONDecodeError, OSError):
+            return None
+
+    def delete(self, key: str) -> bool:
+        """Delete a stored result."""
+        if key not in self._index:
+            return False
+        result_path = self._store_dir / f"{key}.json"
+        if result_path.exists():
+            result_path.unlink()
+        del self._index[key]
+        self._save_index()
+        return True
+
+    def clear_all(self) -> int:
+        """Delete all stored results. Returns count deleted."""
+        count = len(self._index)
+        for key in list(self._index.keys()):
+            result_path = self._store_dir / f"{key}.json"
+            if result_path.exists():
+                result_path.unlink()
+        self._index.clear()
+        self._save_index()
+        return count
+
+    @property
+    def count(self) -> int:
+        return len(self._index)
