@@ -2,10 +2,16 @@
 
 Periodically evaluates strategies against market data,
 generates combined signals, and executes trades via OrderManager.
+
+Uses per-stock adaptive weights:
+1. StockClassifier categorizes each stock (growth/stable/cyclical/volatile)
+2. AdaptiveWeightManager blends category weights + rolling performance
+3. SignalCombiner uses per-stock weights instead of global market weights
 """
 
 import asyncio
 import logging
+import time
 
 import pandas as pd
 
@@ -16,6 +22,8 @@ from strategies.registry import StrategyRegistry
 from strategies.combiner import SignalCombiner
 from engine.order_manager import OrderManager
 from engine.risk_manager import RiskManager
+from engine.stock_classifier import StockClassifier
+from engine.adaptive_weights import AdaptiveWeightManager
 from core.enums import SignalType
 
 logger = logging.getLogger(__name__)
@@ -36,6 +44,7 @@ class EvaluationLoop:
         watchlist: list[str] | None = None,
         market_state: str = "uptrend",
         interval_sec: int = 300,
+        adaptive_weights: AdaptiveWeightManager | None = None,
     ):
         self._adapter = adapter
         self._market_data = market_data
@@ -48,6 +57,10 @@ class EvaluationLoop:
         self._market_state = market_state
         self._interval_sec = interval_sec
         self._running = False
+        self._classifier = StockClassifier()
+        self._adaptive = adaptive_weights or AdaptiveWeightManager()
+        self._last_classify_time: dict[str, float] = {}
+        self._reclassify_interval = 86400  # re-classify every 24h
 
     @property
     def running(self) -> bool:
@@ -78,12 +91,15 @@ class EvaluationLoop:
         logger.info("Evaluation loop stopped")
 
     async def evaluate_symbol(self, symbol: str) -> None:
-        """Evaluate a single symbol through all strategies."""
+        """Evaluate a single symbol through all strategies with per-stock weights."""
         try:
             # Fetch OHLCV data
             df = await self._market_data.get_ohlcv(symbol, limit=250)
             if df.empty:
                 return
+
+            # Classify stock if needed (every reclassify_interval)
+            self._maybe_classify(symbol, df)
 
             # Add indicators
             df = self._indicator_svc.add_all_indicators(df)
@@ -98,15 +114,42 @@ class EvaluationLoop:
                 except Exception as e:
                     logger.debug("Strategy %s failed on %s: %s", strategy.name, symbol, e)
 
-            # Combine signals
-            weights = self._registry.get_profile_weights(self._market_state)
+            # Get per-stock blended weights
+            market_weights = self._registry.get_profile_weights(self._market_state)
+            weights = self._adaptive.get_weights(symbol, market_weights)
+
+            # Combine signals with per-stock weights
             combined = self._combiner.combine(signals, weights)
+
+            # Log weight selection
+            category = self._adaptive.get_category(symbol)
+            if category:
+                logger.debug(
+                    "%s [%s] signal=%s conf=%.2f",
+                    symbol, category.value, combined.signal_type.value,
+                    combined.confidence,
+                )
 
             # Execute
             await self._execute_signal(combined, symbol, df)
 
         except Exception as e:
             logger.error("Failed to evaluate %s: %s", symbol, e)
+
+    def _maybe_classify(self, symbol: str, df: pd.DataFrame) -> None:
+        """Classify stock if not yet classified or stale."""
+        now = time.time()
+        last = self._last_classify_time.get(symbol, 0)
+        if now - last < self._reclassify_interval:
+            return
+
+        profile = self._classifier.classify(df, symbol)
+        self._adaptive.set_category(symbol, profile.category)
+        self._last_classify_time[symbol] = now
+        logger.info(
+            "Classified %s as %s (vol=%.2f, mom=%.2f)",
+            symbol, profile.category.value, profile.volatility, profile.momentum_score,
+        )
 
     async def _evaluate_all(self) -> None:
         """Evaluate all symbols in watchlist."""

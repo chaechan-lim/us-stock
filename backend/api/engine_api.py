@@ -108,6 +108,28 @@ async def macro_indicators(request: Request):
     return {"status": "not_fetched_yet"}
 
 
+@router.get("/adaptive-weights")
+async def adaptive_weights_status(request: Request):
+    """Get per-stock adaptive weight status and classifications."""
+    eval_loop = getattr(request.app.state, "evaluation_loop", None)
+    if not eval_loop or not hasattr(eval_loop, "_adaptive"):
+        return {"status": "not_configured"}
+
+    adaptive = eval_loop._adaptive
+    categories = {
+        sym: cat.value for sym, cat in adaptive._categories.items()
+    }
+    performance = adaptive.get_all_summaries()
+    return {
+        "categories": categories,
+        "performance": performance,
+        "config": {
+            "alpha": adaptive._alpha,
+            "min_signals": adaptive._min_signals,
+        },
+    }
+
+
 @router.get("/websocket")
 async def websocket_status(request: Request):
     """Get KIS WebSocket connection status."""

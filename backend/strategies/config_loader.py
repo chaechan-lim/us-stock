@@ -57,5 +57,13 @@ class StrategyConfigLoader:
     def get_stop_loss_config(self, strategy_name: str) -> dict:
         return self.get_strategy_config(strategy_name).get("stop_loss", {})
 
+    def get_stock_profiles(self) -> dict[str, dict[str, float]]:
+        """Get stock category -> strategy weight profiles."""
+        return self._config.get("stock_profiles", {})
+
+    def get_adaptive_config(self) -> dict:
+        """Get adaptive weight blending configuration."""
+        return self._config.get("adaptive", {})
+
     def get_screening_config(self) -> dict:
         return self._config.get("screening", {})

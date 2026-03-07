@@ -54,6 +54,61 @@ profiles:
     regime_switch: 0.55
     sector_rotation: 0.45
 
+# Stock category -> strategy weight profiles
+# Stocks are auto-classified by volatility, momentum, and trend characteristics
+stock_profiles:
+  growth_momentum:
+    # High-growth stocks with strong momentum (e.g. NVDA, META)
+    dual_momentum: 0.20
+    cis_momentum: 0.18
+    trend_following: 0.15
+    supertrend: 0.15
+    sector_rotation: 0.12
+    donchian_breakout: 0.10
+    regime_switch: 0.05
+    volume_profile: 0.05
+
+  stable_large_cap:
+    # Stable blue-chips with low volatility (e.g. AAPL, MSFT, JNJ)
+    trend_following: 0.18
+    donchian_breakout: 0.15
+    rsi_divergence: 0.15
+    bnf_deviation: 0.12
+    macd_histogram: 0.10
+    larry_williams: 0.10
+    bollinger_squeeze: 0.10
+    volume_profile: 0.05
+    dual_momentum: 0.05
+
+  cyclical_value:
+    # Cyclical/value stocks sensitive to macro (e.g. JPM, XOM)
+    sector_rotation: 0.18
+    regime_switch: 0.15
+    bnf_deviation: 0.15
+    dual_momentum: 0.12
+    trend_following: 0.12
+    rsi_divergence: 0.10
+    donchian_breakout: 0.10
+    volume_profile: 0.08
+
+  high_volatility:
+    # High-volatility stocks needing careful risk management
+    supertrend: 0.18
+    rsi_divergence: 0.15
+    bnf_deviation: 0.15
+    donchian_breakout: 0.15
+    cis_momentum: 0.12
+    trend_following: 0.10
+    bollinger_squeeze: 0.10
+    macd_histogram: 0.05
+
+# Adaptive weight blending
+adaptive:
+  alpha: 0.6              # 0.6 = 60% category-based, 40% adaptive
+  ema_decay: 0.1           # EMA decay for performance tracking
+  min_signals: 5           # Min signals before adaptive weights activate
+  reclassify_interval: 86400  # Re-classify stocks every 24h
+
 # Individual strategy parameters
 strategies:
   trend_following:

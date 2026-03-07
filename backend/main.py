@@ -141,6 +141,17 @@ async def lifespan(app: FastAPI):
     )
     app.state.position_tracker = position_tracker
 
+    # Adaptive weight manager (per-stock strategy selection)
+    from engine.adaptive_weights import AdaptiveWeightManager
+    adaptive_cfg = registry._config_loader.get_adaptive_config()
+    stock_profiles = registry._config_loader.get_stock_profiles() or None
+    adaptive_weights = AdaptiveWeightManager(
+        alpha=adaptive_cfg.get("alpha", 0.6),
+        ema_decay=adaptive_cfg.get("ema_decay", 0.1),
+        min_signals_for_adaptation=adaptive_cfg.get("min_signals", 5),
+        stock_profiles=stock_profiles,
+    )
+
     # Evaluation loop
     indicator_svc = app.state.indicator_svc
     combiner = app.state.combiner
@@ -152,6 +163,7 @@ async def lifespan(app: FastAPI):
         combiner=combiner,
         order_manager=order_manager,
         risk_manager=risk_manager,
+        adaptive_weights=adaptive_weights,
     )
     app.state.evaluation_loop = evaluation_loop
 
