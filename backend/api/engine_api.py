@@ -130,6 +130,33 @@ async def adaptive_weights_status(request: Request):
     }
 
 
+@router.post("/evaluate")
+async def run_evaluation(request: Request):
+    """Manually trigger one evaluation cycle (for testing outside market hours)."""
+    eval_loop = getattr(request.app.state, "evaluation_loop", None)
+    if not eval_loop:
+        return {"status": "error", "detail": "Evaluation loop not initialized"}
+
+    # Load watchlist from in-memory store if eval_loop's watchlist is empty
+    if not eval_loop._watchlist:
+        from api.watchlist import _watchlist
+        if _watchlist:
+            eval_loop.set_watchlist(list(_watchlist))
+
+    if not eval_loop._watchlist:
+        return {"status": "error", "detail": "Watchlist is empty. Add symbols via /watchlist/ first."}
+
+    try:
+        await eval_loop._evaluate_all()
+        return {
+            "status": "ok",
+            "symbols_evaluated": eval_loop._watchlist,
+            "market_state": eval_loop._market_state,
+        }
+    except Exception as e:
+        return {"status": "error", "detail": str(e)}
+
+
 @router.get("/websocket")
 async def websocket_status(request: Request):
     """Get KIS WebSocket connection status."""

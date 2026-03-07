@@ -1,11 +1,22 @@
 import { useEngineStatus, useEngineControl } from '../hooks/useApi'
+import { useMutation } from '@tanstack/react-query'
+import { runEvaluation } from '../api/client'
 import clsx from 'clsx'
+
+const phaseBadge: Record<string, string> = {
+  regular: 'bg-green-600 text-green-100',
+  pre_market: 'bg-blue-600 text-blue-100',
+  after_hours: 'bg-orange-600 text-orange-100',
+  closed: 'bg-gray-600 text-gray-300',
+}
 
 export default function EngineControl() {
   const { data: status } = useEngineStatus()
   const { start, stop } = useEngineControl()
+  const evaluate = useMutation({ mutationFn: runEvaluation })
 
   const running = status?.running ?? false
+  const phase = status?.market_phase ?? ''
 
   return (
     <div className="flex items-center gap-3">
@@ -39,9 +50,22 @@ export default function EngineControl() {
         </button>
       )}
 
-      {status?.market_phase && (
-        <span className="text-xs text-gray-500 uppercase">
-          {status.market_phase.replace('_', ' ')}
+      <button
+        onClick={() => evaluate.mutate()}
+        disabled={evaluate.isPending}
+        className="px-3 py-1 text-xs font-medium bg-amber-600 hover:bg-amber-700 rounded transition-colors disabled:opacity-50"
+      >
+        {evaluate.isPending ? 'Evaluating...' : 'Run Evaluate'}
+      </button>
+
+      {phase && (
+        <span
+          className={clsx(
+            'px-2 py-0.5 text-xs font-medium rounded-full uppercase',
+            phaseBadge[phase] ?? 'bg-gray-600 text-gray-300'
+          )}
+        >
+          {phase.replace('_', ' ')}
         </span>
       )}
     </div>

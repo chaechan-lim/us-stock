@@ -1,6 +1,8 @@
 import { useMemo } from 'react'
+import { useQuery } from '@tanstack/react-query'
 import { usePortfolioSummary, usePositions } from '../hooks/useApi'
 import { usePriceStream } from '../hooks/usePriceStream'
+import { fetchMacroIndicators, fetchMarketState } from '../api/client'
 
 function formatUSD(n: number) {
   return new Intl.NumberFormat('en-US', {
@@ -89,6 +91,100 @@ export default function Dashboard() {
               })}
             </tbody>
           </table>
+        </div>
+      )}
+
+      {/* Market State & Macro Indicators */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <MarketStateCard />
+        <MacroIndicatorsCard />
+      </div>
+    </div>
+  )
+}
+
+function MarketStateCard() {
+  const { data: marketState, isLoading } = useQuery({
+    queryKey: ['engine', 'market-state'],
+    queryFn: fetchMarketState,
+    refetchInterval: 60_000,
+  })
+
+  return (
+    <div className="bg-gray-900 rounded-lg p-4">
+      <h2 className="text-sm font-semibold text-gray-300 uppercase tracking-wide mb-3">Market State</h2>
+      {isLoading && <p className="text-gray-500 text-sm">Loading...</p>}
+      {marketState && (
+        <div className="grid grid-cols-2 gap-3 text-sm">
+          <div>
+            <span className="text-gray-500">Phase</span>
+            <p className="text-white font-medium">{marketState.market_phase ?? '-'}</p>
+          </div>
+          <div>
+            <span className="text-gray-500">Regime</span>
+            <p className="text-white font-medium">{marketState.regime ?? '-'}</p>
+          </div>
+          <div>
+            <span className="text-gray-500">SPY Price</span>
+            <p className="text-white font-medium">
+              {marketState.spy_price != null ? `$${Number(marketState.spy_price).toFixed(2)}` : '-'}
+            </p>
+          </div>
+          <div>
+            <span className="text-gray-500">VIX Level</span>
+            <p className="text-white font-medium">
+              {marketState.vix_level != null ? Number(marketState.vix_level).toFixed(2) : '-'}
+            </p>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function MacroIndicatorsCard() {
+  const { data: macro, isLoading } = useQuery({
+    queryKey: ['engine', 'macro'],
+    queryFn: fetchMacroIndicators,
+    refetchInterval: 60_000,
+  })
+
+  return (
+    <div className="bg-gray-900 rounded-lg p-4">
+      <h2 className="text-sm font-semibold text-gray-300 uppercase tracking-wide mb-3">Macro Indicators</h2>
+      {isLoading && <p className="text-gray-500 text-sm">Loading...</p>}
+      {macro && (
+        <div className="grid grid-cols-2 gap-3 text-sm">
+          <div>
+            <span className="text-gray-500">Fed Funds Rate</span>
+            <p className="text-white font-medium">
+              {macro.fed_funds_rate != null ? `${Number(macro.fed_funds_rate).toFixed(2)}%` : '-'}
+            </p>
+          </div>
+          <div>
+            <span className="text-gray-500">Treasury 10Y</span>
+            <p className="text-white font-medium">
+              {macro.treasury_10y != null ? `${Number(macro.treasury_10y).toFixed(2)}%` : '-'}
+            </p>
+          </div>
+          <div>
+            <span className="text-gray-500">Yield Spread</span>
+            <p className="text-white font-medium">
+              {macro.yield_spread != null ? `${Number(macro.yield_spread).toFixed(2)}%` : '-'}
+            </p>
+          </div>
+          <div>
+            <span className="text-gray-500">CPI YoY</span>
+            <p className="text-white font-medium">
+              {macro.cpi_yoy != null ? `${Number(macro.cpi_yoy).toFixed(2)}%` : '-'}
+            </p>
+          </div>
+          <div className="col-span-2">
+            <span className="text-gray-500">Unemployment Rate</span>
+            <p className="text-white font-medium">
+              {macro.unemployment_rate != null ? `${Number(macro.unemployment_rate).toFixed(1)}%` : '-'}
+            </p>
+          </div>
         </div>
       )}
     </div>

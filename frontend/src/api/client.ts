@@ -96,3 +96,34 @@ export const fetchEquityHistory = (days = 30) =>
 // Recovery
 export const fetchRecoveryStatus = () =>
   api.get('/engine/recovery').then(r => r.data)
+
+// Backtest results store
+export const fetchBacktestResults = (strategy?: string, symbol?: string) =>
+  api.get('/backtest/results', { params: { strategy, symbol } }).then(r => r.data)
+
+export const deleteBacktestResult = (key: string) =>
+  api.delete(`/backtest/results/${key}`).then(r => r.data)
+
+// Optimization
+export const runOptimization = (params: {
+  strategy_name?: string
+  symbols?: string[]
+  period?: string
+  metric?: string
+}) => api.post('/backtest/optimize', params, { timeout: 300_000 }).then(r => r.data)
+
+export const fetchParamGrids = () =>
+  api.get('/backtest/optimize/grids').then(r => r.data)
+
+// Engine extras
+export const fetchMacroIndicators = () =>
+  api.get('/engine/macro').then(r => r.data)
+
+export const fetchAdaptiveWeights = () =>
+  api.get('/engine/adaptive-weights').then(r => r.data)
+
+export const fetchMarketState = () =>
+  api.get('/engine/market-state').then(r => r.data)
+
+export const runEvaluation = () =>
+  api.post('/engine/evaluate', {}, { timeout: 120_000 }).then(r => r.data)

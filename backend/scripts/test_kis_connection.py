@@ -56,7 +56,7 @@ async def main():
     print("[2/5] Testing market data (AAPL ticker)...")
     try:
         ticker = await adapter.fetch_ticker("AAPL")
-        print(f"  OK - AAPL: ${ticker.last:,.2f} ({ticker.change_pct:+.2f}%), vol={ticker.volume:,}")
+        print(f"  OK - AAPL: ${ticker.price:,.2f}, vol={ticker.volume:,}")
     except Exception as e:
         print(f"  FAIL - {e}")
 

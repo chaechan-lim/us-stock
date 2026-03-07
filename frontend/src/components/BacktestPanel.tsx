@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { useMutation } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   LineChart,
   Line,
@@ -297,6 +297,100 @@ export default function BacktestPanel() {
             </div>
           )}
         </>
+      )}
+
+      {/* Saved Results */}
+      <SavedResults />
+    </div>
+  )
+}
+
+function SavedResults() {
+  const queryClient = useQueryClient()
+  const { data: savedResults, isLoading } = useQuery({
+    queryKey: ['backtest-results'],
+    queryFn: () => api.fetchBacktestResults(),
+  })
+
+  const deleteMutation = useMutation({
+    mutationFn: api.deleteBacktestResult,
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['backtest-results'] }),
+  })
+
+  return (
+    <div className="bg-gray-900 rounded-lg p-4">
+      <div className="flex items-center justify-between mb-3">
+        <h2 className="text-lg font-semibold">Saved Results</h2>
+        <button
+          onClick={() => queryClient.invalidateQueries({ queryKey: ['backtest-results'] })}
+          className="px-3 py-1 text-xs bg-gray-800 text-gray-400 hover:text-white hover:bg-gray-700 rounded transition-colors"
+        >
+          Refresh
+        </button>
+      </div>
+
+      {isLoading && <p className="text-gray-500 text-sm">Loading saved results...</p>}
+
+      {savedResults && Array.isArray(savedResults) && savedResults.length === 0 && (
+        <p className="text-gray-500 text-sm">No saved backtest results.</p>
+      )}
+
+      {savedResults && Array.isArray(savedResults) && savedResults.length > 0 && (
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead className="text-gray-400 border-b border-gray-800">
+              <tr>
+                <th className="text-left py-2">Strategy</th>
+                <th className="text-left py-2">Symbol</th>
+                <th className="text-left py-2">Period</th>
+                <th className="text-right py-2">Return%</th>
+                <th className="text-right py-2">Sharpe</th>
+                <th className="text-right py-2">MDD%</th>
+                <th className="text-right py-2">Trades</th>
+                <th className="text-center py-2">Cached</th>
+                <th className="text-right py-2"></th>
+              </tr>
+            </thead>
+            <tbody>
+              {savedResults.map((r: any) => (
+                <tr key={r.key} className="border-b border-gray-800/50">
+                  <td className="py-2 font-medium">{r.strategy ?? '-'}</td>
+                  <td className="py-2">{r.symbol ?? '-'}</td>
+                  <td className="py-2">{r.period ?? '-'}</td>
+                  <td className={clsx(
+                    'text-right py-2',
+                    (r.total_return_pct ?? 0) >= 0 ? 'text-green-400' : 'text-red-400'
+                  )}>
+                    {r.total_return_pct != null ? formatPct(r.total_return_pct) : '-'}
+                  </td>
+                  <td className="text-right py-2">
+                    {r.sharpe_ratio != null ? r.sharpe_ratio.toFixed(2) : '-'}
+                  </td>
+                  <td className="text-right py-2 text-red-400">
+                    {r.max_drawdown_pct != null ? formatPct(-Math.abs(r.max_drawdown_pct)) : '-'}
+                  </td>
+                  <td className="text-right py-2">{r.total_trades ?? '-'}</td>
+                  <td className="text-center py-2">
+                    {r.cached && (
+                      <span className="px-2 py-0.5 rounded text-xs font-medium bg-blue-900/40 text-blue-400">
+                        cached
+                      </span>
+                    )}
+                  </td>
+                  <td className="text-right py-2">
+                    <button
+                      onClick={() => deleteMutation.mutate(r.key)}
+                      disabled={deleteMutation.isPending}
+                      className="px-2 py-1 text-xs text-red-400 hover:text-red-300 hover:bg-red-900/30 rounded transition-colors"
+                    >
+                      Delete
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       )}
     </div>
   )
