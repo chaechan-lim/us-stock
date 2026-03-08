@@ -1,12 +1,18 @@
 """AI Risk Assessment Agent — evaluates portfolio risk.
 
-Uses Claude to perform comprehensive portfolio risk analysis,
+Uses LLMClient to perform comprehensive portfolio risk analysis,
 including concentration, correlation, market, and drawdown risks.
 """
+
+from __future__ import annotations
 
 import json
 import logging
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from services.llm import LLMClient
 
 logger = logging.getLogger(__name__)
 
@@ -74,11 +80,10 @@ class RiskAssessment:
 
 
 class RiskAssessmentAgent:
-    """AI agent for portfolio risk assessment using Claude API."""
+    """AI agent for portfolio risk assessment using LLMClient."""
 
-    def __init__(self, api_key: str = "", model: str = "claude-sonnet-4-20250514"):
-        self._api_key = api_key
-        self._model = model
+    def __init__(self, llm_client: LLMClient | None = None):
+        self._llm_client = llm_client
 
     async def assess_portfolio(
         self,
@@ -87,16 +92,9 @@ class RiskAssessmentAgent:
         market_context: dict,
         recent_trades: list[dict] | None = None,
     ) -> RiskAssessment:
-        """Comprehensive portfolio risk assessment.
-
-        Args:
-            positions: List of current positions with symbol, size, pnl, etc.
-            portfolio_summary: Overall portfolio state (total_value, cash, etc.)
-            market_context: Current market conditions (VIX, sector performance, etc.)
-            recent_trades: Recent trade history for pattern analysis
-        """
-        if not self._api_key:
-            logger.warning("No API key configured, returning default risk assessment")
+        """Comprehensive portfolio risk assessment."""
+        if not self._llm_client:
+            logger.warning("No LLM client configured, returning default risk assessment")
             return RiskAssessment()
 
         user_prompt = self._build_portfolio_prompt(
@@ -104,22 +102,13 @@ class RiskAssessmentAgent:
         )
 
         try:
-            import anthropic
-
-            client = anthropic.AsyncAnthropic(api_key=self._api_key)
-            response = await client.messages.create(
-                model=self._model,
-                max_tokens=1024,
-                system=SYSTEM_PROMPT,
+            response = await self._llm_client.generate(
                 messages=[{"role": "user", "content": user_prompt}],
+                system=SYSTEM_PROMPT,
+                max_tokens=1024,
             )
+            return self._parse_response(response.text or "")
 
-            text = response.content[0].text
-            return self._parse_response(text)
-
-        except ImportError:
-            logger.warning("anthropic package not installed")
-            return RiskAssessment()
         except Exception as e:
             logger.error("Risk assessment failed: %s", e)
             return RiskAssessment()
@@ -131,27 +120,17 @@ class RiskAssessmentAgent:
         current_positions: list[dict],
         portfolio_summary: dict,
     ) -> dict:
-        """Quick risk check before entering a new trade.
-
-        Args:
-            symbol: Stock ticker for proposed trade
-            proposed_size: Dollar value of proposed position
-            current_positions: List of current positions
-            portfolio_summary: Portfolio state (total_value, cash, etc.)
-
-        Returns:
-            Dict with approved (bool), risk_level, and reason.
-        """
+        """Quick risk check before entering a new trade."""
         default_result = {
             "approved": True,
             "risk_level": "MEDIUM",
-            "reason": "No API key configured, defaulting to approved",
+            "reason": "No LLM client configured, defaulting to approved",
             "suggested_size": proposed_size,
             "warnings": [],
         }
 
-        if not self._api_key:
-            logger.warning("No API key configured, returning default pre-trade check")
+        if not self._llm_client:
+            logger.warning("No LLM client configured, returning default pre-trade check")
             return default_result
 
         total_value = portfolio_summary.get("total_value", 0)
@@ -172,22 +151,13 @@ class RiskAssessmentAgent:
 Should this trade be approved from a risk management perspective? Respond as JSON."""
 
         try:
-            import anthropic
-
-            client = anthropic.AsyncAnthropic(api_key=self._api_key)
-            response = await client.messages.create(
-                model=self._model,
-                max_tokens=512,
-                system=PRE_TRADE_PROMPT,
+            response = await self._llm_client.generate(
                 messages=[{"role": "user", "content": user_prompt}],
+                system=PRE_TRADE_PROMPT,
+                max_tokens=512,
             )
+            return self._parse_pre_trade_response(response.text or "", proposed_size)
 
-            text = response.content[0].text
-            return self._parse_pre_trade_response(text, proposed_size)
-
-        except ImportError:
-            logger.warning("anthropic package not installed")
-            return default_result
         except Exception as e:
             logger.error("Pre-trade risk check failed for %s: %s", symbol, e)
             return default_result
@@ -217,7 +187,7 @@ Should this trade be approved from a risk management perspective? Respond as JSO
         return "\n".join(parts)
 
     def _parse_response(self, text: str) -> RiskAssessment:
-        """Parse Claude's JSON response into RiskAssessment."""
+        """Parse LLM's JSON response into RiskAssessment."""
         try:
             json_str = text
             if "```json" in text:
@@ -242,7 +212,7 @@ Should this trade be approved from a risk management perspective? Respond as JSO
             return RiskAssessment(summary=text[:500])
 
     def _parse_pre_trade_response(self, text: str, proposed_size: float) -> dict:
-        """Parse Claude's JSON response for pre-trade check."""
+        """Parse LLM's JSON response for pre-trade check."""
         try:
             json_str = text
             if "```json" in text:

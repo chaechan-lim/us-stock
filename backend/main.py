@@ -179,16 +179,26 @@ async def lifespan(app: FastAPI):
     )
     app.state.portfolio_manager = portfolio_manager
 
+    # LLM client (multi-provider with fallback)
+    llm_client = None
+    if config.llm.enabled and (config.llm.api_key or config.llm.gemini_api_key):
+        from services.llm import LLMClient
+        llm_client = LLMClient(config.llm)
+        providers = []
+        if config.llm.api_key:
+            providers.append(f"anthropic({config.llm.model})")
+        if config.llm.gemini_api_key:
+            providers.append(f"gemini({config.llm.gemini_fallback_model})")
+        logger.info("LLM client enabled: %s", " -> ".join(providers))
+    app.state.llm_client = llm_client
+
     # Scanner pipeline (with AI agent if LLM enabled)
     enricher = FundamentalEnricher()
     ai_agent = None
-    if config.llm.enabled and config.llm.api_key:
+    if llm_client:
         from agents.market_analyst import MarketAnalystAgent
-        ai_agent = MarketAnalystAgent(
-            api_key=config.llm.api_key,
-            model=config.llm.model,
-        )
-        logger.info("AI agent enabled (model=%s)", config.llm.model)
+        ai_agent = MarketAnalystAgent(llm_client=llm_client)
+        logger.info("AI agent enabled")
     scanner_pipeline = ScannerPipeline(
         market_data=market_data,
         indicator_svc=indicator_svc,

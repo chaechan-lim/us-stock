@@ -73,6 +73,10 @@ class LLMConfig(BaseSettings):
     enabled: bool = False
     api_key: str = ""
     model: str = "claude-haiku-4-5-20251001"
+    fallback_model: str = "claude-sonnet-4-6"
+    gemini_api_key: str = ""
+    gemini_fallback_model: str = "gemini-3-flash-preview"
+    max_tokens: int = 4096
 
     model_config = {"env_prefix": "LLM_"}
 

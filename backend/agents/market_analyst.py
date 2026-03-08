@@ -1,13 +1,19 @@
 """AI Market Analyst Agent.
 
-Layer 3 of the screening pipeline: Claude-based comprehensive analysis.
+Layer 3 of the screening pipeline: LLM-based comprehensive analysis.
 Combines indicator scores, fundamental data, and market context
 to produce actionable trade recommendations.
 """
 
+from __future__ import annotations
+
 import json
 import logging
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from services.llm import LLMClient
 
 logger = logging.getLogger(__name__)
 
@@ -59,11 +65,10 @@ class AIRecommendation:
 
 
 class MarketAnalystAgent:
-    """AI agent for comprehensive stock analysis using Claude API."""
+    """AI agent for comprehensive stock analysis using LLMClient."""
 
-    def __init__(self, api_key: str = "", model: str = "claude-sonnet-4-20250514"):
-        self._api_key = api_key
-        self._model = model
+    def __init__(self, llm_client: LLMClient | None = None):
+        self._llm_client = llm_client
 
     async def analyze(
         self,
@@ -73,7 +78,7 @@ class MarketAnalystAgent:
         market_context: dict,
         current_price: float = 0.0,
     ) -> AIRecommendation:
-        """Analyze a stock using Claude AI.
+        """Analyze a stock using LLM.
 
         Args:
             symbol: Stock ticker
@@ -82,8 +87,8 @@ class MarketAnalystAgent:
             market_context: Current market state, sector performance, etc.
             current_price: Current stock price
         """
-        if not self._api_key:
-            logger.warning("No API key configured, returning default recommendation")
+        if not self._llm_client:
+            logger.warning("No LLM client configured, returning default recommendation")
             return AIRecommendation(symbol=symbol)
 
         user_prompt = self._build_prompt(
@@ -91,22 +96,13 @@ class MarketAnalystAgent:
         )
 
         try:
-            import anthropic
-
-            client = anthropic.AsyncAnthropic(api_key=self._api_key)
-            response = await client.messages.create(
-                model=self._model,
-                max_tokens=1024,
-                system=SYSTEM_PROMPT,
+            response = await self._llm_client.generate(
                 messages=[{"role": "user", "content": user_prompt}],
+                system=SYSTEM_PROMPT,
+                max_tokens=1024,
             )
+            return self._parse_response(symbol, response.text or "")
 
-            text = response.content[0].text
-            return self._parse_response(symbol, text)
-
-        except ImportError:
-            logger.warning("anthropic package not installed")
-            return AIRecommendation(symbol=symbol)
         except Exception as e:
             logger.error("AI analysis failed for %s: %s", symbol, e)
             return AIRecommendation(symbol=symbol)
@@ -132,7 +128,7 @@ class MarketAnalystAgent:
 Provide your comprehensive analysis and recommendation as JSON."""
 
     def _parse_response(self, symbol: str, text: str) -> AIRecommendation:
-        """Parse Claude's JSON response into AIRecommendation."""
+        """Parse LLM's JSON response into AIRecommendation."""
         try:
             # Extract JSON from response (may be wrapped in markdown)
             json_str = text
