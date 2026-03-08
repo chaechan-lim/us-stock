@@ -1,0 +1,10 @@
+[Unit]
+Description=Push DB backups to GitHub
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=chans
+ExecStart=/home/chans/us-stock/deploy/backup-db.sh --push
+StandardOutput=journal
+StandardError=journal

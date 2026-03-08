@@ -1,0 +1,10 @@
+[Unit]
+Description=PostgreSQL backup (us-stock + coin)
+After=docker.service
+
+[Service]
+Type=oneshot
+User=chans
+ExecStart=/home/chans/us-stock/deploy/backup-db.sh all
+StandardOutput=journal
+StandardError=journal

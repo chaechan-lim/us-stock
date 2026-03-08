@@ -1,0 +1,9 @@
+[Unit]
+Description=Weekly DB backup push to GitHub (Sunday 07:00 KST)
+
+[Timer]
+OnCalendar=Sun *-*-* 07:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
