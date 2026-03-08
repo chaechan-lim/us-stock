@@ -12,9 +12,14 @@ import type {
   TradeSummary,
 } from '../types'
 
+const apiToken = import.meta.env.VITE_API_TOKEN ?? ''
+
 const api = axios.create({
   baseURL: '/api/v1',
   timeout: 15_000,
+  ...(apiToken && {
+    headers: { Authorization: `Bearer ${apiToken}` },
+  }),
 })
 
 // Portfolio
