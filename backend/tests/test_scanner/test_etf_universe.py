@@ -67,7 +67,7 @@ def test_is_leveraged(universe):
 
 def test_risk_rules(universe):
     rules = universe.risk_rules
-    assert rules.max_hold_days == 10
+    assert rules.max_hold_days == 20
     assert rules.max_portfolio_pct == 0.30
     assert rules.require_stop_loss is True
 

@@ -88,22 +88,40 @@ class TestRegimeSwitch:
         assert mock_order_manager.place_buy.called
 
     @pytest.mark.asyncio
-    async def test_bear_regime_sells_bull_buys_bear(self, engine, mock_order_manager, mock_market_data):
+    async def test_bear_regime_sells_bull_exits_to_cash(self, engine, mock_order_manager, mock_market_data):
         # First set bull regime
         mock_market_data.get_ohlcv.return_value = _make_ohlcv_mock(50.0)
         bull_state = MarketState(regime=MarketRegime.UPTREND)
         await engine._manage_regime_etfs(bull_state)
 
-        # Now switch to bear
-        # Simulate holding TQQQ
+        # Now switch to bear (bear_enabled=False by default)
         pos_tqqq = MagicMock(symbol="TQQQ", quantity=100, current_price=50.0)
         mock_market_data.get_positions.return_value = [pos_tqqq]
 
         bear_state = MarketState(regime=MarketRegime.DOWNTREND)
         actions = await engine._manage_regime_etfs(bear_state)
 
-        # Should sell bull (TQQQ) and buy bear (SQQQ)
+        # Should sell bull (TQQQ) but NOT buy bear (bear_enabled=False)
         assert any("SELL" in a and "TQQQ" in a for a in actions)
+        assert not any("BUY" in a and "SQQQ" in a for a in actions)
+
+    @pytest.mark.asyncio
+    async def test_bear_regime_buys_bear_when_enabled(self, mock_market_data, mock_order_manager, mock_etf_universe, mock_notification):
+        engine = ETFEngine(
+            market_data=mock_market_data,
+            order_manager=mock_order_manager,
+            etf_universe=mock_etf_universe,
+            notification=mock_notification,
+            bear_enabled=True,
+        )
+        mock_market_data.get_ohlcv.return_value = _make_ohlcv_mock(50.0)
+
+        # Set bull then switch to bear
+        await engine._manage_regime_etfs(MarketState(regime=MarketRegime.UPTREND))
+        mock_market_data.get_positions.return_value = []
+
+        actions = await engine._manage_regime_etfs(MarketState(regime=MarketRegime.DOWNTREND))
+        assert any("BUY" in a for a in actions)
 
     @pytest.mark.asyncio
     async def test_sideways_exits_all_leveraged(self, engine, mock_order_manager, mock_market_data):

@@ -56,6 +56,7 @@ class ETFEngine:
         notification: NotificationService | None = None,
         max_regime_etfs: int = 2,
         max_sector_etfs: int = 3,
+        bear_enabled: bool = False,
     ):
         self._market_data = market_data
         self._order_manager = order_manager
@@ -64,6 +65,9 @@ class ETFEngine:
         self._notification = notification
         self._max_regime_etfs = max_regime_etfs
         self._max_sector_etfs = max_sector_etfs
+        # Backtest shows bear ETF entries lose money in most regimes.
+        # Default: bull-only (exit to cash on downtrend, no inverse ETFs).
+        self._bear_enabled = bear_enabled
 
         # ETF-specific risk params from config
         rules = self._etf.risk_rules
@@ -145,7 +149,10 @@ class ETFEngine:
             target_etfs = self._etf.get_regime_etfs("bull")[:self._max_regime_etfs]
             exit_etfs = self._etf.get_regime_etfs("bear")
         elif regime == MarketRegime.DOWNTREND:
-            target_etfs = self._etf.get_regime_etfs("bear")[:self._max_regime_etfs]
+            if self._bear_enabled:
+                target_etfs = self._etf.get_regime_etfs("bear")[:self._max_regime_etfs]
+            else:
+                target_etfs = []  # Exit to cash, no inverse ETFs
             exit_etfs = self._etf.get_regime_etfs("bull")
         else:  # SIDEWAYS
             target_etfs = []
