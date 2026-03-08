@@ -157,22 +157,6 @@ async def lifespan(app: FastAPI):
         stock_profiles=stock_profiles,
     )
 
-    # Evaluation loop
-    indicator_svc = app.state.indicator_svc
-    combiner = app.state.combiner
-    evaluation_loop = EvaluationLoop(
-        adapter=adapter,
-        market_data=market_data,
-        indicator_svc=indicator_svc,
-        registry=registry,
-        combiner=combiner,
-        order_manager=order_manager,
-        risk_manager=risk_manager,
-        adaptive_weights=adaptive_weights,
-        risk_agent=risk_agent,
-    )
-    app.state.evaluation_loop = evaluation_loop
-
     # Portfolio manager
     session_factory = get_session_factory(config.database)
     portfolio_manager = PortfolioManager(
@@ -225,6 +209,22 @@ async def lifespan(app: FastAPI):
         ai_agent=ai_agent,
     )
     app.state.scanner_pipeline = scanner_pipeline
+
+    # Evaluation loop (after agents — risk_agent used for pre-trade check)
+    indicator_svc = app.state.indicator_svc
+    combiner = app.state.combiner
+    evaluation_loop = EvaluationLoop(
+        adapter=adapter,
+        market_data=market_data,
+        indicator_svc=indicator_svc,
+        registry=registry,
+        combiner=combiner,
+        order_manager=order_manager,
+        risk_manager=risk_manager,
+        adaptive_weights=adaptive_weights,
+        risk_agent=risk_agent,
+    )
+    app.state.evaluation_loop = evaluation_loop
 
     # Stock scanner & sector analyzer
     stock_scanner = StockScanner(adapter=adapter, market_data=market_data)

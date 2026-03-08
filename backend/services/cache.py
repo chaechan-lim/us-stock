@@ -65,7 +65,11 @@ class CacheService:
     async def get_json(self, key: str) -> dict | None:
         raw = await self.get(key)
         if raw:
-            return json.loads(raw)
+            try:
+                return json.loads(raw)
+            except (json.JSONDecodeError, TypeError):
+                logger.warning("Invalid JSON in cache key %s, ignoring", key)
+                return None
         return None
 
     async def set_json(self, key: str, value: dict, ex: int | None = None) -> bool:

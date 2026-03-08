@@ -62,7 +62,7 @@ class TestMetricsCalculation:
         _seed_trades(tracker, "winner", wins=10, losses=0)
         metrics = tracker.get_metrics("winner")
         assert metrics.win_rate == 1.0
-        assert metrics.profit_factor == float("inf")
+        assert metrics.profit_factor == 10.0  # capped at 10.0
 
     def test_all_losses(self, tracker):
         _seed_trades(tracker, "loser", wins=0, losses=10)

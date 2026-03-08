@@ -331,8 +331,8 @@ class KISWebSocket:
                     self._reconnect_delay = min(
                         self._reconnect_delay * 2, MAX_RECONNECT_DELAY_SEC,
                     )
+                    subs_copy = list(self._subscriptions)
                     try:
-                        subs_copy = list(self._subscriptions)
                         self._subscriptions.clear()
                         self._ws = None
                         await self.connect()
@@ -340,6 +340,8 @@ class KISWebSocket:
                             symbol, dtype = sub_key.split(":", 1)
                             await self.subscribe(symbol, dtype)
                     except Exception as e:
+                        # Restore subscriptions list so next reconnect can retry
+                        self._subscriptions = set(subs_copy)
                         logger.error("Reconnection failed: %s", e)
                 break
 
@@ -371,10 +373,13 @@ class KISWebSocket:
                             "volume": float(fields[3]) if len(fields) > 3 else 0,
                         }
                         for cb in self._callbacks["price"]:
-                            if asyncio.iscoroutinefunction(cb):
-                                await cb(price_data)
-                            else:
-                                cb(price_data)
+                            try:
+                                if asyncio.iscoroutinefunction(cb):
+                                    await cb(price_data)
+                                else:
+                                    cb(price_data)
+                            except Exception as cb_err:
+                                logger.error("WS callback error: %s", cb_err)
 
             else:
                 data = json.loads(raw)

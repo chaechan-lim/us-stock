@@ -16,8 +16,8 @@ def get_engine(config: DatabaseConfig | None = None):
         _engine = create_async_engine(
             config.url,
             echo=config.echo,
-            pool_size=5,
-            max_overflow=10,
+            pool_size=10,
+            max_overflow=20,
         )
     return _engine
 

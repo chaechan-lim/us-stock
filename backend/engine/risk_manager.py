@@ -244,6 +244,8 @@ class RiskManager:
         Trailing stop activates after price rises by activation_pct
         from entry, then triggers if price drops trail_pct from peak.
         """
+        if entry_price <= 0 or highest_price <= 0:
+            return False
         gain_from_entry = (highest_price - entry_price) / entry_price
         if gain_from_entry < activation_pct:
             return False  # Not yet activated

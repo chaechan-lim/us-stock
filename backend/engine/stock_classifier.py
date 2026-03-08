@@ -102,6 +102,8 @@ class StockClassifier:
         x = np.arange(n)
         # R-squared of linear fit
         correlation = np.corrcoef(x, prices)[0, 1]
+        if np.isnan(correlation):
+            return 0.0
         r_squared = correlation ** 2
         # Directional: positive slope = positive score
         slope = np.polyfit(x, prices, 1)[0]
