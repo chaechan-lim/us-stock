@@ -48,3 +48,7 @@ docker-compose.override.yml
 # Logs
 *.log
 logs/
+nohup.out
+
+# MCP (local paths per machine)
+.mcp.json

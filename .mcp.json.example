@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "us-stock": {
+      "command": "${PROJECT_ROOT}/venv/bin/python",
+      "args": ["${PROJECT_ROOT}/backend/mcp_server.py"],
+      "cwd": "${PROJECT_ROOT}/backend",
+      "env": {
+        "USSTOCK_API_URL": "http://localhost:8001",
+        "PYTHONPATH": "${PROJECT_ROOT}/backend"
+      }
+    }
+  }
+}
