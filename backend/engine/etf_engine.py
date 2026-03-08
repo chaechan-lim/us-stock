@@ -56,7 +56,9 @@ class ETFEngine:
         notification: NotificationService | None = None,
         max_regime_etfs: int = 2,
         max_sector_etfs: int = 3,
-        bear_enabled: bool = False,
+        bear_min_distance_pct: float = -5.0,
+        bear_min_confidence: float = 0.7,
+        bear_size_ratio: float = 0.4,
     ):
         self._market_data = market_data
         self._order_manager = order_manager
@@ -65,9 +67,12 @@ class ETFEngine:
         self._notification = notification
         self._max_regime_etfs = max_regime_etfs
         self._max_sector_etfs = max_sector_etfs
-        # Backtest shows bear ETF entries lose money in most regimes.
-        # Default: bull-only (exit to cash on downtrend, no inverse ETFs).
-        self._bear_enabled = bear_enabled
+        # Bear (inverse) ETF entry conditions — stricter than bull.
+        # Backtest: naive bear entry loses money on regime whipsaws.
+        # Require SPY to be clearly below SMA200 and high confidence.
+        self._bear_min_distance = bear_min_distance_pct  # SPY must be this % below SMA200
+        self._bear_min_confidence = bear_min_confidence  # MarketState confidence threshold
+        self._bear_size_ratio = bear_size_ratio  # Position size = bull size × this ratio
 
         # ETF-specific risk params from config
         rules = self._etf.risk_rules
@@ -122,9 +127,9 @@ class ETFEngine:
     async def _manage_regime_etfs(self, state: MarketState) -> list[str]:
         """Switch leveraged ETFs based on market regime.
 
-        - strong_uptrend/uptrend: Buy bull ETFs (TQQQ, SOXL)
-        - downtrend: Sell bull, buy bear ETFs (SQQQ, SOXS)
-        - sideways: Exit all leveraged, hold neutral
+        Bull entry: SPY above SMA200 (confirmed) → buy TQQQ, SOXL
+        Bear entry: SPY below SMA200 by >3%, confidence >0.7, half-size → buy SQQQ, SOXS
+        Sideways: exit all leveraged to cash
         """
         actions = []
         regime = state.regime
@@ -134,8 +139,9 @@ class ETFEngine:
             return actions
 
         logger.info(
-            "Regime change: %s -> %s (confidence=%.2f)",
+            "Regime change: %s -> %s (confidence=%.2f, SPY dist=%.1f%%)",
             self._last_regime, regime.value, state.confidence,
+            state.spy_distance_pct,
         )
 
         # Get current positions
@@ -144,18 +150,38 @@ class ETFEngine:
         held_symbols = {p.symbol for p in positions}
         current_count = len(positions)
 
-        # Determine target ETFs based on regime
+        # Determine target direction and ETFs
+        target_etfs: list[str] = []
+        exit_etfs: list[str] = []
+        is_bear_entry = False
+
         if regime in (MarketRegime.STRONG_UPTREND, MarketRegime.UPTREND):
             target_etfs = self._etf.get_regime_etfs("bull")[:self._max_regime_etfs]
             exit_etfs = self._etf.get_regime_etfs("bear")
         elif regime == MarketRegime.DOWNTREND:
-            if self._bear_enabled:
-                target_etfs = self._etf.get_regime_etfs("bear")[:self._max_regime_etfs]
-            else:
-                target_etfs = []  # Exit to cash, no inverse ETFs
+            # Always exit bull positions on downtrend
             exit_etfs = self._etf.get_regime_etfs("bull")
+            # Bear (inverse) entry requires stricter conditions:
+            #   1. SPY must be clearly below SMA200 (distance < threshold)
+            #   2. High confidence from MarketStateDetector
+            if (state.spy_distance_pct <= self._bear_min_distance
+                    and state.confidence >= self._bear_min_confidence):
+                target_etfs = self._etf.get_regime_etfs("bear")[:self._max_regime_etfs]
+                is_bear_entry = True
+                logger.info(
+                    "Bear entry qualified: SPY dist=%.1f%% (threshold=%.1f%%), "
+                    "confidence=%.2f (threshold=%.2f)",
+                    state.spy_distance_pct, self._bear_min_distance,
+                    state.confidence, self._bear_min_confidence,
+                )
+            else:
+                logger.info(
+                    "Bear entry skipped: SPY dist=%.1f%% (need <=%.1f%%), "
+                    "confidence=%.2f (need >=%.2f) — exit to cash",
+                    state.spy_distance_pct, self._bear_min_distance,
+                    state.confidence, self._bear_min_confidence,
+                )
         else:  # SIDEWAYS
-            target_etfs = []
             exit_etfs = (
                 self._etf.get_regime_etfs("bull")
                 + self._etf.get_regime_etfs("bear")
@@ -186,8 +212,10 @@ class ETFEngine:
                         continue
                     price = float(df.iloc[-1]["close"])
 
-                    # ETF-specific position size
+                    # Position sizing: bear entries use reduced size
                     max_alloc = balance.total * self._risk.max_single_etf_pct
+                    if is_bear_entry:
+                        max_alloc *= self._bear_size_ratio
                     alloc = min(max_alloc, balance.available * 0.9)
                     if alloc < price:
                         continue
@@ -206,8 +234,9 @@ class ETFEngine:
                         reason=f"regime_{regime.value}",
                     )
                     current_count += 1
-                    actions.append(f"BUY {sym} (regime={regime.value})")
-                    logger.info("ETF Engine: BUY %s on regime %s", sym, regime.value)
+                    size_note = f" (half-size)" if is_bear_entry else ""
+                    actions.append(f"BUY {sym} (regime={regime.value}){size_note}")
+                    logger.info("ETF Engine: BUY %s on regime %s%s", sym, regime.value, size_note)
                 except Exception as e:
                     logger.warning("ETF Engine: failed to buy %s: %s", sym, e)
 
@@ -403,5 +432,10 @@ class ETFEngine:
                 "max_hold_days": self._risk.max_hold_days,
                 "max_portfolio_pct": self._risk.max_portfolio_pct,
                 "max_single_etf_pct": self._risk.max_single_etf_pct,
+            },
+            "bear_config": {
+                "min_distance_pct": self._bear_min_distance,
+                "min_confidence": self._bear_min_confidence,
+                "size_ratio": self._bear_size_ratio,
             },
         }

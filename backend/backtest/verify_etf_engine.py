@@ -66,10 +66,10 @@ TOP_SECTOR_MIN_SCORE = 60
 
 # Variant configs for parameter sensitivity testing
 REGIME_VARIANTS = {
-    "default": {"max_hold": 10, "bear_enabled": True, "max_pairs": 2, "confirmation": 2},
-    "long_hold": {"max_hold": 30, "bear_enabled": True, "max_pairs": 2, "confirmation": 2},
-    "bull_only": {"max_hold": 30, "bear_enabled": False, "max_pairs": 2, "confirmation": 2},
-    "conservative": {"max_hold": 20, "bear_enabled": False, "max_pairs": 1, "confirmation": 3},
+    "default": {"max_hold": 10, "bear_mode": "always", "max_pairs": 2, "confirmation": 2, "bear_dist": 0, "bear_size": 1.0},
+    "bull_only": {"max_hold": 30, "bear_mode": "never", "max_pairs": 2, "confirmation": 2, "bear_dist": 0, "bear_size": 1.0},
+    "smart_bear": {"max_hold": 20, "bear_mode": "qualified", "max_pairs": 2, "confirmation": 2, "bear_dist": -3.0, "bear_size": 0.5},
+    "strict_bear": {"max_hold": 20, "bear_mode": "qualified", "max_pairs": 1, "confirmation": 3, "bear_dist": -5.0, "bear_size": 0.4},
 }
 
 
@@ -169,14 +169,19 @@ def simulate_regime_switching(
     initial_equity: float = 100_000,
     max_pairs: int = MAX_REGIME_ETFS,
     max_hold_days: int = MAX_HOLD_DAYS_LEVERAGED,
-    bear_enabled: bool = True,
+    bear_mode: str = "always",  # "always", "never", "qualified"
+    bear_min_distance: float = -3.0,  # SPY % below SMA200 threshold
+    bear_size_ratio: float = 1.0,  # bear position size vs bull
     confirmation_days: int = 2,
 ) -> ETFSimResult:
     """Simulate regime-based leveraged ETF switching.
 
     Logic:
     - SPY > SMA200 for N days → Bull regime → Buy bull ETFs (TQQQ, SOXL)
-    - SPY < SMA200 for N days → Bear regime → Sell bull, optionally buy bear ETFs
+    - SPY < SMA200 for N days → Bear regime → depends on bear_mode:
+        - "always": always enter bear ETFs
+        - "never": exit to cash, no inverse ETFs
+        - "qualified": only enter when SPY distance < threshold & high confidence
     - Leveraged ETFs held > max_hold_days → Force sell and re-enter
     """
     detector = MarketStateDetector(confirmation_days=confirmation_days)
@@ -217,7 +222,18 @@ def simulate_regime_switching(
         if regime in (MarketRegime.STRONG_UPTREND, MarketRegime.UPTREND):
             target_dir = "bull"
         elif regime == MarketRegime.DOWNTREND:
-            target_dir = "bear" if bear_enabled else "neutral"
+            if bear_mode == "always":
+                target_dir = "bear"
+            elif bear_mode == "qualified":
+                # Only enter bear if SPY is sufficiently below SMA200
+                # and MarketState has high confidence
+                if (state.spy_distance_pct <= bear_min_distance
+                        and state.confidence >= 0.7):
+                    target_dir = "bear"
+                else:
+                    target_dir = "neutral"
+            else:  # "never"
+                target_dir = "neutral"
         else:
             target_dir = "neutral"
 
@@ -261,7 +277,10 @@ def simulate_regime_switching(
 
                     price = float(df.loc[date, "close"])
                     buy_price = price * (1 + SLIPPAGE_PCT / 100)
-                    alloc = min(equity * MAX_SINGLE_ETF_PCT, cash * 0.9)
+                    max_alloc = equity * MAX_SINGLE_ETF_PCT
+                    if target_dir == "bear":
+                        max_alloc *= bear_size_ratio
+                    alloc = min(max_alloc, cash * 0.9)
                     qty = int(alloc / buy_price)
                     if qty <= 0:
                         continue
@@ -608,13 +627,15 @@ def main():
                 spy_data, all_data,
                 max_pairs=cfg["max_pairs"],
                 max_hold_days=cfg["max_hold"],
-                bear_enabled=cfg["bear_enabled"],
+                bear_mode=cfg["bear_mode"],
+                bear_min_distance=cfg["bear_dist"],
+                bear_size_ratio=cfg["bear_size"],
                 confirmation_days=cfg["confirmation"],
             )
             regime_results[variant_name] = result
             label = (
                 f"REGIME [{variant_name}] hold={cfg['max_hold']}d "
-                f"bear={'on' if cfg['bear_enabled'] else 'off'} "
+                f"bear={cfg['bear_mode']} "
                 f"pairs={cfg['max_pairs']} confirm={cfg['confirmation']}d"
             )
             print_result(result, label)
@@ -638,7 +659,7 @@ def main():
             print(f"  Regime [{name:13s}]: CAGR {m.cagr:+6.1%} "
                   f"(alpha {alpha:+.1%}) Sharpe {m.sharpe_ratio:5.2f} "
                   f"MDD {m.max_drawdown_pct:6.1f}% "
-                  f"(hold={cfg['max_hold']}d bear={'Y' if cfg['bear_enabled'] else 'N'})")
+                  f"(hold={cfg['max_hold']}d bear={cfg['bear_mode']})")
     if sector_result:
         alpha = sector_result.metrics.cagr - bench.cagr
         print(f"  Sector Rotation   : CAGR {sector_result.metrics.cagr:+6.1%} "
