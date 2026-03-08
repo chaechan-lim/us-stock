@@ -74,7 +74,7 @@
 │  │                    Intelligence Layer                         │   │
 │  │  ┌────────────┐ ┌────────────┐ ┌────────────┐               │   │
 │  │  │ Scanner    │ │ Sector     │ │ AI Agent   │               │   │
-│  │  │ Service    │ │ Analyzer   │ │ (Claude)   │               │   │
+│  │  │ Service    │ │ Analyzer   │ │(LLMClient) │               │   │
 │  │  └────────────┘ └────────────┘ └────────────┘               │   │
 │  └──────────────────────────────────────────────────────────────┘   │
 │                                                                     │
@@ -99,7 +99,7 @@
 | KIS API | python-kis (Soju06) + 자체 래퍼 | WebSocket + REST |
 | 기술분석 | pandas-ta, ta-lib | 지표 계산 |
 | 외부데이터 | yfinance, fredapi | 주가, 경제지표 |
-| AI Agent | anthropic (Claude API) | 시장분석, 매매 리뷰 |
+| AI Agent | anthropic + google-genai | 시장분석, 매매 리뷰 (멀티 프로바이더) |
 | Cache | Redis 7+ | 시세 캐싱, Rate limit |
 | DB | PostgreSQL 16 | 주문/포지션/백테스트 |
 | Logging | structlog | 구조화 로깅 |
@@ -232,11 +232,19 @@
 │   │   ├── indicator_service.py      # 기술적 지표 계산
 │   │   └── historical_data.py        # 과거 데이터 수집/저장
 │   │
+│   ├── services/
+│   │   ├── llm/
+│   │   │   ├── __init__.py          # LLMClient, LLMResponse, ToolCall
+│   │   │   ├── providers.py         # LLMProvider Protocol + Anthropic/Gemini
+│   │   │   └── client.py            # 멀티 프로바이더 클라이언트 (폴백 + 재시도)
+│   │   ├── cache.py                 # Redis CacheService
+│   │   ├── notification.py          # Discord/Telegram/Slack
+│   │   └── ...
+│   │
 │   ├── agents/
-│   │   ├── market_analysis.py    # 시장 상태 분류 (AI)
-│   │   ├── risk_assessment.py    # 리스크 평가 (AI)
-│   │   ├── trade_review.py       # 매매 리뷰 (AI)
-│   │   └── coordinator.py        # 에이전트 조율
+│   │   ├── market_analyst.py    # 시장 분석 (LLMClient 사용)
+│   │   ├── risk_assessment.py   # 리스크 평가 (LLMClient 사용)
+│   │   └── trade_review.py      # 매매 리뷰 (LLMClient 사용)
 │   │
 │   ├── backtest/
 │   │   ├── engine.py             # 백테스트 엔진
@@ -1685,10 +1693,11 @@ yfinance: 비공식 제한 ~2,000 req/hour
   기타:                    ~50 req/hour (보유종목 갱신)
   → 시간당 ~200 req (충분한 여유)
 
-Claude API:
+LLM API (Anthropic + Gemini 폴백):
   T1 AI 분석:              2 req/day (20종목 x 2배치)
   T4 AI 브리핑:            1 req/day
   보유종목 점검:            ~5 req/day
+  폴백 체인:               Anthropic 실패 시 Gemini 자동 전환
   → 일일 ~8 req (비용: ~$0.5/day with Haiku)
 ```
 
@@ -2179,10 +2188,14 @@ NOTIFY_PROVIDER=telegram
 NOTIFY_TELEGRAM_BOT_TOKEN=your_bot_token
 NOTIFY_TELEGRAM_CHAT_ID=your_chat_id
 
-# ===== LLM (AI Agent) =====
+# ===== LLM (AI Agent — Multi-Provider) =====
 LLM_ENABLED=true
-LLM_API_KEY=sk-ant-...
-LLM_MODEL=claude-haiku-4-5-20251001
+LLM_API_KEY=sk-ant-...                         # Anthropic API key
+LLM_MODEL=claude-haiku-4-5-20251001            # Primary model
+LLM_FALLBACK_MODEL=claude-sonnet-4-6           # Anthropic fallback
+LLM_GEMINI_API_KEY=AIza...                     # Google Gemini API key
+LLM_GEMINI_FALLBACK_MODEL=gemini-3-flash-preview  # Gemini fallback
+LLM_MAX_TOKENS=4096
 
 # ===== External Data =====
 FRED_API_KEY=your_fred_api_key          # 경제지표 (무료)

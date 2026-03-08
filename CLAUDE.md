@@ -31,7 +31,7 @@ Architecture inherited from ~/coin project (crypto trading bot).
 - Scenario tests: tests/scenarios/ (core trading flows)
 - Backtest: required before any strategy goes live
 - DB tests: aiosqlite in-memory (test isolation)
-- External APIs: always mock (KIS, yfinance, Claude)
+- External APIs: always mock (KIS, yfinance, Claude, Gemini)
 
 ### Commits & PRs
 - Conventional Commits: feat/fix/refactor/test/docs/config/ci
@@ -44,7 +44,8 @@ Architecture inherited from ~/coin project (crypto trading bot).
 - backend/engine/: Trading engine (order, position, risk management)
 - backend/scanner/: Stock scanning (3-Layer pipeline: Indicator -> yfinance -> AI)
 - backend/data/: Data services (market data, indicators, external data)
-- backend/agents/: AI agents (market analysis, risk, trade review)
+- backend/agents/: AI agents (market analysis, risk, trade review) — use LLMClient
+- backend/services/llm/: Multi-provider LLM client (Anthropic + Gemini fallback)
 - backend/api/: REST + WebSocket endpoints
 - backend/backtest/: Backtesting engine
 - config/: Strategy & ETF YAML config files
@@ -54,7 +55,11 @@ Architecture inherited from ~/coin project (crypto trading bot).
 - KIS API rate limit: 20 req/sec (real), 5 req/sec (paper) — use RateLimiter
 - KIS WebSocket: max 41 subscriptions per session, market-hours only, 4h max session
 - yfinance-first for bulk data (no rate limits), KIS reserved for orders/balance only
-- 3-Layer screening: IndicatorScreener (tech only) -> FundamentalEnricher (yfinance) -> AI (Claude)
+- 3-Layer screening: IndicatorScreener (tech only) -> FundamentalEnricher (yfinance) -> AI (LLMClient)
+- LLM multi-provider: services/llm/ — Anthropic primary -> fallback -> Gemini (auto-failover with retry)
+  - Fallback chain: claude-haiku -> claude-sonnet -> gemini-3-flash-preview
+  - Retry: 3x per model with exponential backoff (2s, 4s, 8s)
+  - All 3 agents (market_analyst, risk_assessment, trade_review) use LLMClient
 - Dual engine: US Stock Engine (individual stocks) + ETF Engine (leveraged/inverse + sector ETFs)
   - ETF Engine: engine/etf_engine.py — regime-based leveraged pair switching + sector ETF rotation
   - Leveraged pairs: TQQQ/SQQQ, SOXL/SOXS, UPRO/SPXU, TECL/TECS (auto-switch on regime change)
@@ -71,7 +76,7 @@ Architecture inherited from ~/coin project (crypto trading bot).
 - Donchian breakout: uses previous bar's channel (pandas-ta donchian includes current bar)
 - Bollinger squeeze: squeeze_min_bars=3 (daily timeframe; 6 was too strict)
 - Backtest verification: backtest/verify_strategies.py — 13 strategies × 8 stocks × 3yr
-- Scheduler tasks: 15 total (health_check, position_check, daily_reset, evaluation_loop, daily_scan, market_state_update, etf_evaluation, portfolio_snapshot, intraday_hot_scan, sector_analysis, after_hours_scan, daily_briefing, macro_update, ws_lifecycle)
+- Scheduler tasks: 16 total (health_check, position_check, daily_reset, evaluation_loop, daily_scan, market_state_update, etf_evaluation, portfolio_snapshot, intraday_hot_scan, sector_analysis, after_hours_scan, daily_briefing, macro_update, ws_lifecycle, order_reconciliation)
 
 ### Reference
 - ~/coin: Crypto trading bot (architecture reference)
