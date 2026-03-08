@@ -43,7 +43,7 @@ class StrategyMetrics:
     @property
     def has_edge(self) -> bool:
         """Strategy has positive expected value."""
-        return self.profit_factor > 1.0 and self.total_trades >= 5
+        return self.profit_factor > 1.0 and self.total_trades >= 20
 
     @property
     def kelly_inputs(self) -> tuple[float, float, float]:

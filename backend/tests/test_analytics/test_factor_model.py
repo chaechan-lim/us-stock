@@ -135,10 +135,10 @@ class TestGrowth:
         scores = model._compute_growth({}, ["AAPL"])
         assert scores["AAPL"] == 0.0
 
-    def test_growth_capped_at_100pct(self, model):
-        data = {"HYPER": {"revenueGrowth": 2.0, "earningsGrowth": 3.0}}
+    def test_growth_capped_at_200pct(self, model):
+        data = {"HYPER": {"revenueGrowth": 3.0, "earningsGrowth": 5.0}}
         scores = model._compute_growth(data, ["HYPER"])
-        assert scores["HYPER"] == 1.0  # Capped at 100%
+        assert scores["HYPER"] == 2.0  # Capped at 200%
 
     def test_negative_growth(self, model):
         data = {"DECLINING": {"revenueGrowth": -0.15, "earningsGrowth": -0.20}}
@@ -157,9 +157,9 @@ class TestProfitability:
         assert scores["AAPL"] == 0.0
 
     def test_margin_capped(self, model):
-        data = {"RICH": {"profitMargins": 0.9, "returnOnEquity": 0.8}}
+        data = {"RICH": {"profitMargins": 0.9, "returnOnEquity": 0.9}}
         scores = model._compute_profitability(data, ["RICH"])
-        assert scores["RICH"] == 0.5  # Both capped at 0.5
+        assert scores["RICH"] == 0.8  # Both capped at 0.8
 
 
 class TestGARP:

@@ -73,29 +73,29 @@ class TestMetricsCalculation:
 
 class TestEdgeDetection:
     def test_has_edge(self, tracker):
-        _seed_trades(tracker, "good", wins=7, losses=3)
+        _seed_trades(tracker, "good", wins=14, losses=6)  # 20 trades, pf > 1.0
         assert tracker.get_metrics("good").has_edge is True
 
     def test_no_edge_low_win_rate(self, tracker):
-        _seed_trades(tracker, "bad", wins=2, losses=8)
+        _seed_trades(tracker, "bad", wins=4, losses=16)  # 20 trades, pf < 1.0
         assert tracker.get_metrics("bad").has_edge is False
 
     def test_no_edge_insufficient_trades(self, tracker):
-        _seed_trades(tracker, "new", wins=3, losses=0)
-        assert tracker.get_metrics("new").has_edge is False  # < 5 trades
+        _seed_trades(tracker, "new", wins=10, losses=5)
+        assert tracker.get_metrics("new").has_edge is False  # 15 < 20 trades
 
 
 class TestStrategyGating:
     def test_active_strategies(self, tracker):
-        _seed_trades(tracker, "good", wins=7, losses=3)
-        _seed_trades(tracker, "bad", wins=2, losses=8)
+        _seed_trades(tracker, "good", wins=14, losses=6)  # 20 trades, pf > 1.0
+        _seed_trades(tracker, "bad", wins=4, losses=16)   # 20 trades, pf < 1.0
         active = tracker.get_active_strategies()
         assert "good" in active
         assert "bad" not in active
 
     def test_gated_strategies(self, tracker):
-        _seed_trades(tracker, "good", wins=7, losses=3)
-        _seed_trades(tracker, "bad", wins=2, losses=8)
+        _seed_trades(tracker, "good", wins=14, losses=6)  # 20 trades, pf > 1.0
+        _seed_trades(tracker, "bad", wins=4, losses=16)   # 20 trades, pf < 1.0
         gated = tracker.get_gated_strategies()
         assert "bad" in gated
         assert "good" not in gated
@@ -108,21 +108,21 @@ class TestStrategyGating:
 
 class TestStrategyWeights:
     def test_weight_proportional_to_quality(self, tracker):
-        _seed_trades(tracker, "great", wins=8, losses=2)
-        _seed_trades(tracker, "ok", wins=6, losses=4)
+        _seed_trades(tracker, "great", wins=16, losses=4)  # 20 trades
+        _seed_trades(tracker, "ok", wins=12, losses=8)      # 20 trades
         weights = tracker.get_strategy_weights()
         assert weights["great"] > weights["ok"]
 
     def test_no_edge_gets_zero_weight(self, tracker):
-        _seed_trades(tracker, "good", wins=7, losses=3)
-        _seed_trades(tracker, "bad", wins=2, losses=8)
+        _seed_trades(tracker, "good", wins=14, losses=6)   # 20 trades, pf > 1.0
+        _seed_trades(tracker, "bad", wins=4, losses=16)    # 20 trades, pf < 1.0
         weights = tracker.get_strategy_weights()
         assert weights["bad"] == 0.0
         assert weights["good"] > 0
 
     def test_weights_sum_to_one(self, tracker):
-        _seed_trades(tracker, "a", wins=7, losses=3)
-        _seed_trades(tracker, "b", wins=6, losses=4)
+        _seed_trades(tracker, "a", wins=14, losses=6)      # 20 trades
+        _seed_trades(tracker, "b", wins=12, losses=8)      # 20 trades
         weights = tracker.get_strategy_weights()
         non_zero = {k: v for k, v in weights.items() if v > 0}
         assert abs(sum(non_zero.values()) - 1.0) < 1e-9

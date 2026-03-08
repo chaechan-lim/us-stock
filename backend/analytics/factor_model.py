@@ -133,9 +133,9 @@ class MultiFactorModel:
 
             components = []
             if rev is not None:
-                components.append(min(float(rev), 1.0))  # Cap at 100%
+                components.append(min(float(rev), 2.0))  # Cap at 200%
             if earn is not None:
-                components.append(min(float(earn), 1.0))
+                components.append(min(float(earn), 2.0))
 
             scores[sym] = float(np.mean(components)) if components else 0.0
 
@@ -156,9 +156,9 @@ class MultiFactorModel:
 
             components = []
             if margin is not None:
-                components.append(min(float(margin), 0.5))  # Cap at 50%
+                components.append(min(float(margin), 0.8))  # Cap at 80%
             if roe is not None:
-                components.append(min(float(roe), 0.5))  # Cap at 50%
+                components.append(min(float(roe), 0.8))  # Cap at 80%
 
             scores[sym] = float(np.mean(components)) if components else 0.0
 
