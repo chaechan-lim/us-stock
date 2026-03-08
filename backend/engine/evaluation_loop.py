@@ -166,8 +166,8 @@ class EvaluationLoop:
         price = float(df.iloc[-1]["close"])
 
         if signal.signal_type == SignalType.BUY:
-            balance = await self._adapter.fetch_balance()
-            positions = await self._adapter.fetch_positions()
+            balance = await self._market_data.get_balance()
+            positions = await self._market_data.get_positions()
 
             await self._order_manager.place_buy(
                 symbol=symbol,
@@ -179,7 +179,7 @@ class EvaluationLoop:
             )
 
         elif signal.signal_type == SignalType.SELL:
-            positions = await self._adapter.fetch_positions()
+            positions = await self._market_data.get_positions()
             pos = next((p for p in positions if p.symbol == symbol), None)
             if pos and pos.quantity > 0:
                 await self._order_manager.place_sell(

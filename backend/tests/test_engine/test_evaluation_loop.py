@@ -43,6 +43,10 @@ def mock_adapter():
 def mock_market_data():
     svc = AsyncMock()
     svc.get_ohlcv = AsyncMock(return_value=_make_ohlcv_df())
+    svc.get_balance = AsyncMock(return_value=Balance(
+        currency="USD", total=100_000, available=80_000,
+    ))
+    svc.get_positions = AsyncMock(return_value=[])
     return svc
 
 
@@ -97,14 +101,14 @@ class TestEvaluationLoop:
         await eval_loop.evaluate_symbol("AAPL")
         mock_adapter.create_buy_order.assert_not_called()
 
-    async def test_evaluate_symbol_sell(self, eval_loop, mock_adapter, mock_registry):
+    async def test_evaluate_symbol_sell(self, eval_loop, mock_adapter, mock_registry, mock_market_data):
         # Strategy says SELL
         strategy = mock_registry.get_enabled.return_value[0]
         strategy.analyze.return_value = Signal(
             signal_type=SignalType.SELL, confidence=0.8,
             strategy_name="trend_following", reason="sell",
         )
-        mock_adapter.fetch_positions.return_value = [
+        mock_market_data.get_positions.return_value = [
             Position(symbol="AAPL", exchange="NASD", quantity=10, avg_price=140.0),
         ]
         mock_adapter.create_sell_order = AsyncMock(return_value=OrderResult(

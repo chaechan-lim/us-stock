@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from scanner.pipeline import ScannerPipeline
+from scanner.pipeline import ScannerPipeline, _fetch_yfinance_ohlcv
 from scanner.fundamental_enricher import EnrichedCandidate
 from agents.market_analyst import AIRecommendation
 
@@ -101,6 +101,13 @@ def pipeline(mock_market_data, mock_indicator_svc, mock_enricher):
     )
 
 
+@pytest.fixture(autouse=True)
+def mock_yfinance_ohlcv():
+    """Mock yfinance calls in pipeline to use test data."""
+    with patch("scanner.pipeline._fetch_yfinance_ohlcv", side_effect=lambda sym, **kw: _make_ohlcv_df()):
+        yield
+
+
 class TestScannerPipeline:
     async def test_full_pipeline(self, mock_market_data, mock_indicator_svc, mock_enricher, mock_ai_agent):
         pipe = ScannerPipeline(
@@ -161,12 +168,7 @@ class TestScannerPipeline:
     async def test_pipeline_handles_errors_gracefully(self, mock_indicator_svc, mock_enricher):
         """Pipeline should handle Layer 1 errors for individual symbols."""
         market_data = AsyncMock()
-        # First call succeeds, second raises
-        market_data.get_ohlcv = AsyncMock(side_effect=[
-            _make_ohlcv_df(),
-            Exception("API timeout"),
-            _make_ohlcv_df(),
-        ])
+        market_data.get_ohlcv = AsyncMock(return_value=_make_ohlcv_df())
         market_data.get_price = AsyncMock(return_value=150.0)
 
         pipe = ScannerPipeline(
@@ -175,9 +177,17 @@ class TestScannerPipeline:
             enricher=mock_enricher,
         )
 
-        # Should not raise, just skip the failing symbol
-        results = await pipe.run_full_scan(["AAPL", "FAIL", "MSFT"])
-        # Pipeline continues despite individual symbol failures
+        # Patch yfinance to fail for one symbol
+        call_count = 0
+        def side_effect_yf(sym, **kw):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 2:
+                raise Exception("API timeout")
+            return _make_ohlcv_df()
+
+        with patch("scanner.pipeline._fetch_yfinance_ohlcv", side_effect=side_effect_yf):
+            results = await pipe.run_full_scan(["AAPL", "FAIL", "MSFT"])
         assert isinstance(results, list)
 
     async def test_pipeline_result_structure(self, pipeline):

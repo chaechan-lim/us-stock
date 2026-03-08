@@ -1,13 +1,13 @@
 """Tests for MarketDataService with caching."""
 
 import time
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import pandas as pd
 
 from data.market_data_service import MarketDataService, TICKER_CACHE_TTL, OHLCV_CACHE_TTL
-from exchange.base import Ticker, Candle
+from exchange.base import Ticker, Candle, Balance, Position
 from services.rate_limiter import RateLimiter
 
 
@@ -56,22 +56,59 @@ class TestMarketDataService:
         await service.get_ticker("AAPL", exchange="NYSE")
         mock_adapter.fetch_ticker.assert_called_once_with("AAPL", "NYSE")
 
-    async def test_get_ohlcv(self, service, mock_adapter):
+    @patch.object(MarketDataService, "_fetch_yfinance", return_value=pd.DataFrame())
+    async def test_get_ohlcv(self, mock_yf, service, mock_adapter):
         df = await service.get_ohlcv("AAPL")
         assert isinstance(df, pd.DataFrame)
         assert len(df) == 2
         assert list(df.columns) == ["timestamp", "open", "high", "low", "close", "volume"]
         assert df.iloc[0]["close"] == 150.0
 
-    async def test_get_ohlcv_cache_hit(self, service, mock_adapter):
+    @patch.object(MarketDataService, "_fetch_yfinance", return_value=pd.DataFrame())
+    async def test_get_ohlcv_cache_hit(self, mock_yf, service, mock_adapter):
         await service.get_ohlcv("AAPL")
         await service.get_ohlcv("AAPL")
         assert mock_adapter.fetch_ohlcv.call_count == 1
 
-    async def test_get_ohlcv_empty(self, service, mock_adapter):
+    @patch.object(MarketDataService, "_fetch_yfinance", return_value=pd.DataFrame())
+    async def test_get_ohlcv_empty(self, mock_yf, service, mock_adapter):
         mock_adapter.fetch_ohlcv.return_value = []
         df = await service.get_ohlcv("UNKNOWN")
         assert df.empty
+
+    async def test_get_ohlcv_yfinance_first(self, service, mock_adapter):
+        """yfinance is tried first; KIS adapter is not called if yfinance succeeds."""
+        yf_df = pd.DataFrame({
+            "open": [100.0], "high": [105.0], "low": [99.0],
+            "close": [103.0], "volume": [1000.0],
+        })
+        with patch.object(service, "_fetch_yfinance", return_value=yf_df):
+            df = await service.get_ohlcv("AAPL")
+        assert len(df) == 1
+        assert df.iloc[0]["close"] == 103.0
+        mock_adapter.fetch_ohlcv.assert_not_called()
+
+    async def test_get_balance_cached(self, mock_adapter):
+        mock_adapter.fetch_balance = AsyncMock(return_value=Balance(
+            currency="USD", total=100_000, available=80_000,
+        ))
+        limiter = RateLimiter(max_per_second=100)
+        svc = MarketDataService(adapter=mock_adapter, rate_limiter=limiter)
+        b1 = await svc.get_balance()
+        b2 = await svc.get_balance()
+        assert b1.total == 100_000
+        assert mock_adapter.fetch_balance.call_count == 1  # cached
+
+    async def test_get_positions_cached(self, mock_adapter):
+        mock_adapter.fetch_positions = AsyncMock(return_value=[
+            Position(symbol="AAPL", exchange="NASD", quantity=10, avg_price=150.0),
+        ])
+        limiter = RateLimiter(max_per_second=100)
+        svc = MarketDataService(adapter=mock_adapter, rate_limiter=limiter)
+        p1 = await svc.get_positions()
+        p2 = await svc.get_positions()
+        assert len(p1) == 1
+        assert mock_adapter.fetch_positions.call_count == 1  # cached
 
     async def test_get_price(self, service):
         price = await service.get_price("AAPL")

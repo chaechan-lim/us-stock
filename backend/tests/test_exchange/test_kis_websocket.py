@@ -295,11 +295,13 @@ def test_get_status_disconnected(ws_client):
 
 @pytest.mark.asyncio
 async def test_close(ws_client):
-    ws_client._ws = AsyncMock()
+    mock_ws = AsyncMock()
+    ws_client._ws = mock_ws
     ws_client._running = True
     ws_client._subscriptions = {"AAPL:price"}
 
     await ws_client.close()
     assert ws_client._running is False
     assert ws_client.subscription_count == 0
-    ws_client._ws.close.assert_called_once()
+    assert ws_client._ws is None
+    mock_ws.close.assert_called_once()

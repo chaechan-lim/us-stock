@@ -138,6 +138,7 @@ async def lifespan(app: FastAPI):
         risk_manager=risk_manager,
         order_manager=order_manager,
         notification=notification,
+        market_data=market_data,
     )
     app.state.position_tracker = position_tracker
 
@@ -170,7 +171,7 @@ async def lifespan(app: FastAPI):
     # Portfolio manager
     session_factory = get_session_factory(config.database)
     portfolio_manager = PortfolioManager(
-        adapter=adapter, session_factory=session_factory,
+        market_data=market_data, session_factory=session_factory,
     )
     app.state.portfolio_manager = portfolio_manager
 
@@ -378,8 +379,8 @@ async def lifespan(app: FastAPI):
     async def task_daily_briefing():
         """T4b: Post-market daily briefing via notification."""
         try:
-            positions = await adapter.fetch_positions()
-            balance = await adapter.fetch_balance()
+            positions = await market_data.get_positions()
+            balance = await market_data.get_balance()
             daily_pnl = sum(
                 (p.current_price - p.avg_price) * p.quantity
                 for p in positions
@@ -439,6 +440,40 @@ async def lifespan(app: FastAPI):
     scheduler.add_task(
         "macro_update", task_macro_update,
         interval_sec=86400, phases=[MarketPhase.PRE_MARKET],
+    )
+
+    # WebSocket lifecycle management (market hours only)
+    async def task_ws_lifecycle():
+        """Manage KIS WebSocket connection lifecycle.
+
+        - Connect at market open, disconnect at close
+        - Refresh session if it exceeds max duration
+        - Never keep connections alive indefinitely (KIS policy)
+        """
+        if not kis_ws:
+            return
+        try:
+            from engine.scheduler import get_market_phase
+            phase = get_market_phase()
+
+            if phase == MarketPhase.REGULAR:
+                if not kis_ws.is_connected:
+                    logger.info("Market open: connecting WebSocket")
+                    await kis_ws.connect()
+                elif kis_ws.session_age_sec > kis_ws._max_session_sec:
+                    logger.info("WS session expired, refreshing")
+                    await kis_ws.refresh_session()
+            else:
+                # Non-market hours: disconnect if connected
+                if kis_ws.is_connected:
+                    logger.info("Market closed: disconnecting WebSocket")
+                    await kis_ws.close()
+        except Exception as e:
+            logger.error("WS lifecycle error: %s", e)
+
+    scheduler.add_task(
+        "ws_lifecycle", task_ws_lifecycle,
+        interval_sec=300, phases=None,  # always — manages its own phase logic
     )
 
     app.state.scheduler = scheduler

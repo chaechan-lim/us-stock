@@ -8,6 +8,7 @@ import logging
 from dataclasses import dataclass, field
 
 from exchange.base import ExchangeAdapter, Position
+from data.market_data_service import MarketDataService
 from engine.risk_manager import RiskManager
 from engine.order_manager import OrderManager
 
@@ -36,8 +37,10 @@ class PositionTracker:
         risk_manager: RiskManager,
         order_manager: OrderManager,
         notification=None,
+        market_data: MarketDataService | None = None,
     ):
         self._adapter = adapter
+        self._market_data = market_data
         self._risk = risk_manager
         self._orders = order_manager
         self._notification = notification
@@ -74,7 +77,10 @@ class PositionTracker:
             return []
 
         try:
-            positions = await self._adapter.fetch_positions()
+            if self._market_data:
+                positions = await self._market_data.get_positions()
+            else:
+                positions = await self._adapter.fetch_positions()
         except Exception as e:
             logger.error("Failed to fetch positions: %s", e)
             return []

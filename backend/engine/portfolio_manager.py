@@ -1,6 +1,6 @@
 """Portfolio state tracker with DB snapshots.
 
-Tracks balance, positions, equity, and PnL using live exchange data.
+Tracks balance, positions, equity, and PnL using cached market data.
 Saves periodic snapshots to the portfolio_snapshots table for
 equity curve tracking and daily PnL calculation.
 """
@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 from sqlalchemy import select, desc
 from sqlalchemy.ext.asyncio import async_sessionmaker, AsyncSession
 
-from exchange.base import ExchangeAdapter
+from data.market_data_service import MarketDataService
 from core.models import PortfolioSnapshot
 
 logger = logging.getLogger(__name__)
@@ -22,16 +22,16 @@ class PortfolioManager:
 
     def __init__(
         self,
-        adapter: ExchangeAdapter,
+        market_data: MarketDataService,
         session_factory: async_sessionmaker[AsyncSession],
     ):
-        self._adapter = adapter
+        self._market_data = market_data
         self._session_factory = session_factory
 
     async def get_summary(self) -> dict:
         """Get current portfolio state: balance, positions, total equity, unrealized PnL."""
-        balance = await self._adapter.fetch_balance()
-        positions = await self._adapter.fetch_positions()
+        balance = await self._market_data.get_balance()
+        positions = await self._market_data.get_positions()
 
         invested = sum(p.quantity * p.avg_price for p in positions)
         unrealized_pnl = sum(p.unrealized_pnl for p in positions)
@@ -58,8 +58,8 @@ class PortfolioManager:
 
     async def save_snapshot(self) -> None:
         """Save current portfolio state to portfolio_snapshots table."""
-        balance = await self._adapter.fetch_balance()
-        positions = await self._adapter.fetch_positions()
+        balance = await self._market_data.get_balance()
+        positions = await self._market_data.get_positions()
 
         invested = sum(p.quantity * p.avg_price for p in positions)
         unrealized_pnl = sum(p.unrealized_pnl for p in positions)
@@ -106,8 +106,8 @@ class PortfolioManager:
 
     async def get_daily_pnl(self) -> float:
         """Calculate today's PnL from snapshots."""
-        balance = await self._adapter.fetch_balance()
-        positions = await self._adapter.fetch_positions()
+        balance = await self._market_data.get_balance()
+        positions = await self._market_data.get_positions()
         unrealized_pnl = sum(p.unrealized_pnl for p in positions)
         current_equity = balance.total + unrealized_pnl
 

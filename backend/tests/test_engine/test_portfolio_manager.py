@@ -24,12 +24,12 @@ async def db_setup():
 
 
 @pytest.fixture
-def mock_adapter():
-    adapter = AsyncMock()
-    adapter.fetch_balance = AsyncMock(return_value=Balance(
+def mock_market_data():
+    svc = AsyncMock()
+    svc.get_balance = AsyncMock(return_value=Balance(
         currency="USD", total=100_000, available=80_000,
     ))
-    adapter.fetch_positions = AsyncMock(return_value=[
+    svc.get_positions = AsyncMock(return_value=[
         Position(
             symbol="AAPL", exchange="NASD",
             quantity=10, avg_price=150.0,
@@ -43,12 +43,12 @@ def mock_adapter():
             unrealized_pnl=50.0, unrealized_pnl_pct=2.5,
         ),
     ])
-    return adapter
+    return svc
 
 
 @pytest.fixture
-def manager(mock_adapter, db_setup):
-    return PortfolioManager(adapter=mock_adapter, session_factory=db_setup)
+def manager(mock_market_data, db_setup):
+    return PortfolioManager(market_data=mock_market_data, session_factory=db_setup)
 
 
 class TestGetSummary:
@@ -75,9 +75,9 @@ class TestGetSummary:
         assert summary["position_count"] == 2
         assert len(summary["positions"]) == 2
 
-    async def test_empty_positions(self, mock_adapter, db_setup):
-        mock_adapter.fetch_positions.return_value = []
-        mgr = PortfolioManager(adapter=mock_adapter, session_factory=db_setup)
+    async def test_empty_positions(self, mock_market_data, db_setup):
+        mock_market_data.get_positions.return_value = []
+        mgr = PortfolioManager(market_data=mock_market_data, session_factory=db_setup)
         summary = await mgr.get_summary()
 
         assert summary["invested"] == 0
@@ -121,10 +121,7 @@ class TestGetDailyPnl:
         pnl = await manager.get_daily_pnl()
         assert pnl == 0.0
 
-    async def test_calculates_from_first_snapshot(self, manager, db_setup, mock_adapter):
-        # Save a snapshot first (uses current balance which gives equity=100150)
-        # then change the adapter to return different values
-        # First, insert a baseline snapshot at earlier equity
+    async def test_calculates_from_first_snapshot(self, manager, db_setup):
         async with db_setup() as session:
             snapshot = PortfolioSnapshot(
                 total_value_usd=99_000.0,

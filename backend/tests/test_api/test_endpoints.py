@@ -101,7 +101,8 @@ class TestMarketAPI:
         assert data["symbol"] == "AAPL"
         assert data["price"] == 160.0
 
-    def test_get_chart_empty(self, client):
+    @patch("data.market_data_service.MarketDataService._fetch_yfinance", return_value=pd.DataFrame())
+    def test_get_chart_empty(self, mock_yf, client):
         resp = client.get("/api/v1/market/chart/AAPL")
         assert resp.status_code == 200
         data = resp.json()

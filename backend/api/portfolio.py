@@ -2,17 +2,17 @@
 
 from fastapi import APIRouter, Depends, Request
 
-from api.dependencies import get_adapter
-from exchange.base import ExchangeAdapter
+from api.dependencies import get_market_data
+from data.market_data_service import MarketDataService
 
 router = APIRouter(prefix="/portfolio", tags=["portfolio"])
 
 
 @router.get("/summary")
-async def portfolio_summary(adapter: ExchangeAdapter = Depends(get_adapter)):
+async def portfolio_summary(market_data: MarketDataService = Depends(get_market_data)):
     """Get portfolio summary: balance + positions + PnL."""
-    balance = await adapter.fetch_balance()
-    positions = await adapter.fetch_positions()
+    balance = await market_data.get_balance()
+    positions = await market_data.get_positions()
 
     total_position_value = sum(p.current_price * p.quantity for p in positions)
     total_unrealized_pnl = sum(p.unrealized_pnl for p in positions)
@@ -32,9 +32,9 @@ async def portfolio_summary(adapter: ExchangeAdapter = Depends(get_adapter)):
 
 
 @router.get("/positions")
-async def list_positions(adapter: ExchangeAdapter = Depends(get_adapter)):
+async def list_positions(market_data: MarketDataService = Depends(get_market_data)):
     """List all current positions."""
-    positions = await adapter.fetch_positions()
+    positions = await market_data.get_positions()
     return [
         {
             "symbol": p.symbol,
