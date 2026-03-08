@@ -37,5 +37,13 @@ async def get_chart(
     if df.empty:
         return {"symbol": symbol, "data": []}
 
-    records = df.to_dict(orient="records")
+    # Ensure timestamp column exists (yfinance uses tz-aware DatetimeIndex)
+    if "timestamp" not in df.columns and hasattr(df.index, 'date'):
+        df = df.copy()
+        idx = df.index
+        if hasattr(idx, 'tz') and idx.tz is not None:
+            idx = idx.tz_convert('UTC')
+        df["timestamp"] = [int(t.timestamp()) for t in idx]
+
+    records = df[["timestamp", "open", "high", "low", "close", "volume"]].to_dict(orient="records")
     return {"symbol": symbol, "timeframe": timeframe, "data": records}

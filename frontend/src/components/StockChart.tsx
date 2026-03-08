@@ -84,7 +84,7 @@ export default function StockChart() {
     if (!data?.data?.length || !candleSeries.current || !volumeSeries.current) return
 
     const candles: CandlestickData<Time>[] = data.data.map(d => ({
-      time: (d.timestamp / 1000) as Time,
+      time: d.timestamp as Time,
       open: d.open,
       high: d.high,
       low: d.low,
@@ -92,7 +92,7 @@ export default function StockChart() {
     }))
 
     const volumes: HistogramData<Time>[] = data.data.map(d => ({
-      time: (d.timestamp / 1000) as Time,
+      time: d.timestamp as Time,
       value: d.volume,
       color: d.close >= d.open ? '#22C55E40' : '#EF444440',
     }))
