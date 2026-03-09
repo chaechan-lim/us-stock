@@ -12,6 +12,7 @@ from sqlalchemy import (
     Text,
     BigInteger,
     Index,
+    UniqueConstraint,
 )
 from sqlalchemy import JSON as JSONB  # Use generic JSON for SQLite compatibility
 from sqlalchemy.orm import DeclarativeBase
@@ -187,7 +188,7 @@ class Watchlist(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     market = Column(String(2), nullable=False, default="US")
-    symbol = Column(String(20), nullable=False, unique=True)
+    symbol = Column(String(20), nullable=False)
     exchange = Column(String(10), nullable=False, default="NASD")
     name = Column(String(100))
     sector = Column(String(30))
@@ -198,4 +199,7 @@ class Watchlist(Base):
     added_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
-    __table_args__ = (Index("idx_watchlist_active", "is_active"),)
+    __table_args__ = (
+        UniqueConstraint("market", "symbol", name="uq_watchlist_market_symbol"),
+        Index("idx_watchlist_active", "is_active"),
+    )

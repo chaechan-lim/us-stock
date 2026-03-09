@@ -34,9 +34,11 @@ class MarketDataService:
         self,
         adapter: ExchangeAdapter,
         rate_limiter: RateLimiter | None = None,
+        yf_symbol_mapper: Any | None = None,
     ):
         self._adapter = adapter
         self._rate_limiter = rate_limiter or RateLimiter(max_per_second=20)
+        self._yf_symbol_mapper = yf_symbol_mapper  # callable: symbol -> yfinance symbol
         self._ticker_cache: dict[str, tuple[Ticker, float]] = {}
         self._ohlcv_cache: dict[str, tuple[pd.DataFrame, float]] = {}
         self._balance_cache: tuple[Balance, float] | None = None
@@ -77,7 +79,8 @@ class MarketDataService:
             return cached[0]
 
         # Try yfinance first (no rate limit)
-        df = self._fetch_yfinance(symbol, timeframe, limit)
+        yf_sym = self._yf_symbol_mapper(symbol) if self._yf_symbol_mapper else symbol
+        df = self._fetch_yfinance(yf_sym, timeframe, limit)
         if not df.empty:
             self._ohlcv_cache[cache_key] = (df, now)
             return df

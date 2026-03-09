@@ -198,3 +198,34 @@ class TestYfinanceResampling:
         daily = self._make_daily_df(60)
         # Daily should not be resampled
         assert len(daily) == 60
+
+
+class TestYfSymbolMapper:
+    """Test yf_symbol_mapper integration for KR stocks."""
+
+    async def test_kr_symbol_mapper_applied(self, mock_adapter):
+        """When yf_symbol_mapper is set, it transforms symbol for yfinance."""
+        mapper = lambda s: f"{s}.KS"
+        svc = MarketDataService(
+            adapter=mock_adapter,
+            rate_limiter=RateLimiter(max_per_second=100),
+            yf_symbol_mapper=mapper,
+        )
+        with patch.object(svc, "_fetch_yfinance", return_value=pd.DataFrame({
+            "open": [72000], "high": [73000], "low": [71000],
+            "close": [72500], "volume": [1000000],
+        })) as mock_yf:
+            df = await svc.get_ohlcv("005930")
+            # yfinance should receive the mapped symbol
+            mock_yf.assert_called_once_with("005930.KS", "1D", 200)
+            assert len(df) == 1
+            assert df.iloc[0]["close"] == 72500
+
+    async def test_no_mapper_passes_symbol_as_is(self, service):
+        """Without mapper, symbol is passed directly to yfinance."""
+        with patch.object(service, "_fetch_yfinance", return_value=pd.DataFrame({
+            "open": [150], "high": [155], "low": [149],
+            "close": [153], "volume": [500000],
+        })) as mock_yf:
+            await service.get_ohlcv("AAPL")
+            mock_yf.assert_called_once_with("AAPL", "1D", 200)

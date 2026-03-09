@@ -277,8 +277,12 @@ async def lifespan(app: FastAPI):
     app.state.fred_service = fred_service
 
     # KR engine components (separate instances, same classes)
+    from data.kr_symbol_mapper import to_yfinance as kr_to_yfinance
     kr_rate_limiter = RateLimiter(max_per_second=5 if config.is_paper else 20)
-    kr_market_data = MarketDataService(adapter=kr_adapter, rate_limiter=kr_rate_limiter)
+    kr_market_data = MarketDataService(
+        adapter=kr_adapter, rate_limiter=kr_rate_limiter,
+        yf_symbol_mapper=lambda s: kr_to_yfinance(s, "KRX"),
+    )
     kr_order_manager = OrderManager(
         adapter=kr_adapter, risk_manager=risk_manager, notification=notification,
     )
@@ -319,7 +323,7 @@ async def lifespan(app: FastAPI):
         try:
             async with session_factory() as session:
                 repo = TradeRepository(session)
-                watchlist = await repo.get_watchlist(active_only=True)
+                watchlist = await repo.get_watchlist(active_only=True, market="US")
                 symbols = [w.symbol for w in watchlist]
             if symbols:
                 evaluation_loop.set_watchlist(symbols)
@@ -406,7 +410,7 @@ async def lifespan(app: FastAPI):
         try:
             async with session_factory() as session:
                 repo = TradeRepository(session)
-                watchlist = await repo.get_watchlist(active_only=True)
+                watchlist = await repo.get_watchlist(active_only=True, market="US")
                 symbols = [w.symbol for w in watchlist]
             if symbols:
                 scan_result = await stock_scanner.run_all_scans(symbols)
@@ -505,10 +509,10 @@ async def lifespan(app: FastAPI):
         from db.trade_repository import TradeRepository
 
         try:
-            # Get existing watchlist
+            # Get existing US watchlist
             async with session_factory() as session:
                 repo = TradeRepository(session)
-                existing = await repo.get_watchlist(active_only=True)
+                existing = await repo.get_watchlist(active_only=True, market="US")
                 existing_syms = [w.symbol for w in existing]
 
             # Dynamic universe expansion
@@ -554,7 +558,7 @@ async def lifespan(app: FastAPI):
             # Update evaluation loop watchlist
             async with session_factory() as session:
                 repo = TradeRepository(session)
-                wl = await repo.get_watchlist(active_only=True)
+                wl = await repo.get_watchlist(active_only=True, market="US")
                 evaluation_loop.set_watchlist([w.symbol for w in wl])
 
             # Send scan results via Discord
@@ -776,6 +780,23 @@ async def lifespan(app: FastAPI):
 
     # ── KR market tasks ──────────────────────────────────────────────
 
+    # KR evaluation loop (same strategies, KR market data + order manager)
+    kr_evaluation_loop = EvaluationLoop(
+        adapter=kr_adapter,
+        market_data=kr_market_data,
+        indicator_svc=indicator_svc,
+        registry=registry,
+        combiner=SignalCombiner(),
+        order_manager=kr_order_manager,
+        risk_manager=risk_manager,
+        adaptive_weights=AdaptiveWeightManager(
+            alpha=adaptive_cfg.get("alpha", 0.6),
+            ema_decay=adaptive_cfg.get("ema_decay", 0.1),
+            min_signals_for_adaptation=adaptive_cfg.get("min_signals", 5),
+        ),
+    )
+    app.state.kr_evaluation_loop = kr_evaluation_loop
+
     async def task_kr_position_check():
         await kr_position_tracker.check_all()
 
@@ -800,6 +821,55 @@ async def lifespan(app: FastAPI):
             await session.commit()
         logger.debug("KR portfolio snapshot saved")
 
+    async def task_kr_evaluation_loop():
+        """KR evaluation: run strategies on KR watchlist symbols."""
+        await kr_evaluation_loop._evaluate_all()
+
+    async def task_kr_daily_scan():
+        """KR daily scan: discover stocks via KRScreener, update KR watchlist."""
+        from scanner.kr_screener import KRScreener
+        from db.trade_repository import TradeRepository
+
+        try:
+            screener = KRScreener()
+            result = screener.screen()
+            logger.info(
+                "KR scan: %d symbols discovered from %d sources",
+                result.total_discovered, len(result.sources),
+            )
+
+            if not result.symbols:
+                return
+
+            # Add top candidates to KR watchlist
+            async with session_factory() as session:
+                repo = TradeRepository(session)
+                existing = await repo.get_watchlist(active_only=True, market="KR")
+                existing_syms = {w.symbol for w in existing}
+                added = []
+                for sym in result.symbols[:30]:
+                    if sym not in existing_syms:
+                        await repo.add_to_watchlist(
+                            symbol=sym, exchange="KRX", source="scanner", market="KR",
+                        )
+                        added.append(sym)
+
+            # Update KR evaluation loop watchlist
+            async with session_factory() as session:
+                repo = TradeRepository(session)
+                wl = await repo.get_watchlist(active_only=True, market="KR")
+                kr_evaluation_loop.set_watchlist([w.symbol for w in wl])
+
+            if added:
+                logger.info("KR watchlist: +%d added (%s...)", len(added), added[:5])
+                await notification.notify_system_event(
+                    "kr_daily_scan",
+                    f"KR Daily Scan: {result.total_discovered} discovered, "
+                    f"+{len(added)} added to watchlist",
+                )
+        except Exception as e:
+            logger.error("KR daily scan failed: %s", e)
+
     scheduler.add_task(
         "kr_position_check", task_kr_position_check,
         interval_sec=60, phases=[MarketPhase.REGULAR], market="KR",
@@ -812,19 +882,34 @@ async def lifespan(app: FastAPI):
         "kr_portfolio_snapshot", task_kr_portfolio_snapshot,
         interval_sec=3600, phases=[MarketPhase.REGULAR], market="KR",
     )
+    scheduler.add_task(
+        "kr_evaluation_loop", task_kr_evaluation_loop,
+        interval_sec=300, phases=[MarketPhase.REGULAR], market="KR",
+    )
+    scheduler.add_task(
+        "kr_daily_scan", task_kr_daily_scan,
+        interval_sec=86400, phases=[MarketPhase.PRE_MARKET], market="KR",
+    )
 
     app.state.scheduler = scheduler
 
-    # Load watchlist into evaluation loop from DB
+    # Load watchlists into evaluation loops from DB
     try:
         from db.trade_repository import TradeRepository
         async with session_factory() as session:
             repo = TradeRepository(session)
-            wl = await repo.get_watchlist(active_only=True)
+            # US watchlist
+            wl = await repo.get_watchlist(active_only=True, market="US")
             symbols = [w.symbol for w in wl]
             if symbols:
                 evaluation_loop.set_watchlist(symbols)
-                logger.info("Watchlist loaded: %d symbols", len(symbols))
+                logger.info("US watchlist loaded: %d symbols", len(symbols))
+            # KR watchlist
+            kr_wl = await repo.get_watchlist(active_only=True, market="KR")
+            kr_symbols = [w.symbol for w in kr_wl]
+            if kr_symbols:
+                kr_evaluation_loop.set_watchlist(kr_symbols)
+                logger.info("KR watchlist loaded: %d symbols", len(kr_symbols))
     except Exception as e:
         logger.warning("Failed to load watchlist: %s", e)
 

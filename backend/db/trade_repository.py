@@ -103,10 +103,14 @@ class TradeRepository:
 
     # --- Watchlist ---
 
-    async def get_watchlist(self, active_only: bool = True) -> list[Watchlist]:
+    async def get_watchlist(
+        self, active_only: bool = True, market: str | None = None,
+    ) -> list[Watchlist]:
         stmt = select(Watchlist).order_by(Watchlist.added_at)
         if active_only:
             stmt = stmt.where(Watchlist.is_active == True)
+        if market:
+            stmt = stmt.where(Watchlist.market == market)
         result = await self._session.execute(stmt)
         return list(result.scalars().all())
 
@@ -117,9 +121,12 @@ class TradeRepository:
         name: str | None = None,
         sector: str | None = None,
         source: str = "manual",
+        market: str = "US",
     ) -> Watchlist:
-        # Check if already exists
-        stmt = select(Watchlist).where(Watchlist.symbol == symbol)
+        # Check if already exists (within same market)
+        stmt = select(Watchlist).where(
+            Watchlist.symbol == symbol, Watchlist.market == market,
+        )
         result = await self._session.execute(stmt)
         existing = result.scalar_one_or_none()
 
@@ -132,6 +139,7 @@ class TradeRepository:
         item = Watchlist(
             symbol=symbol,
             exchange=exchange,
+            market=market,
             name=name,
             sector=sector,
             source=source,
@@ -142,8 +150,10 @@ class TradeRepository:
         await self._session.refresh(item)
         return item
 
-    async def remove_from_watchlist(self, symbol: str) -> bool:
-        stmt = select(Watchlist).where(Watchlist.symbol == symbol)
+    async def remove_from_watchlist(self, symbol: str, market: str = "US") -> bool:
+        stmt = select(Watchlist).where(
+            Watchlist.symbol == symbol, Watchlist.market == market,
+        )
         result = await self._session.execute(stmt)
         item = result.scalar_one_or_none()
         if item:

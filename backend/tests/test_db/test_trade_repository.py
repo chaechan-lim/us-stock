@@ -152,3 +152,67 @@ async def test_get_recent_trades(repo):
 async def test_get_recent_trades_empty(repo):
     recent = await repo.get_recent_trades(hours=24)
     assert recent == []
+
+
+@pytest.mark.asyncio
+async def test_watchlist_market_filter(repo):
+    """Watchlist can be filtered by market."""
+    await repo.add_to_watchlist("AAPL", market="US")
+    await repo.add_to_watchlist("005930", exchange="KRX", market="KR")
+    await repo.add_to_watchlist("MSFT", market="US")
+
+    all_wl = await repo.get_watchlist()
+    assert len(all_wl) == 3
+
+    us_wl = await repo.get_watchlist(market="US")
+    assert len(us_wl) == 2
+    assert {w.symbol for w in us_wl} == {"AAPL", "MSFT"}
+
+    kr_wl = await repo.get_watchlist(market="KR")
+    assert len(kr_wl) == 1
+    assert kr_wl[0].symbol == "005930"
+
+
+@pytest.mark.asyncio
+async def test_watchlist_same_symbol_different_markets(repo):
+    """Same symbol code can exist in US and KR markets."""
+    await repo.add_to_watchlist("TEST01", market="US")
+    await repo.add_to_watchlist("TEST01", exchange="KRX", market="KR")
+
+    all_wl = await repo.get_watchlist()
+    assert len(all_wl) == 2
+
+    us_wl = await repo.get_watchlist(market="US")
+    assert len(us_wl) == 1
+    assert us_wl[0].market == "US"
+
+    kr_wl = await repo.get_watchlist(market="KR")
+    assert len(kr_wl) == 1
+    assert kr_wl[0].market == "KR"
+
+
+@pytest.mark.asyncio
+async def test_watchlist_remove_with_market(repo):
+    """Remove operates within correct market scope."""
+    await repo.add_to_watchlist("AAPL", market="US")
+    await repo.add_to_watchlist("005930", exchange="KRX", market="KR")
+
+    # Remove from KR market only
+    await repo.remove_from_watchlist("005930", market="KR")
+
+    us_wl = await repo.get_watchlist(market="US")
+    assert len(us_wl) == 1  # US untouched
+
+    kr_wl = await repo.get_watchlist(market="KR")
+    assert len(kr_wl) == 0
+
+
+@pytest.mark.asyncio
+async def test_watchlist_add_kr_with_market(repo):
+    """KR stocks added with correct market and exchange."""
+    item = await repo.add_to_watchlist(
+        "005930", exchange="KRX", market="KR", source="scanner",
+    )
+    assert item.market == "KR"
+    assert item.exchange == "KRX"
+    assert item.source == "scanner"
