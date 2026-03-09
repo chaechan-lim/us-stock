@@ -25,6 +25,7 @@ class Order(Base):
     __tablename__ = "orders"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
+    market = Column(String(2), nullable=False, default="US")  # US or KR
     symbol = Column(String(20), nullable=False)
     exchange = Column(String(10), nullable=False, default="NASD")
     side = Column(String(4), nullable=False)
@@ -51,6 +52,7 @@ class PositionRecord(Base):
     __tablename__ = "positions"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
+    market = Column(String(2), nullable=False, default="US")
     symbol = Column(String(20), nullable=False, unique=True)
     exchange = Column(String(10), nullable=False, default="NASD")
     quantity = Column(Float, nullable=False)
@@ -71,6 +73,7 @@ class PortfolioSnapshot(Base):
     __tablename__ = "portfolio_snapshots"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
+    market = Column(String(2), nullable=False, default="US")
     total_value_usd = Column(Float, nullable=False)
     cash_usd = Column(Float, nullable=False)
     invested_usd = Column(Float, nullable=False)
@@ -183,6 +186,7 @@ class Watchlist(Base):
     __tablename__ = "watchlist"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
+    market = Column(String(2), nullable=False, default="US")
     symbol = Column(String(20), nullable=False, unique=True)
     exchange = Column(String(10), nullable=False, default="NASD")
     name = Column(String(100))

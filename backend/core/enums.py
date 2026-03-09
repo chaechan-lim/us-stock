@@ -51,10 +51,19 @@ class TradingMode(str, Enum):
     LIVE = "live"
 
 
+class Market(str, Enum):
+    US = "US"
+    KR = "KR"
+
+
 class Exchange(str, Enum):
+    # US
     NASD = "NASD"
     NYSE = "NYSE"
     AMEX = "AMEX"
+    # KR
+    KRX = "KRX"        # KOSPI
+    KOSDAQ = "KOSDAQ"
 
 
 class RecommendGrade(str, Enum):
