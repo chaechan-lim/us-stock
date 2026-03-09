@@ -83,6 +83,17 @@ async def lifespan(app: FastAPI):
     app.state.adapter = adapter
     logger.info("Exchange adapter initialized (mode=%s)", config.trading.mode)
 
+    # KR adapter (shares same auth for live, separate paper instance)
+    if config.is_paper:
+        kr_adapter = PaperAdapter(config.trading.initial_balance_usd * 1_300)  # ~KRW
+        await kr_adapter.initialize()
+    else:
+        from exchange.kis_kr_adapter import KISKRAdapter
+        kr_adapter = KISKRAdapter(config.kis, auth)
+        await kr_adapter.initialize()
+    app.state.kr_adapter = kr_adapter
+    logger.info("KR adapter initialized (mode=%s)", config.trading.mode)
+
     # KIS WebSocket (live mode only)
     kis_ws = None
     if not config.is_paper:
@@ -264,6 +275,24 @@ async def lifespan(app: FastAPI):
     # FRED macro data service
     fred_service = FREDService(api_key=config.external.fred_api_key)
     app.state.fred_service = fred_service
+
+    # KR engine components (separate instances, same classes)
+    kr_rate_limiter = RateLimiter(max_per_second=5 if config.is_paper else 20)
+    kr_market_data = MarketDataService(adapter=kr_adapter, rate_limiter=kr_rate_limiter)
+    kr_order_manager = OrderManager(
+        adapter=kr_adapter, risk_manager=risk_manager, notification=notification,
+    )
+    kr_position_tracker = PositionTracker(
+        adapter=kr_adapter,
+        risk_manager=risk_manager,
+        order_manager=kr_order_manager,
+        notification=notification,
+        market_data=kr_market_data,
+    )
+    app.state.kr_market_data = kr_market_data
+    app.state.kr_order_manager = kr_order_manager
+    app.state.kr_position_tracker = kr_position_tracker
+    logger.info("KR engine components initialized")
 
     # Recovery manager for circuit breakers
     recovery_mgr = RecoveryManager(notification=notification)
@@ -745,6 +774,45 @@ async def lifespan(app: FastAPI):
         interval_sec=86400, phases=[MarketPhase.CLOSED],
     )
 
+    # ── KR market tasks ──────────────────────────────────────────────
+
+    async def task_kr_position_check():
+        await kr_position_tracker.check_all()
+
+    async def task_kr_order_reconciliation():
+        changes = await kr_order_manager.reconcile_all()
+        if changes:
+            logger.info("KR order reconciliation: %d status changes", len(changes))
+
+    async def task_kr_portfolio_snapshot():
+        kr_balance = await kr_market_data.get_balance()
+        kr_positions = await kr_market_data.get_positions()
+        invested = sum(p.current_price * p.quantity for p in kr_positions)
+        from core.models import PortfolioSnapshot
+        async with session_factory() as session:
+            snap = PortfolioSnapshot(
+                market="KR",
+                total_value_usd=kr_balance.total,  # KRW value in USD-named column
+                cash_usd=kr_balance.available,
+                invested_usd=invested,
+            )
+            session.add(snap)
+            await session.commit()
+        logger.debug("KR portfolio snapshot saved")
+
+    scheduler.add_task(
+        "kr_position_check", task_kr_position_check,
+        interval_sec=60, phases=[MarketPhase.REGULAR], market="KR",
+    )
+    scheduler.add_task(
+        "kr_order_reconciliation", task_kr_order_reconciliation,
+        interval_sec=120, phases=[MarketPhase.REGULAR], market="KR",
+    )
+    scheduler.add_task(
+        "kr_portfolio_snapshot", task_kr_portfolio_snapshot,
+        interval_sec=3600, phases=[MarketPhase.REGULAR], market="KR",
+    )
+
     app.state.scheduler = scheduler
 
     # Load watchlist into evaluation loop from DB
@@ -793,6 +861,7 @@ async def lifespan(app: FastAPI):
         await kis_ws.close()
     await cache.close()
     await adapter.close()
+    await kr_adapter.close()
     await engine.dispose()
     logger.info("Application shutdown complete")
 

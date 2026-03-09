@@ -60,6 +60,36 @@ def get_market_phase(now: datetime | None = None) -> MarketPhase:
         return MarketPhase.CLOSED
 
 
+def get_kr_market_phase(now: datetime | None = None) -> MarketPhase:
+    """Get current KR market phase based on KST time.
+
+    KR market hours (KST):
+      Pre-market:    08:00 ~ 09:00
+      Regular:       09:00 ~ 15:30
+      After-hours:   15:30 ~ 18:00
+      Closed:        18:00 ~ 08:00
+    """
+    if now is None:
+        now = datetime.now(KST)
+    else:
+        now = now.astimezone(KST)
+
+    t = now.time()
+    weekday = now.weekday()
+
+    if weekday >= 5:
+        return MarketPhase.CLOSED
+
+    if time(8, 0) <= t < time(9, 0):
+        return MarketPhase.PRE_MARKET
+    elif time(9, 0) <= t < time(15, 30):
+        return MarketPhase.REGULAR
+    elif time(15, 30) <= t < time(18, 0):
+        return MarketPhase.AFTER_HOURS
+    else:
+        return MarketPhase.CLOSED
+
+
 def is_market_open(now: datetime | None = None) -> bool:
     return get_market_phase(now) == MarketPhase.REGULAR
 
@@ -74,6 +104,7 @@ class TaskEntry:
         interval_sec: int,
         phases: list[MarketPhase] | None = None,
         recovery=None,
+        market: str = "US",
     ):
         self.name = name
         self.fn = fn
@@ -81,12 +112,16 @@ class TaskEntry:
         self.phases = phases  # None = always run
         self.last_run: datetime | None = None
         self.recovery = recovery  # Optional TaskRecovery wrapper
+        self.market = market  # "US" or "KR"
 
     def should_run(self, now: datetime) -> bool:
         if self.last_run and (now - self.last_run).total_seconds() < self.interval_sec:
             return False
         if self.phases is not None:
-            phase = get_market_phase(now)
+            if self.market == "KR":
+                phase = get_kr_market_phase(now)
+            else:
+                phase = get_market_phase(now)
             if phase not in self.phases:
                 return False
         return True
@@ -109,6 +144,7 @@ class TradingScheduler:
         phases: list[MarketPhase] | None = None,
         max_retries: int = 2,
         failure_threshold: int = 5,
+        market: str = "US",
     ) -> None:
         """Register a periodic task."""
         recovery = None
@@ -119,10 +155,12 @@ class TradingScheduler:
                 failure_threshold=failure_threshold,
             )
 
-        self._tasks.append(TaskEntry(name, fn, interval_sec, phases, recovery))
+        self._tasks.append(TaskEntry(name, fn, interval_sec, phases, recovery, market))
+        phase_str = [p.value for p in phases] if phases else "always"
+        market_str = f" [{market}]" if market != "US" else ""
         logger.info(
-            "Scheduled task: %s (every %ds, phases=%s)",
-            name, interval_sec, [p.value for p in phases] if phases else "always",
+            "Scheduled task: %s (every %ds, phases=%s%s)",
+            name, interval_sec, phase_str, market_str,
         )
 
     async def start(self) -> None:
@@ -166,11 +204,15 @@ class TradingScheduler:
     def get_status(self) -> dict:
         """Get scheduler status with task info."""
         now = datetime.now(ET)
-        phase = get_market_phase(now)
+        us_phase = get_market_phase(now)
+        kr_phase = get_kr_market_phase(now)
+        kr_now = now.astimezone(KST)
         return {
             "running": self._running,
-            "market_phase": phase.value,
+            "market_phase": us_phase.value,
             "market_time_et": now.strftime("%Y-%m-%d %H:%M:%S ET"),
+            "kr_market_phase": kr_phase.value,
+            "kr_market_time_kst": kr_now.strftime("%Y-%m-%d %H:%M:%S KST"),
             "tasks": [
                 {
                     "name": t.name,
@@ -178,6 +220,7 @@ class TradingScheduler:
                     "phases": [p.value for p in t.phases] if t.phases else None,
                     "last_run": t.last_run.isoformat() if t.last_run else None,
                     "active": t.should_run(now),
+                    "market": t.market,
                     "circuit": t.recovery.circuit.get_status() if t.recovery else None,
                 }
                 for t in self._tasks
