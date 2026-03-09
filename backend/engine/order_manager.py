@@ -120,6 +120,18 @@ class OrderManager:
 
             filled_qty = int(result.filled_quantity) if result.filled_quantity else 0
 
+            # Check if order actually succeeded
+            if result.status == "failed":
+                logger.warning(
+                    "Buy order FAILED for %s %d shares @ $%.2f (%s)",
+                    symbol, sizing.quantity, price, strategy_name,
+                )
+                if self._notification:
+                    await self._notification.notify_order_rejected(
+                        symbol, "Order failed at exchange",
+                    )
+                return None
+
             order = ManagedOrder(
                 order_id=result.order_id,
                 symbol=symbol,
@@ -198,6 +210,15 @@ class OrderManager:
                 slippage = result.filled_price - price
 
             filled_qty = int(result.filled_quantity) if result.filled_quantity else 0
+
+            # Check if order actually succeeded
+            if result.status == "failed":
+                logger.warning(
+                    "Sell order FAILED for %s %d shares @ %s (%s)",
+                    symbol, quantity, f"${price:.2f}" if price else "market",
+                    strategy_name,
+                )
+                return None
 
             order = ManagedOrder(
                 order_id=result.order_id,

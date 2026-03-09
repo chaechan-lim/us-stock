@@ -206,12 +206,15 @@ class ETFEngine:
                 pos = next((p for p in positions if p.symbol == sym), None)
                 if pos and pos.quantity > 0:
                     price = float(pos.current_price) if pos.current_price else 0
-                    await self._order_manager.place_sell(
+                    sell_result = await self._order_manager.place_sell(
                         symbol=sym,
                         quantity=int(pos.quantity),
                         price=price,
                         strategy_name="etf_engine_regime",
                     )
+                    if sell_result is None:
+                        logger.warning("ETF Engine: SELL %s failed", sym)
+                        continue
                     self._managed_positions.pop(sym, None)
                     actions.append(f"SELL {sym} (regime={regime.value})")
                     logger.info("ETF Engine: SELL %s on regime %s", sym, regime.value)
@@ -233,7 +236,7 @@ class ETFEngine:
                     if alloc < price:
                         continue
 
-                    await self._order_manager.place_buy(
+                    result = await self._order_manager.place_buy(
                         symbol=sym,
                         price=price,
                         portfolio_value=balance.total,
@@ -241,6 +244,9 @@ class ETFEngine:
                         current_positions=current_count,
                         strategy_name="etf_engine_regime",
                     )
+                    if result is None:
+                        logger.warning("ETF Engine: BUY %s failed — skipping", sym)
+                        continue
                     self._managed_positions[sym] = ETFPosition(
                         symbol=sym,
                         entry_date=time.time(),
@@ -308,12 +314,15 @@ class ETFEngine:
                 pos = next((p for p in positions if p.symbol == etf_sym), None)
                 if pos and pos.quantity > 0:
                     price = float(pos.current_price) if pos.current_price else 0
-                    await self._order_manager.place_sell(
+                    sell_result = await self._order_manager.place_sell(
                         symbol=etf_sym,
                         quantity=int(pos.quantity),
                         price=price,
                         strategy_name="etf_engine_sector",
                     )
+                    if sell_result is None:
+                        logger.warning("ETF Engine: SELL %s (sector) failed", etf_sym)
+                        continue
                     self._managed_positions.pop(etf_sym, None)
                     actions.append(f"SELL {etf_sym} ({name} weak)")
 
@@ -337,7 +346,7 @@ class ETFEngine:
                 if alloc < price:
                     continue
 
-                await self._order_manager.place_buy(
+                result = await self._order_manager.place_buy(
                     symbol=etf_sym,
                     price=price,
                     portfolio_value=balance.total,
@@ -345,6 +354,9 @@ class ETFEngine:
                     current_positions=current_count,
                     strategy_name="etf_engine_sector",
                 )
+                if result is None:
+                    logger.warning("ETF Engine: BUY %s (sector) failed — skipping", etf_sym)
+                    continue
                 self._managed_positions[etf_sym] = ETFPosition(
                     symbol=etf_sym,
                     entry_date=time.time(),

@@ -1,17 +1,21 @@
 # Korean ETF Universe
 # KODEX = Samsung Asset, TIGER = Mirae Asset, KBSTAR = KB Asset
+#
+# NOTE: KIS 모의투자(paper)에서 레버리지/인버스 ETF 주문 불가 (40910000 에러)
+# Paper mode에서는 일반 ETF(KODEX 200, KODEX 코스닥150)를 사용
+# 실거래 전환 시 레버리지로 교체: bull→122630/233740, bear→114800/251340
 
 leveraged_pairs:
   KOSPI200:
-    bull: "122630"    # KODEX 레버리지
-    bear: "114800"    # KODEX 인버스
+    bull: "069500"    # KODEX 200 (paper용; live: 122630 KODEX 레버리지)
+    bear: "069500"    # KODEX 200 (paper: 인버스 미지원, live: 114800 KODEX 인버스)
     base: "069500"    # KODEX 200
-    leverage: 2
+    leverage: 1
   KOSDAQ150:
-    bull: "233740"    # KODEX 코스닥150레버리지
-    bear: "251340"    # KODEX 코스닥150선물인버스
+    bull: "229200"    # KODEX 코스닥150 (paper용; live: 233740 KODEX 코스닥150레버리지)
+    bear: "229200"    # KODEX 코스닥150 (paper: 인버스 미지원, live: 251340)
     base: "229200"    # KODEX 코스닥150
-    leverage: 2
+    leverage: 1
 
 sectors:
   반도체:
