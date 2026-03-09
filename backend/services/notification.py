@@ -458,52 +458,65 @@ class NotificationService:
     def _pct(value: float) -> str:
         return f"{value * 100:.1f}%"
 
+    # ── Symbol label helper ────────────────────────────────────────────
+
+    @staticmethod
+    def _symbol_label(symbol: str) -> str:
+        """Return 'SYMBOL (Name)' if name is known, else just 'SYMBOL'."""
+        from data.stock_name_service import get_name
+        name = get_name(symbol) or get_name(symbol, "KR")
+        return f"{symbol} ({name})" if name else symbol
+
     # ── Convenience methods ────────────────────────────────────────────
 
     async def notify_trade_executed(
         self, symbol: str, side: str, qty: int, price: float, strategy: str,
     ) -> bool:
+        label = self._symbol_label(symbol)
         return await self._dispatch(
             AlertCategory.TRADE, AlertLevel.INFO, symbol,
             "Trade Executed",
-            f"{side.upper()} {symbol} x{qty} @ ${price:,.2f} | Strategy: {strategy}",
+            f"{side.upper()} {label} x{qty} @ ${price:,.2f} | Strategy: {strategy}",
             {"side": side.upper(), "qty": qty, "price": price, "strategy": strategy},
-            {"Symbol": symbol, "Side": side.upper(), "Qty": qty,
+            {"Symbol": label, "Side": side.upper(), "Qty": qty,
              "Price": f"${price:,.2f}", "Strategy": strategy},
         )
 
     async def notify_order_rejected(self, symbol: str, reason: str) -> bool:
+        label = self._symbol_label(symbol)
         return await self._dispatch(
             AlertCategory.TRADE, AlertLevel.WARNING, symbol,
             "Order Rejected",
-            f"Order Rejected: {symbol} | Reason: {reason}",
+            f"Order Rejected: {label} | Reason: {reason}",
             {"reason": reason},
-            {"Symbol": symbol, "Reason": reason},
+            {"Symbol": label, "Reason": reason},
         )
 
     async def notify_stop_loss(
         self, symbol: str, qty: int, entry: float, exit_price: float, pnl: float,
     ) -> bool:
+        label = self._symbol_label(symbol)
         pnl_str = self._pnl_sign(pnl)
         return await self._dispatch(
             AlertCategory.POSITION, AlertLevel.WARNING, symbol,
             "Stop-Loss Triggered",
-            f"SELL {symbol} x{qty} | ${entry:,.2f} -> ${exit_price:,.2f} | P&L: {pnl_str}",
+            f"SELL {label} x{qty} | ${entry:,.2f} -> ${exit_price:,.2f} | P&L: {pnl_str}",
             {"qty": qty, "entry": entry, "exit": exit_price, "pnl": pnl},
-            {"Symbol": symbol, "Entry": f"${entry:,.2f}",
+            {"Symbol": label, "Entry": f"${entry:,.2f}",
              "Exit": f"${exit_price:,.2f}", "P&L": pnl_str},
         )
 
     async def notify_take_profit(
         self, symbol: str, qty: int, entry: float, exit_price: float, pnl: float,
     ) -> bool:
+        label = self._symbol_label(symbol)
         pnl_str = self._pnl_sign(pnl)
         return await self._dispatch(
             AlertCategory.POSITION, AlertLevel.INFO, symbol,
             "Take-Profit Hit",
-            f"SELL {symbol} x{qty} | ${entry:,.2f} -> ${exit_price:,.2f} | P&L: {pnl_str}",
+            f"SELL {label} x{qty} | ${entry:,.2f} -> ${exit_price:,.2f} | P&L: {pnl_str}",
             {"qty": qty, "entry": entry, "exit": exit_price, "pnl": pnl},
-            {"Symbol": symbol, "Entry": f"${entry:,.2f}",
+            {"Symbol": label, "Entry": f"${entry:,.2f}",
              "Exit": f"${exit_price:,.2f}", "P&L": pnl_str},
         )
 
@@ -511,14 +524,15 @@ class NotificationService:
         self, symbol: str, qty: int, entry: float, exit_price: float,
         highest: float, pnl: float,
     ) -> bool:
+        label = self._symbol_label(symbol)
         pnl_str = self._pnl_sign(pnl)
         return await self._dispatch(
             AlertCategory.POSITION, AlertLevel.WARNING, symbol,
             "Trailing-Stop Triggered",
-            f"SELL {symbol} x{qty} | Entry ${entry:,.2f} | High ${highest:,.2f} | "
+            f"SELL {label} x{qty} | Entry ${entry:,.2f} | High ${highest:,.2f} | "
             f"Exit ${exit_price:,.2f} | P&L: {pnl_str}",
             {"qty": qty, "entry": entry, "exit": exit_price, "highest": highest, "pnl": pnl},
-            {"Symbol": symbol, "Entry": f"${entry:,.2f}", "Highest": f"${highest:,.2f}",
+            {"Symbol": label, "Entry": f"${entry:,.2f}", "Highest": f"${highest:,.2f}",
              "Exit": f"${exit_price:,.2f}", "P&L": pnl_str},
         )
 
