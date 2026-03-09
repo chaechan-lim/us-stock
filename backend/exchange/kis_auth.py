@@ -40,6 +40,9 @@ class KISAuth:
         self._session: aiohttp.ClientSession | None = None
 
     async def initialize(self) -> None:
+        if self._session and not self._session.closed:
+            # Already initialized — skip to avoid session leak
+            return
         self._session = aiohttp.ClientSession()
         # Try to restore token from Redis first (avoid 1/day limit)
         if self._redis:

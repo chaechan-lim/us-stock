@@ -423,8 +423,16 @@ class KISKRAdapter(ExchangeAdapter):
             headers = self._auth.get_auth_headers(tr_id)
             async with self._session.get(url, headers=headers, params=params) as resp:
                 if resp.status >= 400:
-                    logger.warning("KIS KR HTTP %d for GET %s", resp.status, path)
-                    data = {"rt_cd": "-1", "msg1": f"HTTP {resp.status}"}
+                    # Try to parse body — KIS returns EGW00201 rate-limit as HTTP 500
+                    try:
+                        data = await resp.json()
+                    except Exception:
+                        data = {"rt_cd": "-1", "msg1": f"HTTP {resp.status}"}
+                    logger.warning("KIS KR HTTP %d for GET %s: %s", resp.status, path, data.get("msg1", ""))
+                    msg_cd = data.get("msg_cd", "")
+                    if msg_cd == "EGW00201" and attempt < max_retries - 1:
+                        await asyncio.sleep(1.0 * (attempt + 1))
+                        continue
                     if attempt < max_retries - 1:
                         await asyncio.sleep(0.3 * (attempt + 1))
                         continue
@@ -455,8 +463,15 @@ class KISKRAdapter(ExchangeAdapter):
             headers = self._auth.get_auth_headers(tr_id, hashkey)
             async with self._session.post(url, headers=headers, json=body) as resp:
                 if resp.status >= 400:
-                    logger.warning("KIS KR HTTP %d for POST %s", resp.status, path)
-                    data = {"rt_cd": "-1", "msg1": f"HTTP {resp.status}"}
+                    try:
+                        data = await resp.json()
+                    except Exception:
+                        data = {"rt_cd": "-1", "msg1": f"HTTP {resp.status}"}
+                    logger.warning("KIS KR HTTP %d for POST %s: %s", resp.status, path, data.get("msg1", ""))
+                    msg_cd = data.get("msg_cd", "")
+                    if msg_cd == "EGW00201" and attempt < max_retries - 1:
+                        await asyncio.sleep(1.0 * (attempt + 1))
+                        continue
                     if attempt < max_retries - 1:
                         await asyncio.sleep(0.3 * (attempt + 1))
                         continue

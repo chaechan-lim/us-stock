@@ -278,9 +278,9 @@ async def lifespan(app: FastAPI):
 
     # KR engine components (separate instances, same classes)
     from data.kr_symbol_mapper import to_yfinance as kr_to_yfinance
-    kr_rate_limiter = RateLimiter(max_per_second=5 if config.is_paper else 20)
+    # Share rate limiter with US — same KIS credentials, same rate limit
     kr_market_data = MarketDataService(
-        adapter=kr_adapter, rate_limiter=kr_rate_limiter,
+        adapter=kr_adapter, rate_limiter=rate_limiter,
         yf_symbol_mapper=lambda s: kr_to_yfinance(s, "KRX"),
     )
     kr_order_manager = OrderManager(
