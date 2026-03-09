@@ -41,6 +41,8 @@ class RiskConfig(BaseSettings):
     daily_loss_limit_pct: float = 0.03
     max_sector_pct: float = 0.40
     vix_threshold: float = 35.0
+    market_allocation_us: float = 0.50  # US market max share of portfolio
+    market_allocation_kr: float = 0.50  # KR market max share of portfolio
 
     model_config = {"env_prefix": "RISK_"}
 

@@ -59,9 +59,13 @@ class ETFEngine:
         bear_min_distance_pct: float = -5.0,
         bear_min_confidence: float = 0.7,
         bear_size_ratio: float = 0.4,
+        market: str = "US",
+        risk_manager: RiskManager | None = None,
     ):
         self._market_data = market_data
         self._order_manager = order_manager
+        self._market = market
+        self._risk_manager = risk_manager
         self._etf = etf_universe or ETFUniverse()
         self._sector_analyzer = sector_analyzer or SectorAnalyzer()
         self._notification = notification
@@ -108,6 +112,16 @@ class ETFEngine:
         # Fetch positions and balance once for all steps
         positions = await self._market_data.get_positions()
         balance = await self._market_data.get_balance()
+
+        # Apply market-level allocation cap
+        if self._risk_manager:
+            capped_total, capped_avail = self._risk_manager._apply_market_cap(
+                balance.total, balance.available, self._market,
+            )
+            balance = type(balance)(
+                total=capped_total, available=capped_avail,
+                locked=balance.locked, currency=balance.currency,
+            )
 
         # Step 1: Check hold-day limits on existing positions
         expired = await self._check_hold_limits(positions)

@@ -131,7 +131,14 @@ async def lifespan(app: FastAPI):
     app.state.notification = notification
 
     # Engine components
-    risk_manager = RiskManager()
+    from engine.risk_manager import RiskParams
+    risk_params = RiskParams(
+        market_allocations={
+            "US": config.risk.market_allocation_us,
+            "KR": config.risk.market_allocation_kr,
+        },
+    )
+    risk_manager = RiskManager(params=risk_params)
     order_manager = OrderManager(adapter=adapter, risk_manager=risk_manager, notification=notification, market_data=market_data)
     app.state.risk_manager = risk_manager
     app.state.order_manager = order_manager
@@ -266,6 +273,7 @@ async def lifespan(app: FastAPI):
         risk_agent=risk_agent,
         exchange_resolver=exchange_resolver,
         position_tracker=position_tracker,
+        market="US",
     )
     app.state.evaluation_loop = evaluation_loop
 
@@ -293,6 +301,8 @@ async def lifespan(app: FastAPI):
         etf_universe=etf_universe,
         sector_analyzer=sector_analyzer,
         notification=notification,
+        market="US",
+        risk_manager=risk_manager,
     )
     app.state.etf_engine = etf_engine
     logger.info("ETF Engine initialized")
@@ -344,6 +354,8 @@ async def lifespan(app: FastAPI):
         etf_universe=kr_etf_universe,
         sector_analyzer=sector_analyzer,
         notification=notification,
+        market="KR",
+        risk_manager=risk_manager,
     )
     app.state.kr_etf_engine = kr_etf_engine
     kr_market_state_detector = MarketStateDetector()
@@ -490,6 +502,7 @@ async def lifespan(app: FastAPI):
             if not spy_df.empty:
                 state = market_state_detector.detect(spy_df)
                 evaluation_loop.set_market_state(state.regime.value)
+                risk_manager.set_market_regime("US", state.regime.value)
                 logger.info(
                     "Market state: %s (SPY=%.2f, SMA200=%.2f, VIX=%.1f)",
                     state.regime.value, state.spy_price,
@@ -1020,6 +1033,7 @@ async def lifespan(app: FastAPI):
             min_signals_for_adaptation=adaptive_cfg.get("min_signals", 5),
         ),
         position_tracker=kr_position_tracker,
+        market="KR",
     )
     app.state.kr_evaluation_loop = kr_evaluation_loop
 
@@ -1113,6 +1127,7 @@ async def lifespan(app: FastAPI):
             if kospi_df.empty:
                 return
             state = kr_market_state_detector.detect(kospi_df)
+            risk_manager.set_market_regime("KR", state.regime.value)
 
             # Run KR ETF engine evaluation
             actions = await kr_etf_engine.evaluate(

@@ -59,6 +59,7 @@ class EvaluationLoop:
         risk_agent: RiskAssessmentAgent | None = None,
         exchange_resolver: ExchangeResolver | None = None,
         position_tracker=None,
+        market: str = "US",
     ):
         self._adapter = adapter
         self._market_data = market_data
@@ -78,6 +79,7 @@ class EvaluationLoop:
         self._risk_agent = risk_agent
         self._exchange_resolver = exchange_resolver or ExchangeResolver()
         self._position_tracker = position_tracker
+        self._market = market
         self._factor_scores: dict[str, FactorScores] = {}
         self._last_classify_time: dict[str, float] = {}
         self._reclassify_interval = 86400  # re-classify every 24h
@@ -248,6 +250,7 @@ class EvaluationLoop:
                 avg_loss=avg_loss,
                 signal_confidence=signal.confidence,
                 factor_score=factor_score,
+                market=self._market,
             )
 
             if not sizing.allowed:

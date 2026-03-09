@@ -23,6 +23,8 @@ class RiskParams:
     daily_loss_limit_pct: float = 0.03  # Stop trading at 3% daily loss
     default_stop_loss_pct: float = 0.08
     default_take_profit_pct: float = 0.20
+    # Market-level fund allocation (share of total portfolio)
+    market_allocations: dict[str, float] | None = None  # e.g. {"US": 0.5, "KR": 0.5}
 
 
 @dataclass
@@ -40,9 +42,58 @@ class RiskManager:
     def __init__(self, params: RiskParams | None = None):
         self._params = params or RiskParams()
         self._daily_pnl: float = 0.0
+        self._market_regimes: dict[str, str] = {}  # {"US": "bull", "KR": "sideways"}
         self._kelly = KellyPositionSizer(
             max_position_pct=self._params.max_position_pct,
         )
+
+    def set_market_regime(self, market: str, regime: str) -> None:
+        """Update market regime for dynamic allocation boost.
+
+        Args:
+            market: "US" or "KR"
+            regime: "bull", "bear", or "sideways"
+        """
+        self._market_regimes[market] = regime
+
+    def get_effective_allocation(self, market: str) -> float | None:
+        """Get effective allocation for a market, including regime boost.
+
+        Bull market gets +10% boost (from the other market's share),
+        bear market gets -10% penalty. Total always sums to ≤100%.
+        """
+        allocs = self._params.market_allocations
+        if not allocs or market not in allocs:
+            return None
+
+        base = allocs[market]
+        regime = self._market_regimes.get(market, "sideways")
+        boost = 0.0
+        if regime == "bull":
+            boost = 0.10  # Bull gets extra 10%
+        elif regime == "bear":
+            boost = -0.10  # Bear gives up 10%
+
+        effective = max(0.20, min(0.80, base + boost))  # Clamp 20%-80%
+        return effective
+
+    def _apply_market_cap(
+        self, portfolio_value: float, cash_available: float, market: str | None = None,
+    ) -> tuple[float, float]:
+        """Apply market-level allocation cap to portfolio_value and cash_available.
+
+        If market allocations are configured (e.g. US=50%, KR=50%),
+        each market can only use its share of the total portfolio for sizing.
+        Regime-aware: bull markets get a boost, bear markets get reduced.
+        """
+        if not market:
+            return portfolio_value, cash_available
+        cap_pct = self.get_effective_allocation(market)
+        if cap_pct is None:
+            return portfolio_value, cash_available
+        capped_portfolio = portfolio_value * cap_pct
+        capped_cash = min(cash_available, capped_portfolio)
+        return capped_portfolio, capped_cash
 
     def calculate_position_size(
         self,
@@ -52,8 +103,13 @@ class RiskManager:
         cash_available: float,
         current_positions: int,
         atr: float | None = None,
+        market: str | None = None,
     ) -> PositionSizeResult:
         """Calculate allowed position size given risk constraints."""
+        portfolio_value, cash_available = self._apply_market_cap(
+            portfolio_value, cash_available, market,
+        )
+
         # Check position limit
         if current_positions >= self._params.max_positions:
             return PositionSizeResult(
@@ -116,6 +172,7 @@ class RiskManager:
         avg_loss: float = 0.0,
         signal_confidence: float = 0.5,
         factor_score: float = 0.0,
+        market: str | None = None,
     ) -> PositionSizeResult:
         """Kelly-enhanced position sizing.
 
@@ -123,6 +180,10 @@ class RiskManager:
         falls back to fixed sizing otherwise. Factor score and
         signal confidence scale position size up/down.
         """
+        portfolio_value, cash_available = self._apply_market_cap(
+            portfolio_value, cash_available, market,
+        )
+
         # Standard risk checks first
         if current_positions >= self._params.max_positions:
             return PositionSizeResult(

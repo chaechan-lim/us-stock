@@ -129,3 +129,94 @@ class TestDailyPnL:
         assert rm.daily_pnl == 50.0
         rm.reset_daily()
         assert rm.daily_pnl == 0.0
+
+
+class TestMarketAllocation:
+    """Test market-level fund allocation caps."""
+
+    def _make_rm(self, us=0.5, kr=0.5):
+        return RiskManager(RiskParams(
+            market_allocations={"US": us, "KR": kr},
+        ))
+
+    def test_caps_portfolio_value(self):
+        rm = self._make_rm(us=0.5, kr=0.5)
+        result = rm.calculate_position_size(
+            symbol="AAPL", price=100.0,
+            portfolio_value=100_000, cash_available=100_000,
+            current_positions=0, market="US",
+        )
+        assert result.allowed is True
+        # Max allocation = 50,000 * 10% = 5,000 → 50 shares
+        assert result.allocation_usd <= 50_000 * 0.10 + 1
+
+    def test_no_market_param_no_cap(self):
+        rm = self._make_rm(us=0.5, kr=0.5)
+        result = rm.calculate_position_size(
+            symbol="AAPL", price=100.0,
+            portfolio_value=100_000, cash_available=100_000,
+            current_positions=0,
+        )
+        # Without market param, no cap applied → 100,000 * 10% = 10,000
+        assert result.allocation_usd <= 100_000 * 0.10 + 1
+        assert result.allocation_usd > 50_000 * 0.10
+
+    def test_kr_market_capped_separately(self):
+        rm = self._make_rm(us=0.7, kr=0.3)
+        kr_result = rm.calculate_position_size(
+            symbol="005930", price=50.0,
+            portfolio_value=100_000, cash_available=100_000,
+            current_positions=0, market="KR",
+        )
+        us_result = rm.calculate_position_size(
+            symbol="AAPL", price=50.0,
+            portfolio_value=100_000, cash_available=100_000,
+            current_positions=0, market="US",
+        )
+        # KR capped at 30% → 30,000 * 10% = 3,000
+        # US capped at 70% → 70,000 * 10% = 7,000
+        assert kr_result.allocation_usd <= 30_000 * 0.10 + 1
+        assert us_result.allocation_usd <= 70_000 * 0.10 + 1
+
+    def test_regime_boost_bull(self):
+        rm = self._make_rm(us=0.5, kr=0.5)
+        rm.set_market_regime("US", "bull")
+        eff = rm.get_effective_allocation("US")
+        assert eff == 0.60  # 50% + 10% boost
+
+    def test_regime_penalty_bear(self):
+        rm = self._make_rm(us=0.5, kr=0.5)
+        rm.set_market_regime("KR", "bear")
+        eff = rm.get_effective_allocation("KR")
+        assert eff == 0.40  # 50% - 10% penalty
+
+    def test_regime_clamp_limits(self):
+        rm = self._make_rm(us=0.8, kr=0.2)
+        rm.set_market_regime("US", "bull")
+        # 80% + 10% = 90% → clamped to 80%
+        assert rm.get_effective_allocation("US") == 0.80
+        rm.set_market_regime("KR", "bear")
+        # 20% - 10% = 10% → clamped to 20%
+        assert rm.get_effective_allocation("KR") == 0.20
+
+    def test_kelly_sizing_with_market(self):
+        rm = self._make_rm(us=0.5, kr=0.5)
+        result = rm.calculate_kelly_position_size(
+            symbol="AAPL", price=100.0,
+            portfolio_value=100_000, cash_available=100_000,
+            current_positions=0, market="US",
+        )
+        assert result.allowed is True
+        # Capped at 50% of portfolio
+        assert result.allocation_usd <= 50_000 * 0.10 + 1
+
+    def test_no_allocations_configured(self):
+        """No market_allocations → no cap applied."""
+        rm = RiskManager()
+        result = rm.calculate_position_size(
+            symbol="AAPL", price=100.0,
+            portfolio_value=100_000, cash_available=100_000,
+            current_positions=0, market="US",
+        )
+        assert result.allocation_usd <= 100_000 * 0.10 + 1
+        assert result.allocation_usd > 50_000 * 0.10
