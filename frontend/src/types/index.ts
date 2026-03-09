@@ -1,18 +1,24 @@
 export interface PortfolioSummary {
+  market: string
   balance: {
     currency: string
     total: number
     available: number
-    locked: number
+    locked?: number
   }
-  positions_count: number
-  total_position_value: number
-  total_unrealized_pnl: number
-  total_equity: number
-  krw_balance?: {
+  usd_balance?: {
     total: number
     available: number
   }
+  positions_count: number
+  total_position_value?: number
+  total_unrealized_pnl: number
+  total_unrealized_pnl_usd?: number
+  total_equity: number
+}
+
+export interface PositionWithMarket extends Position {
+  market: string
 }
 
 export interface Position {

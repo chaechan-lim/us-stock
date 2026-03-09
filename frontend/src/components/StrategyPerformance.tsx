@@ -10,7 +10,6 @@ import {
   Cell,
 } from 'recharts'
 import { useTrades } from '../hooks/useApi'
-import { useMarket } from '../contexts/MarketContext'
 import { formatCurrency } from '../utils/format'
 
 interface StrategyMetrics {
@@ -24,8 +23,8 @@ interface StrategyMetrics {
 }
 
 export default function StrategyPerformance() {
-  const { market, currency } = useMarket()
-  const { data: trades, isLoading } = useTrades(200, market)
+  const currency = 'USD'
+  const { data: trades, isLoading } = useTrades(200)
 
   const strategyMetrics = useMemo(() => {
     if (!trades || trades.length === 0) return []
@@ -62,9 +61,7 @@ export default function StrategyPerformance() {
     return metrics.sort((a, b) => b.totalPnl - a.totalPnl)
   }, [trades])
 
-  const yTickFormatter = currency === 'KRW'
-    ? (v: number) => `${(v / 10000).toFixed(0)}만`
-    : (v: number) => `$${v.toLocaleString()}`
+  const yTickFormatter = (v: number) => `$${v.toLocaleString()}`
 
   if (isLoading) {
     return <div className="text-gray-500">Loading trade data...</div>

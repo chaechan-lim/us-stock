@@ -14,7 +14,6 @@ import PortfolioChart from './PortfolioChart'
 import SectorHeatmap from './SectorHeatmap'
 import StrategyPerformance from './StrategyPerformance'
 import ETFPanel from './ETFPanel'
-import { useMarket } from '../contexts/MarketContext'
 import clsx from 'clsx'
 
 type Tab = 'dashboard' | 'positions' | 'trades' | 'chart' | 'strategies' | 'scanner' | 'watchlist' | 'logs' | 'backtest' | 'optimize' | 'portfolio' | 'sectors' | 'performance' | 'etf'
@@ -38,38 +37,11 @@ const TABS: { key: Tab; label: string }[] = [
 
 export default function App() {
   const [tab, setTab] = useState<Tab>('dashboard')
-  const { market, setMarket } = useMarket()
 
   return (
     <div className="min-h-screen bg-gray-950">
       <header className="bg-gray-900 border-b border-gray-800 px-6 py-3 flex items-center justify-between">
-        <div className="flex items-center gap-4">
-          <h1 className="text-xl font-bold text-white">Trading Engine</h1>
-          <div className="flex bg-gray-800 rounded-lg p-0.5">
-            <button
-              onClick={() => setMarket('US')}
-              className={clsx(
-                'px-3 py-1 text-xs font-medium rounded-md transition-colors',
-                market === 'US'
-                  ? 'bg-blue-600 text-white'
-                  : 'text-gray-400 hover:text-white'
-              )}
-            >
-              US
-            </button>
-            <button
-              onClick={() => setMarket('KR')}
-              className={clsx(
-                'px-3 py-1 text-xs font-medium rounded-md transition-colors',
-                market === 'KR'
-                  ? 'bg-blue-600 text-white'
-                  : 'text-gray-400 hover:text-white'
-              )}
-            >
-              KR
-            </button>
-          </div>
-        </div>
+        <h1 className="text-xl font-bold text-white">Trading Engine</h1>
         <EngineControl />
       </header>
 

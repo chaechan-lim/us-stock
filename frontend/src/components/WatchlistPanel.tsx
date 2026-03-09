@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { useWatchlist, useAddToWatchlist, useRemoveFromWatchlist } from '../hooks/useApi'
 import { useMarket } from '../contexts/MarketContext'
+import MarketToggle from './MarketToggle'
 
 export default function WatchlistPanel() {
   const { market } = useMarket()
@@ -20,7 +21,10 @@ export default function WatchlistPanel() {
 
   return (
     <div className="space-y-4">
-      <h2 className="text-lg font-semibold">Watchlist</h2>
+      <div className="flex items-center gap-3">
+        <h2 className="text-lg font-semibold">Watchlist</h2>
+        <MarketToggle />
+      </div>
 
       <div className="flex gap-2">
         <input

@@ -1,12 +1,10 @@
 import { useTrades, useTradeSummary } from '../hooks/useApi'
-import { useMarket } from '../contexts/MarketContext'
 import { formatCurrency } from '../utils/format'
 import clsx from 'clsx'
 
 export default function TradeHistory() {
-  const { market, currency } = useMarket()
-  const { data: trades, isLoading } = useTrades(100, market)
-  const { data: summary } = useTradeSummary(market)
+  const { data: trades, isLoading } = useTrades(100)
+  const { data: summary } = useTradeSummary()
 
   return (
     <div className="space-y-4">
@@ -19,7 +17,7 @@ export default function TradeHistory() {
           <StatCard label="Losses" value={String(summary.losses)} color="text-red-400" />
           <StatCard
             label="Total P&L"
-            value={formatCurrency(summary.total_pnl, currency)}
+            value={formatCurrency(summary.total_pnl, 'USD')}
             color={summary.total_pnl >= 0 ? 'text-green-400' : 'text-red-400'}
           />
           <StatCard label="Win Rate" value={`${summary.win_rate.toFixed(1)}%`} />
@@ -62,7 +60,7 @@ export default function TradeHistory() {
                   </td>
                   <td className="py-2 px-3 text-right">{t.quantity}</td>
                   <td className="py-2 px-3 text-right">
-                    {t.filled_price ? formatCurrency(t.filled_price, currency) : t.price ? formatCurrency(t.price, currency) : '-'}
+                    {t.filled_price ? formatCurrency(t.filled_price, 'USD') : t.price ? formatCurrency(t.price, 'USD') : '-'}
                   </td>
                   <td className="py-2 px-3 text-gray-400 text-xs">{t.strategy}</td>
                   <td className="py-2 px-3 text-center">
@@ -80,7 +78,7 @@ export default function TradeHistory() {
                     'text-red-400': t.pnl != null && t.pnl < 0,
                     'text-gray-500': t.pnl == null,
                   })}>
-                    {t.pnl != null ? formatCurrency(t.pnl, currency) : '-'}
+                    {t.pnl != null ? formatCurrency(t.pnl, 'USD') : '-'}
                   </td>
                 </tr>
               ))}

@@ -78,14 +78,20 @@ def client(app):
 
 class TestPortfolioAPI:
     def test_portfolio_summary(self, client):
-        resp = client.get("/api/v1/portfolio/summary")
+        resp = client.get("/api/v1/portfolio/summary", params={"market": "US"})
         assert resp.status_code == 200
         data = resp.json()
         assert data["balance"]["total"] == 100_000
         assert data["positions_count"] == 1
 
+    def test_portfolio_summary_all(self, client):
+        resp = client.get("/api/v1/portfolio/summary")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["market"] == "ALL"
+
     def test_list_positions(self, client):
-        resp = client.get("/api/v1/portfolio/positions")
+        resp = client.get("/api/v1/portfolio/positions", params={"market": "US"})
         assert resp.status_code == 200
         data = resp.json()
         assert len(data) == 1

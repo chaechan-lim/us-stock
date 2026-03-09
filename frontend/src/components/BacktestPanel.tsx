@@ -14,6 +14,7 @@ import * as api from '../api/client'
 import { useBacktestStrategies } from '../hooks/useApi'
 import { useMarket } from '../contexts/MarketContext'
 import { formatCurrency } from '../utils/format'
+import MarketToggle from './MarketToggle'
 
 interface BacktestMetrics {
   total_return_pct: number
@@ -72,7 +73,10 @@ export default function BacktestPanel() {
     <div className="space-y-6">
       {/* Controls */}
       <div className="bg-gray-900 rounded-lg p-4">
-        <h2 className="text-lg font-semibold mb-4">Backtest Configuration</h2>
+        <div className="flex items-center gap-3 mb-4">
+          <h2 className="text-lg font-semibold">Backtest Configuration</h2>
+          <MarketToggle />
+        </div>
         <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
           {/* Strategy Selector */}
           <div>

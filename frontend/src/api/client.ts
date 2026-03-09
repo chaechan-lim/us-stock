@@ -24,10 +24,10 @@ const api = axios.create({
 })
 
 // Portfolio
-export const fetchPortfolioSummary = (market = 'US') =>
+export const fetchPortfolioSummary = (market = 'ALL') =>
   api.get<PortfolioSummary>('/portfolio/summary', { params: { market } }).then(r => r.data)
 
-export const fetchPositions = (market = 'US') =>
+export const fetchPositions = (market = 'ALL') =>
   api.get<Position[]>('/portfolio/positions', { params: { market } }).then(r => r.data)
 
 // Market

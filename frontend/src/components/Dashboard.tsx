@@ -3,7 +3,6 @@ import { useQuery } from '@tanstack/react-query'
 import { usePortfolioSummary, usePositions } from '../hooks/useApi'
 import { usePriceStream } from '../hooks/usePriceStream'
 import { fetchMacroIndicators, fetchMarketState } from '../api/client'
-import { useMarket } from '../contexts/MarketContext'
 import { formatCurrency } from '../utils/format'
 
 function PnLText({ value, currency }: { value: number; currency: string }) {
@@ -13,9 +12,8 @@ function PnLText({ value, currency }: { value: number; currency: string }) {
 }
 
 export default function Dashboard() {
-  const { market, currency } = useMarket()
-  const { data: summary, isLoading } = usePortfolioSummary(market)
-  const { data: positions } = usePositions(market)
+  const { data: summary, isLoading } = usePortfolioSummary()
+  const { data: positions } = usePositions()
   const symbols = useMemo(
     () => (positions ?? []).map(p => p.symbol),
     [positions],
@@ -26,28 +24,39 @@ export default function Dashboard() {
     return <div className="text-gray-500">Loading...</div>
   }
 
+  const hasUsd = summary.usd_balance && summary.usd_balance.total > 0
+
   return (
     <div className="space-y-6">
       {/* Summary Cards */}
       <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
         <Card
           title="Total Equity"
-          value={formatCurrency(summary.total_equity, currency)}
-          sub={summary.krw_balance ? formatCurrency(summary.krw_balance.total, 'KRW') : undefined}
+          value={formatCurrency(summary.balance.total, 'KRW')}
+          sub={hasUsd ? `(${formatCurrency(summary.usd_balance!.total, 'USD')})` : undefined}
         />
         <Card
           title="Available Cash"
-          value={formatCurrency(summary.balance.available, currency)}
-          sub={summary.krw_balance ? formatCurrency(summary.krw_balance.available, 'KRW') : undefined}
+          value={formatCurrency(summary.balance.available, 'KRW')}
+          sub={hasUsd ? `(${formatCurrency(summary.usd_balance!.available, 'USD')})` : undefined}
         />
         <Card title="Positions" value={String(summary.positions_count)} />
         <Card
           title="Unrealized P&L"
-          value={<PnLText value={summary.total_unrealized_pnl} currency={currency} />}
+          value={
+            <>
+              <PnLText value={summary.total_unrealized_pnl} currency="KRW" />
+              {(summary.total_unrealized_pnl_usd ?? 0) !== 0 && (
+                <span className="text-sm ml-1">
+                  / <PnLText value={summary.total_unrealized_pnl_usd!} currency="USD" />
+                </span>
+              )}
+            </>
+          }
         />
       </div>
 
-      {/* Top Positions */}
+      {/* All Positions (US + KR) */}
       {positions && positions.length > 0 && (
         <div className="bg-gray-900 rounded-lg p-4">
           <div className="flex items-center justify-between mb-3">
@@ -63,6 +72,7 @@ export default function Dashboard() {
             <thead className="text-gray-400 border-b border-gray-800">
               <tr>
                 <th className="text-left py-2">Symbol</th>
+                <th className="text-center py-2">Mkt</th>
                 <th className="text-right py-2">Qty</th>
                 <th className="text-right py-2">Avg Price</th>
                 <th className="text-right py-2">Current</th>
@@ -72,6 +82,8 @@ export default function Dashboard() {
             </thead>
             <tbody>
               {positions.map(p => {
+                const mkt = (p as { market?: string }).market ?? 'US'
+                const cur = mkt === 'KR' ? 'KRW' : 'USD'
                 const live = prices[p.symbol]
                 const currentPrice = live?.price ?? p.current_price
                 const pnl = (currentPrice - p.avg_price) * p.quantity
@@ -81,14 +93,19 @@ export default function Dashboard() {
                 return (
                   <tr key={p.symbol} className="border-b border-gray-800/50">
                     <td className="py-2 font-medium">{p.symbol}</td>
+                    <td className="py-2 text-center">
+                      <span className={`text-xs px-1.5 py-0.5 rounded ${mkt === 'KR' ? 'bg-purple-900/40 text-purple-300' : 'bg-blue-900/40 text-blue-300'}`}>
+                        {mkt}
+                      </span>
+                    </td>
                     <td className="text-right">{p.quantity}</td>
-                    <td className="text-right">{formatCurrency(p.avg_price, currency)}</td>
-                    <td className="text-right">{formatCurrency(currentPrice, currency)}</td>
+                    <td className="text-right">{formatCurrency(p.avg_price, cur)}</td>
+                    <td className="text-right">{formatCurrency(currentPrice, cur)}</td>
                     <td className="text-right">
-                      <PnLText value={pnl} currency={currency} />
+                      <PnLText value={pnl} currency={cur} />
                     </td>
                     <td className="text-right">
-                      <PnLText value={pnlPct} currency={currency} />
+                      <PnLText value={pnlPct} currency={cur} />
                     </td>
                   </tr>
                 )

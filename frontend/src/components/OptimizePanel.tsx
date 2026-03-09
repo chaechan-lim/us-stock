@@ -4,6 +4,7 @@ import clsx from 'clsx'
 import * as api from '../api/client'
 import { useBacktestStrategies } from '../hooks/useApi'
 import { useMarket } from '../contexts/MarketContext'
+import MarketToggle from './MarketToggle'
 
 interface PerSymbolResult {
   symbol: string
@@ -23,7 +24,7 @@ interface OptimizeResult {
 }
 
 export default function OptimizePanel() {
-  const { market } = useMarket()
+  useMarket() // keep context for MarketToggle
   const { data: strategies, isLoading: loadingStrategies } = useBacktestStrategies()
   const [strategyName, setStrategyName] = useState('')
 
@@ -44,7 +45,10 @@ export default function OptimizePanel() {
     <div className="space-y-6">
       {/* Run Optimization */}
       <div className="bg-gray-900 rounded-lg p-4">
-        <h2 className="text-lg font-semibold mb-4">Run Optimization ({market})</h2>
+        <div className="flex items-center gap-3 mb-4">
+          <h2 className="text-lg font-semibold">Run Optimization</h2>
+          <MarketToggle />
+        </div>
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
           {/* Strategy Selector */}
           <div>

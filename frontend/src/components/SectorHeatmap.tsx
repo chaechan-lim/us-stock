@@ -2,6 +2,7 @@ import { useQuery } from '@tanstack/react-query'
 import clsx from 'clsx'
 import * as api from '../api/client'
 import { useMarket } from '../contexts/MarketContext'
+import MarketToggle from './MarketToggle'
 
 interface SectorData {
   sector: string
@@ -47,8 +48,14 @@ export default function SectorHeatmap() {
 
   if (market === 'KR') {
     return (
-      <div className="bg-gray-900 rounded-lg p-8 text-center">
-        <p className="text-gray-500">Sector heatmap is available for US market only.</p>
+      <div className="space-y-4">
+        <div className="flex items-center gap-3">
+          <h2 className="text-lg font-semibold">Sector Heatmap</h2>
+          <MarketToggle />
+        </div>
+        <div className="bg-gray-900 rounded-lg p-8 text-center">
+          <p className="text-gray-500">Sector heatmap is available for US market only.</p>
+        </div>
       </div>
     )
   }
@@ -72,7 +79,10 @@ export default function SectorHeatmap() {
   return (
     <div className="space-y-6">
       <div className="bg-gray-900 rounded-lg p-4">
-        <h2 className="text-lg font-semibold mb-4">Sector Performance</h2>
+        <div className="flex items-center gap-3 mb-4">
+          <h2 className="text-lg font-semibold">Sector Performance</h2>
+          <MarketToggle />
+        </div>
 
         {sectors.length === 0 ? (
           <p className="text-gray-500 text-center py-8">No sector data available.</p>

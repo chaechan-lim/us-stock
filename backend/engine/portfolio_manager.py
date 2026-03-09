@@ -134,7 +134,7 @@ class PortfolioManager:
 
         return [
             {
-                "recorded_at": s.recorded_at.isoformat() if s.recorded_at else None,
+                "date": s.recorded_at.strftime("%Y-%m-%d %H:%M") if s.recorded_at else None,
                 "total_value_usd": s.total_value_usd,
                 "cash_usd": s.cash_usd,
                 "invested_usd": s.invested_usd,

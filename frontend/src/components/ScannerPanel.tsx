@@ -4,6 +4,7 @@ import { useWatchlist } from '../hooks/useApi'
 import { useMarket } from '../contexts/MarketContext'
 import { runScan } from '../api/client'
 import type { ScanResult } from '../types'
+import MarketToggle from './MarketToggle'
 import clsx from 'clsx'
 
 const US_POPULAR = [
@@ -52,7 +53,10 @@ export default function ScannerPanel() {
 
   return (
     <div className="space-y-4">
-      <h2 className="text-lg font-semibold">Stock Scanner</h2>
+      <div className="flex items-center gap-3">
+        <h2 className="text-lg font-semibold">Stock Scanner</h2>
+        <MarketToggle />
+      </div>
 
       <div className="flex flex-wrap items-center gap-4">
         <div className="flex items-center gap-2">

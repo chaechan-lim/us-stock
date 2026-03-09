@@ -1,5 +1,6 @@
 import { useETFStatus } from '../hooks/useApi'
 import { useMarket } from '../contexts/MarketContext'
+import MarketToggle from './MarketToggle'
 import clsx from 'clsx'
 
 const REGIME_COLORS: Record<string, string> = {
@@ -39,7 +40,10 @@ export default function ETFPanel() {
   if (!data || data.status === 'not_configured') {
     return (
       <div className="space-y-4">
-        <h2 className="text-lg font-semibold">ETF Engine ({market})</h2>
+        <div className="flex items-center gap-3">
+          <h2 className="text-lg font-semibold">ETF Engine</h2>
+          <MarketToggle />
+        </div>
         <p className="text-gray-500 text-sm">ETF engine is not configured.</p>
       </div>
     )

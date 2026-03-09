@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { createChart, IChartApi, ISeriesApi, CandlestickData, HistogramData, Time } from 'lightweight-charts'
 import { useChart } from '../hooks/useApi'
 import { useMarket } from '../contexts/MarketContext'
+import MarketToggle from './MarketToggle'
 
 const TIMEFRAMES = ['1D', '1W', '1M'] as const
 
@@ -122,6 +123,7 @@ export default function StockChart() {
     <div className="space-y-4">
       {/* Controls */}
       <div className="flex items-center gap-4">
+        <MarketToggle />
         <form onSubmit={handleSearch} className="flex gap-2">
           <input
             value={input}
