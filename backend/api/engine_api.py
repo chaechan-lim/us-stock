@@ -204,7 +204,36 @@ async def etf_engine_status(request: Request):
     etf_engine = getattr(request.app.state, "etf_engine", None)
     if not etf_engine:
         return {"status": "not_configured"}
-    return etf_engine.get_status()
+    status = etf_engine.get_status()
+
+    # If engine hasn't evaluated yet, detect current state from market data
+    market_data = getattr(request.app.state, "market_data", None)
+
+    if status["last_regime"] is None and market_data:
+        detector = getattr(request.app.state, "market_state_detector", None)
+        if detector:
+            try:
+                spy_df = await market_data.get_ohlcv("SPY", limit=250)
+                if not spy_df.empty:
+                    state = detector.detect(spy_df)
+                    status["last_regime"] = state.regime.value
+            except Exception:
+                pass
+
+    if not status["top_sectors"] and market_data:
+        external_data = getattr(request.app.state, "external_data", None)
+        sector_analyzer = getattr(request.app.state, "sector_analyzer", None)
+        if external_data and sector_analyzer:
+            try:
+                sector_data = await external_data.get_sector_performance()
+                if sector_data:
+                    scores = sector_analyzer.analyze(sector_data)
+                    top = sector_analyzer.get_top_sectors(scores, n=3, min_score=0)
+                    status["top_sectors"] = [s.name for s in top]
+            except Exception:
+                pass
+
+    return status
 
 
 @router.get("/analytics/factors")
