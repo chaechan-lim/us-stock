@@ -117,6 +117,11 @@ class ETFEngine:
         regime_actions = await self._manage_regime_etfs(market_state, positions, balance)
         actions["regime"].extend(regime_actions)
 
+        # Re-fetch after regime trades so sector rotation sees updated balance
+        if regime_actions:
+            positions = await self._market_data.get_positions()
+            balance = await self._market_data.get_balance()
+
         # Step 3: Sector ETF rotation
         if sector_data:
             sector_actions = await self._manage_sector_etfs(sector_data, positions, balance)

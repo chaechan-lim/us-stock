@@ -46,10 +46,12 @@ class OrderManager:
         adapter: ExchangeAdapter,
         risk_manager: RiskManager,
         notification=None,
+        market_data=None,
     ):
         self._adapter = adapter
         self._risk = risk_manager
         self._notification = notification
+        self._market_data = market_data
         self._active_orders: dict[str, ManagedOrder] = {}
 
     def has_pending_order(self, symbol: str, side: str | None = None) -> bool:
@@ -134,6 +136,10 @@ class OrderManager:
             )
             self._active_orders[result.order_id] = order
 
+            # Invalidate balance/positions cache so next fetch gets fresh data
+            if self._market_data:
+                self._market_data.invalidate_cache()
+
             if slippage != 0:
                 logger.info(
                     "Buy order placed: %s %d shares @ $%.2f (filled=%d @ $%.2f, "
@@ -208,6 +214,11 @@ class OrderManager:
                 exchange=exchange,
             )
             self._active_orders[result.order_id] = order
+
+            # Invalidate balance/positions cache so next fetch gets fresh data
+            if self._market_data:
+                self._market_data.invalidate_cache()
+
             logger.info(
                 "Sell order placed: %s %d shares @ %s (%s)",
                 symbol, quantity, f"${price:.2f}" if price else "market", strategy_name,

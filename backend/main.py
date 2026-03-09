@@ -128,7 +128,7 @@ async def lifespan(app: FastAPI):
 
     # Engine components
     risk_manager = RiskManager()
-    order_manager = OrderManager(adapter=adapter, risk_manager=risk_manager, notification=notification)
+    order_manager = OrderManager(adapter=adapter, risk_manager=risk_manager, notification=notification, market_data=market_data)
     app.state.risk_manager = risk_manager
     app.state.order_manager = order_manager
     consensus_cfg = registry._config_loader.get_consensus_config()
@@ -286,6 +286,7 @@ async def lifespan(app: FastAPI):
     )
     kr_order_manager = OrderManager(
         adapter=kr_adapter, risk_manager=risk_manager, notification=notification,
+        market_data=kr_market_data,
     )
     kr_position_tracker = PositionTracker(
         adapter=kr_adapter,
