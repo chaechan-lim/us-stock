@@ -224,7 +224,6 @@ class KISAdapter(ExchangeAdapter):
         position_value = float(output2.get("frcr_buy_amt_smtl1", 0))
 
         # 2. Buying power (available cash for orders)
-        # ITEM_CD + OVRS_ORD_UNPR required; use dummy values to get total buying power
         bp_params = {
             "CANO": self._config.account_no,
             "ACNT_PRDT_CD": self._config.account_product,
@@ -238,7 +237,23 @@ class KISAdapter(ExchangeAdapter):
             bp_params,
         )
         bp_output = bp_data.get("output", {})
+        logger.debug("inquire-psamount full response: %s", bp_output)
+
+        # Try multiple fields: USD available, then convertible amount
         available = float(bp_output.get("ord_psbl_frcr_amt", 0))
+        if available <= 0:
+            # Try other buying power fields that may include KRW auto-conversion
+            for field in ("frcr_ord_psbl_amt1", "echm_af_ord_psbl_frcr_amt",
+                          "ovrs_ord_psbl_amt", "max_ord_psbl_qty"):
+                val = bp_output.get(field, "")
+                if val and float(val) > 0:
+                    available = float(val)
+                    logger.info("Using %s=%.2f as buying power (KRW auto-convert)", field, available)
+                    break
+
+        # 3. If still 0, estimate from KRW balance (account has KRW, not USD)
+        if available <= 0:
+            available = await self._estimate_usd_from_krw()
 
         total = available + position_value
         return Balance(
@@ -247,6 +262,86 @@ class KISAdapter(ExchangeAdapter):
             available=available,
             locked=position_value,
         )
+
+    async def _estimate_usd_from_krw(self) -> float:
+        """Estimate USD buying power from KRW deposit balance."""
+        try:
+            # Query domestic deposit balance (KRW)
+            params = {
+                "CANO": self._config.account_no,
+                "ACNT_PRDT_CD": self._config.account_product,
+                "OVRS_EXCG_CD": "NASD",
+                "TR_CRCY_CD": "KRW",
+                "CTX_AREA_FK200": "",
+                "CTX_AREA_NK200": "",
+            }
+            data = await self._get(
+                "/uapi/overseas-stock/v1/trading/inquire-balance",
+                self._tr["BALANCE"],
+                params,
+            )
+            output2 = data.get("output2", {})
+            if isinstance(output2, list) and output2:
+                output2 = output2[0]
+            logger.debug("KRW balance output2: %s", output2)
+
+            # Try various KRW balance fields
+            krw_balance = 0.0
+            for field in ("tot_evlu_pfls_amt", "frcr_buy_amt_smtl1",
+                          "ovrs_rlzt_pfls_amt", "tot_ord_psbl_amt"):
+                val = output2.get(field, "")
+                if val and float(val) > 0:
+                    krw_balance = float(val)
+                    break
+
+            if krw_balance <= 0:
+                # Query exchange rate from KIS
+                rate = await self._fetch_exchange_rate()
+                if rate <= 0:
+                    rate = 1380.0  # fallback approximate rate
+                # Get total KRW from all available fields
+                for field in ("dnca_tot_amt", "nass_amt", "tot_evlu_amt"):
+                    val = output2.get(field, "")
+                    if val and float(val) > 0:
+                        krw_balance = float(val)
+                        break
+
+            if krw_balance > 0:
+                rate = await self._fetch_exchange_rate()
+                if rate <= 0:
+                    rate = 1380.0
+                usd_equiv = krw_balance / rate * 0.99  # 1% buffer for FX spread
+                logger.info(
+                    "Estimated USD buying power from KRW: ₩%.0f / %.1f = $%.2f",
+                    krw_balance, rate, usd_equiv,
+                )
+                return usd_equiv
+        except Exception as e:
+            logger.warning("Failed to estimate USD from KRW: %s", e)
+        return 0.0
+
+    async def _fetch_exchange_rate(self) -> float:
+        """Fetch USD/KRW exchange rate from KIS API."""
+        try:
+            params = {
+                "AUTH": "",
+                "EXCD": "NAS",
+                "SYMB": "AAPL",
+            }
+            data = await self._get(
+                "/uapi/overseas-price/v1/quotations/price-detail",
+                self._tr.get("PRICE_DETAIL", "HHDFS76200200"),
+                params,
+            )
+            output = data.get("output", {})
+            # t_rate = today's exchange rate
+            rate = float(output.get("t_rate", 0))
+            if rate > 0:
+                logger.debug("Exchange rate from KIS: %.2f", rate)
+                return rate
+        except Exception as e:
+            logger.debug("Exchange rate fetch failed: %s", e)
+        return 0.0
 
     async def fetch_positions(self) -> list[Position]:
         await self._auth.ensure_valid_token()
@@ -480,6 +575,7 @@ class KISAdapter(ExchangeAdapter):
         await self._auth.ensure_valid_token()
 
         ord_dvsn = "00" if order_type == "limit" else "01"
+        sll_type = "00" if side == "sell" else ""
         body = {
             "CANO": self._config.account_no,
             "ACNT_PRDT_CD": self._config.account_product,
@@ -487,6 +583,9 @@ class KISAdapter(ExchangeAdapter):
             "PDNO": symbol,
             "ORD_QTY": str(quantity),
             "OVRS_ORD_UNPR": str(price) if price else "0",
+            "CTAC_TLNO": "",
+            "MGCO_APTM_ODNO": "",
+            "SLL_TYPE": sll_type,
             "ORD_SVR_DVSN_CD": "0",
             "ORD_DVSN": ord_dvsn,
         }
