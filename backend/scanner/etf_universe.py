@@ -29,6 +29,7 @@ class SectorETF:
     etf: str
     leveraged: str | None = None
     top_holdings: list[str] = field(default_factory=list)
+    mid_holdings: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -76,6 +77,7 @@ class ETFUniverse:
                 etf=sec["etf"],
                 leveraged=sec.get("leveraged"),
                 top_holdings=sec.get("top_holdings", []),
+                mid_holdings=sec.get("mid_holdings", []),
             )
 
         self._safe_haven = data.get("safe_haven", [])

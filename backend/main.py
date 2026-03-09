@@ -477,7 +477,7 @@ async def lifespan(app: FastAPI):
         from datetime import timedelta
 
         now = datetime.utcnow()
-        max_watchlist = 60
+        max_watchlist = 100
         min_age_days = 7  # Don't remove recently added
 
         # Get current positions to protect
@@ -567,8 +567,9 @@ async def lifespan(app: FastAPI):
                     logger.info("Watchlist cleanup: removed %s", removed)
                 return
 
-            # Auto-add top candidates to watchlist
+            # Auto-add top candidates + ETF universe to watchlist
             top_symbols = [c["symbol"] for c in candidates[:10]]
+            etf_symbols = universe_result.etf_symbols
             async with session_factory() as session:
                 repo = TradeRepository(session)
                 added = []
@@ -576,6 +577,13 @@ async def lifespan(app: FastAPI):
                     if sym not in existing_syms:
                         await repo.add_to_watchlist(
                             symbol=sym, source="scanner",
+                        )
+                        added.append(sym)
+                # Ensure ETF universe is in watchlist
+                for sym in etf_symbols:
+                    if sym not in existing_syms:
+                        await repo.add_to_watchlist(
+                            symbol=sym, source="etf_universe",
                         )
                         added.append(sym)
 

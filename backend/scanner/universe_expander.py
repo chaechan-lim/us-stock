@@ -33,6 +33,8 @@ SCREENER_QUERIES = [
     "growth_technology_stocks",
     "undervalued_growth_stocks",  # growth focus, not pure value
     "aggressive_small_caps",
+    "small_cap_gainers",
+    "undervalued_large_caps",
 ]
 
 # KIS screening: max symbols per API call (first page only, no pagination)
@@ -43,6 +45,7 @@ KIS_SCREEN_LIMIT = 15
 class UniverseResult:
     """Result of universe expansion."""
     symbols: list[str]
+    etf_symbols: list[str] = field(default_factory=list)
     sources: dict[str, list[str]] = field(default_factory=dict)
     total_discovered: int = 0
 
@@ -107,8 +110,12 @@ class UniverseExpander:
         # Filter: US stocks only, remove ETFs/non-equity
         filtered = self._filter_symbols(all_symbols)
 
+        # Collect ETF symbols from config for watchlist inclusion
+        etf_syms = self._etf.all_etf_symbols
+
         result = UniverseResult(
             symbols=sorted(filtered)[: self._max_total],
+            etf_symbols=etf_syms,
             sources=sources,
             total_discovered=len(filtered),
         )
@@ -127,7 +134,7 @@ class UniverseExpander:
     ) -> list[str]:
         """Get sector holdings, weighted by sector strength.
 
-        Strong sectors get all top_holdings; weak sectors get fewer.
+        Strong sectors get all top + mid holdings; weak sectors get fewer.
         """
         sectors = self._etf.get_all_sectors()
         if not sectors:
@@ -142,18 +149,20 @@ class UniverseExpander:
         holdings: list[str] = []
         for name, sector_etf in sectors.items():
             strength = sector_scores.get(name, 50.0)
+            mid = sector_etf.mid_holdings or []
 
-            # Strong sectors (>60): all 5 holdings
-            # Medium sectors (30-60): top 3 holdings
-            # Weak sectors (<30): top 1 holding only
+            # Strong sectors (>60): all top + 3 mid
+            # Medium sectors (30-60): 3 top + 2 mid
+            # Weak sectors (<30): 1 top + 1 mid
             if strength >= 60:
-                n = len(sector_etf.top_holdings)
+                holdings.extend(sector_etf.top_holdings)
+                holdings.extend(mid[:3])
             elif strength >= 30:
-                n = min(3, len(sector_etf.top_holdings))
+                holdings.extend(sector_etf.top_holdings[:3])
+                holdings.extend(mid[:2])
             else:
-                n = min(1, len(sector_etf.top_holdings))
-
-            holdings.extend(sector_etf.top_holdings[:n])
+                holdings.extend(sector_etf.top_holdings[:1])
+                holdings.extend(mid[:1])
 
         return holdings
 

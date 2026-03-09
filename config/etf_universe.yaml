@@ -15,46 +15,57 @@ sectors:
     etf: XLK
     leveraged: TECL
     top_holdings: [AAPL, MSFT, NVDA, AVGO, ADBE]
+    mid_holdings: [CRWD, PANW, FTNT, SNPS, CDNS]
   Financials:
     etf: XLF
     leveraged: FAS
     top_holdings: [BRK-B, JPM, V, MA, BAC]
+    mid_holdings: [FITB, CFG, RF, KEY, HBAN]
   Energy:
     etf: XLE
     leveraged: ERX
     top_holdings: [XOM, CVX, COP, EOG, SLB]
+    mid_holdings: [DVN, FANG, MPC, VLO, OXY]
   Healthcare:
     etf: XLV
     leveraged: LABU
     top_holdings: [UNH, JNJ, LLY, ABBV, MRK]
+    mid_holdings: [DXCM, ALGN, HOLX, PODD, INSP]
   Consumer_Discretionary:
     etf: XLY
     leveraged: null
     top_holdings: [AMZN, TSLA, HD, MCD, NKE]
+    mid_holdings: [DECK, POOL, WSM, GRMN, ULTA]
   Consumer_Staples:
     etf: XLP
     leveraged: null
     top_holdings: [PG, KO, PEP, COST, WMT]
+    mid_holdings: [ELF, CELH, CASY, USFD, PFGC]
   Industrials:
     etf: XLI
     leveraged: null
     top_holdings: [CAT, UNP, HON, GE, RTX]
+    mid_holdings: [TDG, AXON, HUBB, WSO, RBC]
   Materials:
     etf: XLB
     leveraged: null
     top_holdings: [LIN, APD, SHW, FCX, NEM]
+    mid_holdings: [CRS, ATI, STLD, CLF, CMC]
   Utilities:
     etf: XLU
     leveraged: null
     top_holdings: [NEE, SO, DUK, D, AEP]
+    mid_holdings: [IDA, NRG, VST, OGE, PNW]
   Real_Estate:
     etf: XLRE
     leveraged: null
     top_holdings: [PLD, AMT, EQIX, PSA, SPG]
+    mid_holdings: [REXR, FR, EGP, CUBE, LSI]
   Communications:
     etf: XLC
     leveraged: null
     top_holdings: [META, GOOGL, NFLX, DIS, CMCSA]
+    mid_holdings: [ROKU, ZM, MTCH, IAC, PINS]
 
 # Safe-haven / cash-equivalent ETFs
 safe_haven:
