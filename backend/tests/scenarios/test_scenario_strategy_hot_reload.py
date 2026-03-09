@@ -162,7 +162,7 @@ def test_profile_weights_change_on_reload(temp_config):
 
 def test_all_strategy_classes_registered():
     """Every strategy class in STRATEGY_CLASSES is importable."""
-    assert len(STRATEGY_CLASSES) == 13
+    assert len(STRATEGY_CLASSES) == 14
     for name, cls in STRATEGY_CLASSES.items():
         assert hasattr(cls, "name")
         assert hasattr(cls, "analyze")

@@ -1,9 +1,10 @@
 """Scanner Pipeline Orchestrator.
 
-Chains the 3 screening layers into a single pipeline:
-  Layer 1: IndicatorScreener  (technical scoring, yfinance data)
-  Layer 2: FundamentalEnricher (yfinance fundamentals)
-  Layer 3: MarketAnalystAgent  (Claude AI analysis, optional)
+Chains the 4 screening layers into a single pipeline:
+  Layer 1: IndicatorScreener   (technical scoring, yfinance data)
+  Layer 2: FundamentalEnricher  (yfinance fundamentals)
+  Layer 2.5: NewsEnricher       (Finnhub news sentiment, optional)
+  Layer 3: MarketAnalystAgent   (Claude AI analysis, optional)
 
 Uses yfinance for bulk screening (no rate limits).
 KIS API is reserved for order execution and real-time quotes only.
@@ -19,7 +20,9 @@ from data.market_data_service import MarketDataService
 from data.indicator_service import IndicatorService
 from scanner.indicator_screener import IndicatorScreener
 from scanner.fundamental_enricher import FundamentalEnricher
+from scanner.news_enricher import NewsEnricher
 from agents.market_analyst import MarketAnalystAgent
+from agents.news_sentiment_agent import NewsSentimentSummary
 
 logger = logging.getLogger(__name__)
 
@@ -51,29 +54,39 @@ class ScannerPipeline:
         indicator_svc: IndicatorService,
         enricher: FundamentalEnricher,
         ai_agent: MarketAnalystAgent | None = None,
+        news_enricher: NewsEnricher | None = None,
     ):
         self._market_data = market_data
         self._indicator_svc = indicator_svc
         self._enricher = enricher
         self._ai_agent = ai_agent
+        self._news_enricher = news_enricher
         self._screener = IndicatorScreener()
+        self._last_news_summary: NewsSentimentSummary | None = None
+
+    def set_news_summary(self, summary: NewsSentimentSummary) -> None:
+        """Set pre-fetched news sentiment for use in next scan."""
+        self._last_news_summary = summary
 
     async def run_full_scan(
         self,
         symbols: list[str],
         min_grade: str = "B",
         max_candidates: int = 20,
+        news_summary: NewsSentimentSummary | None = None,
     ) -> list[dict]:
-        """Run all 3 layers and return ranked candidates.
+        """Run all layers and return ranked candidates.
 
         Layer 1 uses yfinance for bulk data (no rate limits).
         Layer 2 uses yfinance for fundamentals.
+        Layer 2.5 applies news sentiment (optional).
         KIS API is not used during scanning.
 
         Args:
             symbols: List of stock tickers to scan.
             min_grade: Minimum grade to pass Layer 1 (default "B").
             max_candidates: Max results to return from Layer 2.
+            news_summary: Pre-computed news sentiment (optional).
 
         Returns:
             List of candidate dicts sorted by combined score descending.
@@ -133,6 +146,13 @@ class ScannerPipeline:
                 "grade": candidate.grade,
             }
             results.append(result)
+
+        # Layer 2.5: (optional) News sentiment enrichment
+        active_summary = news_summary or self._last_news_summary
+        if self._news_enricher and active_summary:
+            logger.info("Layer 2.5: News sentiment enrichment")
+            results = self._news_enricher.enrich(results, active_summary)
+            logger.info("Layer 2.5 complete")
 
         # Layer 3: (optional) AI analysis on top 5
         if self._ai_agent and results:

@@ -204,32 +204,46 @@ async def lifespan(app: FastAPI):
         logger.info("Agent context service enabled")
     app.state.agent_context = agent_ctx
 
-    # AI agents (market analyst, risk assessment, trade review)
+    # AI agents (market analyst, risk assessment, trade review, news sentiment)
     ai_agent = None
     risk_agent = None
     trade_review_agent = None
+    news_sentiment_agent = None
     if llm_client:
         from agents.market_analyst import MarketAnalystAgent
         from agents.risk_assessment import RiskAssessmentAgent
         from agents.trade_review import TradeReviewAgent
+        from agents.news_sentiment_agent import NewsSentimentAgent
         ai_agent = MarketAnalystAgent(llm_client=llm_client, context_service=agent_ctx)
         risk_agent = RiskAssessmentAgent(llm_client=llm_client, context_service=agent_ctx)
         trade_review_agent = TradeReviewAgent(llm_client=llm_client, context_service=agent_ctx)
-        logger.info("AI agents enabled (analyst, risk, trade_review)")
+        news_sentiment_agent = NewsSentimentAgent(llm_client=llm_client, context_service=agent_ctx)
+        logger.info("AI agents enabled (analyst, risk, trade_review, news_sentiment)")
     app.state.risk_agent = risk_agent
     app.state.trade_review_agent = trade_review_agent
+    app.state.news_sentiment_agent = news_sentiment_agent
 
     # Resolve services from app.state
     indicator_svc = app.state.indicator_svc
     combiner = app.state.combiner
 
-    # Scanner pipeline (with AI agent if LLM enabled)
+    # News service (Finnhub)
+    from data.news_service import FinnhubNewsService
+    from scanner.news_enricher import NewsEnricher
+    news_service = FinnhubNewsService(api_key=config.external.finnhub_api_key)
+    app.state.news_service = news_service
+    news_enricher = NewsEnricher() if news_service.available else None
+    if news_service.available:
+        logger.info("Finnhub news service enabled")
+
+    # Scanner pipeline (with AI agent + news enricher if available)
     enricher = FundamentalEnricher()
     scanner_pipeline = ScannerPipeline(
         market_data=market_data,
         indicator_svc=indicator_svc,
         enricher=enricher,
         ai_agent=ai_agent,
+        news_enricher=news_enricher,
     )
     app.state.scanner_pipeline = scanner_pipeline
 
@@ -585,9 +599,33 @@ async def lifespan(app: FastAPI):
                 len(universe), universe_result.total_discovered,
             )
 
-            # Run 3-layer pipeline (grade C to cast a wider net)
+            # Fetch fresh news if available (for Layer 2.5)
+            news_summary = None
+            if news_service.available and news_sentiment_agent:
+                try:
+                    # Only fetch for non-ETF universe symbols
+                    news_syms = [s for s in universe if not any(
+                        s.endswith(x) for x in ("QQQ", "SPY", "XL", "SO")
+                    )][:25]
+                    if news_syms:
+                        batch = await news_service.fetch_batch(
+                            symbols=news_syms, days_back=3, max_per_symbol=3,
+                        )
+                        if batch.articles:
+                            news_summary = await news_sentiment_agent.analyze_batch(
+                                batch.articles,
+                            )
+                            logger.info(
+                                "After-hours news: %d articles analyzed",
+                                len(batch.articles),
+                            )
+                except Exception as e:
+                    logger.warning("After-hours news fetch failed: %s", e)
+
+            # Run pipeline (grade C to cast a wider net)
             candidates = await scanner_pipeline.run_full_scan(
                 symbols=universe, min_grade="C", max_candidates=15,
+                news_summary=news_summary,
             )
 
             if not candidates:
@@ -633,9 +671,12 @@ async def lifespan(app: FastAPI):
                 ai_note = ""
                 if c.get("ai_recommendation"):
                     ai_note = f" | AI: {c['ai_recommendation']}"
+                news_note = ""
+                if c.get("news_sentiment") and c["news_sentiment"] != 0:
+                    news_note = f" | news={c['news_sentiment']:+.2f}"
                 msg += (
                     f"  {c['symbol']}: score={c['combined_score']:.0f} "
-                    f"grade={c.get('grade', '?')}{ai_note}\n"
+                    f"grade={c.get('grade', '?')}{ai_note}{news_note}\n"
                 )
             if added:
                 msg += f"\nNew watchlist adds: {', '.join(added)}"
@@ -828,7 +869,7 @@ async def lifespan(app: FastAPI):
         try:
             expired = await agent_ctx.cleanup_expired()
             total_trimmed = 0
-            for agent_type in ("market_analyst", "risk", "trade_review"):
+            for agent_type in ("market_analyst", "risk", "trade_review", "news_sentiment"):
                 trimmed = await agent_ctx.enforce_limits(agent_type)
                 total_trimmed += trimmed
             if expired or total_trimmed:
@@ -842,6 +883,74 @@ async def lifespan(app: FastAPI):
     scheduler.add_task(
         "agent_memory_cleanup", task_agent_memory_cleanup,
         interval_sec=86400, phases=[MarketPhase.CLOSED],
+    )
+
+    # News sentiment analysis: fetch + analyze news for watchlist symbols
+    async def task_news_analysis():
+        """Fetch Finnhub news and run LLM sentiment analysis.
+
+        Runs hourly during regular hours. Results are cached on the
+        scanner pipeline for use in the next scan cycle.
+        """
+        if not news_service.available:
+            return
+        try:
+            from db.trade_repository import TradeRepository
+            # Get current watchlist symbols
+            async with session_factory() as session:
+                repo = TradeRepository(session)
+                wl = await repo.get_watchlist(active_only=True, market="US")
+                # Only fetch news for non-ETF stocks (ETFs rarely have useful news)
+                symbols = [
+                    w.symbol for w in wl
+                    if w.source != "etf_universe"
+                ][:30]  # Limit to avoid rate limits
+
+            if not symbols:
+                return
+
+            # Fetch news batch from Finnhub
+            batch = await news_service.fetch_batch(
+                symbols=symbols, days_back=3, max_per_symbol=5,
+            )
+
+            if not batch.articles:
+                logger.debug("News analysis: no articles found")
+                return
+
+            # Run LLM sentiment analysis
+            if news_sentiment_agent:
+                summary = await news_sentiment_agent.analyze_batch(batch.articles)
+                scanner_pipeline.set_news_summary(summary)
+
+                actionable = len(summary.actionable_signals)
+                logger.info(
+                    "News analysis: %d articles -> %d symbols, "
+                    "market_sentiment=%.2f, actionable=%d",
+                    len(batch.articles), len(summary.symbol_sentiments),
+                    summary.market_sentiment, actionable,
+                )
+
+                # Discord alert for high-impact news
+                if actionable > 0:
+                    msg = "News Sentiment Alert\n"
+                    for sig in summary.actionable_signals[:5]:
+                        emoji = "+" if sig.sentiment > 0 else "-"
+                        msg += (
+                            f"  {sig.symbol}: [{sig.trading_signal}] "
+                            f"{sig.key_event} "
+                            f"(sentiment={sig.sentiment:{emoji}.2f}, "
+                            f"impact={sig.impact})\n"
+                        )
+                    msg += f"\nMarket sentiment: {summary.market_sentiment:+.2f}"
+                    await notification.notify_system_event("news_sentiment", msg)
+
+        except Exception as e:
+            logger.error("News analysis failed: %s", e)
+
+    scheduler.add_task(
+        "news_analysis", task_news_analysis,
+        interval_sec=3600, phases=[MarketPhase.REGULAR],
     )
 
     # ── KR market tasks ──────────────────────────────────────────────
@@ -1028,6 +1137,7 @@ async def lifespan(app: FastAPI):
         await scheduler.stop()
     if kis_ws and kis_ws.is_connected:
         await kis_ws.close()
+    await news_service.close()
     await cache.close()
     await adapter.close()
     await kr_adapter.close()

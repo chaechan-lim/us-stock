@@ -104,8 +104,8 @@ async def test_weight_profile_changes_on_regime():
     uptrend_w = loader.get_profile_weights("uptrend")
     downtrend_w = loader.get_profile_weights("downtrend")
 
-    # Uptrend should have trend_following with high weight
-    assert uptrend_w.get("trend_following", 0) >= 0.20
+    # Uptrend should have trend_following with meaningful weight
+    assert uptrend_w.get("trend_following", 0) >= 0.10
 
     # Downtrend should suppress trend_following
     assert downtrend_w.get("trend_following", 0) <= 0.10

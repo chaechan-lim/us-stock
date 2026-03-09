@@ -83,6 +83,7 @@ class LLMConfig(BaseSettings):
 
 class ExternalDataConfig(BaseSettings):
     fred_api_key: str = ""
+    finnhub_api_key: str = ""
 
     model_config = {"env_prefix": "EXTERNAL_"}
 
