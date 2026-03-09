@@ -21,6 +21,7 @@ from strategies.sector_rotation import SectorRotationStrategy
 from strategies.cis_momentum import CISMomentumStrategy
 from strategies.larry_williams import LarryWilliamsStrategy
 from strategies.bnf_deviation import BNFDeviationStrategy
+from strategies.volume_surge_strategy import VolumeSurgeStrategy
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +40,7 @@ STRATEGY_CLASSES: dict[str, type[BaseStrategy]] = {
     "cis_momentum": CISMomentumStrategy,
     "larry_williams": LarryWilliamsStrategy,
     "bnf_deviation": BNFDeviationStrategy,
+    "volume_surge": VolumeSurgeStrategy,
 }
 
 

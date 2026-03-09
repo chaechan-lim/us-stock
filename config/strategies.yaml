@@ -11,23 +11,25 @@ global:
 # Market state -> strategy weight profiles
 profiles:
   strong_uptrend:
-    trend_following: 0.25
-    dual_momentum: 0.15
-    donchian_breakout: 0.15
-    supertrend: 0.10
-    cis_momentum: 0.15
-    larry_williams: 0.15
-    bnf_deviation: 0.05
-
-  uptrend:
     trend_following: 0.20
     dual_momentum: 0.15
-    donchian_breakout: 0.15
+    donchian_breakout: 0.10
     supertrend: 0.10
-    macd_histogram: 0.05
     cis_momentum: 0.15
     larry_williams: 0.10
+    bnf_deviation: 0.05
+    volume_surge: 0.15
+
+  uptrend:
+    trend_following: 0.15
+    dual_momentum: 0.15
+    donchian_breakout: 0.10
+    supertrend: 0.10
+    macd_histogram: 0.05
+    cis_momentum: 0.10
+    larry_williams: 0.10
     bnf_deviation: 0.10
+    volume_surge: 0.15
 
   sideways:
     trend_following: 0.05
@@ -35,18 +37,20 @@ profiles:
     donchian_breakout: 0.05
     supertrend: 0.05
     macd_histogram: 0.10
-    rsi_divergence: 0.20
+    rsi_divergence: 0.15
     bollinger_squeeze: 0.15
     volume_profile: 0.10
     cis_momentum: 0.05
     larry_williams: 0.05
-    bnf_deviation: 0.15
+    bnf_deviation: 0.10
+    volume_surge: 0.10
 
   downtrend:
     trend_following: 0.05
     rsi_divergence: 0.15
     bollinger_squeeze: 0.10
     bnf_deviation: 0.20
+    volume_surge: 0.05
     # Individual stock buys suppressed in downtrend; ETF engine takes over
     # bnf_deviation catches oversold mean reversion opportunities
 
@@ -301,6 +305,22 @@ strategies:
     stop_loss:
       type: fixed_pct
       max_pct: 0.05
+
+  volume_surge:
+    enabled: true
+    timeframe: "1D"
+    params:
+      volume_threshold: 1.8     # min volume ratio vs 20-day avg
+      confirmation_bars: 1      # bars of elevated volume before signal
+      min_price_change: 0.3     # min % price change to trigger
+    stop_loss:
+      type: atr
+      atr_multiplier: 2.0
+      max_pct: 0.06
+    trailing_stop:
+      enabled: true
+      activation_pct: 0.03
+      trail_pct: 0.02
 
   sector_rotation:
     enabled: true
