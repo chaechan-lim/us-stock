@@ -28,7 +28,7 @@ async def portfolio_summary(request: Request, market: str = "US"):
     total_position_value = sum(p.current_price * p.quantity for p in positions)
     total_unrealized_pnl = sum(p.unrealized_pnl for p in positions)
 
-    return {
+    result = {
         "market": market,
         "balance": {
             "currency": balance.currency,
@@ -41,6 +41,21 @@ async def portfolio_summary(request: Request, market: str = "US"):
         "total_unrealized_pnl": total_unrealized_pnl,
         "total_equity": balance.total,
     }
+
+    # When viewing US market, also include KRW balance for reference
+    if market == "US":
+        kr_md = getattr(request.app.state, "kr_market_data", None)
+        if kr_md:
+            try:
+                kr_balance = await kr_md.get_balance()
+                result["krw_balance"] = {
+                    "total": kr_balance.total,
+                    "available": kr_balance.available,
+                }
+            except Exception:
+                pass
+
+    return result
 
 
 @router.get("/positions")

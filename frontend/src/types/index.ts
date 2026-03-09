@@ -9,6 +9,10 @@ export interface PortfolioSummary {
   total_position_value: number
   total_unrealized_pnl: number
   total_equity: number
+  krw_balance?: {
+    total: number
+    available: number
+  }
 }
 
 export interface Position {

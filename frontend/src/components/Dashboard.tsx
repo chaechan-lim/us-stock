@@ -30,8 +30,16 @@ export default function Dashboard() {
     <div className="space-y-6">
       {/* Summary Cards */}
       <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-        <Card title="Total Equity" value={formatCurrency(summary.total_equity, currency)} />
-        <Card title="Available Cash" value={formatCurrency(summary.balance.available, currency)} />
+        <Card
+          title="Total Equity"
+          value={formatCurrency(summary.total_equity, currency)}
+          sub={summary.krw_balance ? formatCurrency(summary.krw_balance.total, 'KRW') : undefined}
+        />
+        <Card
+          title="Available Cash"
+          value={formatCurrency(summary.balance.available, currency)}
+          sub={summary.krw_balance ? formatCurrency(summary.krw_balance.available, 'KRW') : undefined}
+        />
         <Card title="Positions" value={String(summary.positions_count)} />
         <Card
           title="Unrealized P&L"
@@ -187,11 +195,12 @@ function MacroIndicatorsCard() {
   )
 }
 
-function Card({ title, value }: { title: string; value: React.ReactNode }) {
+function Card({ title, value, sub }: { title: string; value: React.ReactNode; sub?: string }) {
   return (
     <div className="bg-gray-900 rounded-lg p-4">
       <div className="text-xs text-gray-400 uppercase tracking-wide">{title}</div>
       <div className="text-2xl font-bold mt-1">{value}</div>
+      {sub && <div className="text-xs text-gray-500 mt-0.5">{sub}</div>}
     </div>
   )
 }
