@@ -582,7 +582,7 @@ class KISAdapter(ExchangeAdapter):
             "OVRS_EXCG_CD": exchange,
             "PDNO": symbol,
             "ORD_QTY": str(quantity),
-            "OVRS_ORD_UNPR": str(price) if price else "0",
+            "OVRS_ORD_UNPR": f"{price:.2f}" if price else "0",
             "CTAC_TLNO": "",
             "MGCO_APTM_ODNO": "",
             "SLL_TYPE": sll_type,

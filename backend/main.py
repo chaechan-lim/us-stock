@@ -39,6 +39,7 @@ from db.session import get_session_factory
 from services.cache import CacheService
 from services.health import HealthMonitor
 from services.notification import NotificationService
+from services.exchange_resolver import ExchangeResolver
 
 setup_logging(LogConfig())
 logger = logging.getLogger(__name__)
@@ -247,6 +248,10 @@ async def lifespan(app: FastAPI):
     )
     app.state.scanner_pipeline = scanner_pipeline
 
+    # Exchange resolver (caches yfinance exchange lookups for KIS API)
+    exchange_resolver = ExchangeResolver()
+    app.state.exchange_resolver = exchange_resolver
+
     # Evaluation loop (after agents — risk_agent used for pre-trade check)
     evaluation_loop = EvaluationLoop(
         adapter=adapter,
@@ -258,6 +263,7 @@ async def lifespan(app: FastAPI):
         risk_manager=risk_manager,
         adaptive_weights=adaptive_weights,
         risk_agent=risk_agent,
+        exchange_resolver=exchange_resolver,
     )
     app.state.evaluation_loop = evaluation_loop
 
@@ -266,6 +272,9 @@ async def lifespan(app: FastAPI):
     sector_analyzer = SectorAnalyzer()
     external_data = ExternalDataService()
     etf_universe = ETFUniverse()
+    # Preload ETF exchange codes so evaluation_loop doesn't need yfinance lookups
+    for sym in etf_universe.all_etf_symbols:
+        exchange_resolver.set(sym, etf_universe.get_exchange(sym))
     universe_expander = UniverseExpander(
         etf_universe=etf_universe, sector_analyzer=sector_analyzer,
         kis_adapter=adapter, rate_limiter=rate_limiter,

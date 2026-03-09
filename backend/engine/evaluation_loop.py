@@ -29,6 +29,7 @@ from engine.stock_classifier import StockClassifier
 from engine.adaptive_weights import AdaptiveWeightManager
 from analytics.factor_model import MultiFactorModel, FactorScores
 from analytics.signal_quality import SignalQualityTracker
+from services.exchange_resolver import ExchangeResolver
 from core.enums import SignalType
 
 if TYPE_CHECKING:
@@ -56,6 +57,7 @@ class EvaluationLoop:
         factor_model: MultiFactorModel | None = None,
         signal_quality: SignalQualityTracker | None = None,
         risk_agent: RiskAssessmentAgent | None = None,
+        exchange_resolver: ExchangeResolver | None = None,
     ):
         self._adapter = adapter
         self._market_data = market_data
@@ -73,6 +75,7 @@ class EvaluationLoop:
         self._factor_model = factor_model or MultiFactorModel()
         self._signal_quality = signal_quality or SignalQualityTracker()
         self._risk_agent = risk_agent
+        self._exchange_resolver = exchange_resolver or ExchangeResolver()
         self._factor_scores: dict[str, FactorScores] = {}
         self._last_classify_time: dict[str, float] = {}
         self._reclassify_interval = 86400  # re-classify every 24h
@@ -276,6 +279,7 @@ class EvaluationLoop:
                 except Exception as e:
                     logger.debug("Risk agent pre-trade check error: %s", e)
 
+            exchange = self._exchange_resolver.resolve(symbol)
             await self._order_manager.place_buy(
                 symbol=symbol,
                 price=price,
@@ -284,17 +288,20 @@ class EvaluationLoop:
                 current_positions=len(positions),
                 strategy_name=strategy_name,
                 sizing_override=sizing,
+                exchange=exchange,
             )
 
         elif signal.signal_type == SignalType.SELL:
             positions = await self._market_data.get_positions()
             pos = next((p for p in positions if p.symbol == symbol), None)
             if pos and pos.quantity > 0:
+                exchange = self._exchange_resolver.resolve(symbol)
                 await self._order_manager.place_sell(
                     symbol=symbol,
                     quantity=int(pos.quantity),
                     price=price,
                     strategy_name=signal.strategy_name,
+                    exchange=exchange,
                 )
 
     def record_trade_result(
