@@ -86,8 +86,9 @@ async def lifespan(app: FastAPI):
     # KR adapter — KIS paper server doesn't support domestic orders (40910000),
     # so KR always uses PaperAdapter for now.  Switch to KISKRAdapter once a
     # domestic-enabled paper account is registered.
+    from exchange.paper_adapter import PaperAdapter as PaperAdapterCls
     kr_initial_krw = config.trading.initial_balance_usd * 50_000  # ~500M KRW
-    kr_adapter = PaperAdapter(kr_initial_krw, currency="KRW")
+    kr_adapter = PaperAdapterCls(kr_initial_krw, currency="KRW")
     await kr_adapter.initialize()
     app.state.kr_adapter = kr_adapter
     logger.info("KR adapter initialized (PaperAdapter, balance=%.0f KRW)", kr_initial_krw)
