@@ -102,6 +102,7 @@ export interface WatchlistResponse {
 
 export interface Trade {
   symbol: string
+  name?: string
   side: string
   quantity: number
   price: number

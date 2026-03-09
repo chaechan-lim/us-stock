@@ -6,6 +6,7 @@ The in-memory log is the primary fast-path; DB is the durable store.
 
 import logging
 
+from data.stock_name_service import get_name
 from fastapi import APIRouter, Query, Request
 
 router = APIRouter(prefix="/trades", tags=["trades"])
@@ -38,7 +39,11 @@ async def get_trades(
             trades = [t for t in trades if t.get("symbol") == symbol.upper()]
         if market:
             trades = [t for t in trades if t.get("market", "US") == market]
-        return trades[-limit:]
+        result = trades[-limit:]
+        for t in result:
+            if "name" not in t:
+                t["name"] = get_name(t.get("symbol", ""), t.get("market", "US")) or ""
+        return result
 
     # Fallback: read from DB if available
     if _session_factory:
@@ -54,6 +59,7 @@ async def get_trades(
                         "filled_price": o.filled_price,
                         "status": o.status, "strategy": o.strategy_name,
                         "pnl": o.pnl,
+                        "name": get_name(o.symbol, getattr(o, "market", "US")) or "",
                         "created_at": str(o.created_at),
                     }
                     for o in orders

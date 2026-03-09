@@ -49,7 +49,10 @@ export default function TradeHistory() {
                   <td className="py-2 px-3 text-gray-400 text-xs">
                     {t.created_at ? new Date(t.created_at).toLocaleString() : '-'}
                   </td>
-                  <td className="py-2 px-3 font-medium">{t.symbol}</td>
+                  <td className="py-2 px-3 font-medium">
+                    {t.symbol}
+                    {t.name && <span className="text-gray-500 text-xs ml-1">{t.name}</span>}
+                  </td>
                   <td className="py-2 px-3 text-center">
                     <span className={clsx(
                       'px-2 py-0.5 rounded text-xs font-bold',
