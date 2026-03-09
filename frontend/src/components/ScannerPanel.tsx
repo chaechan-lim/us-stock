@@ -1,13 +1,20 @@
 import { useState } from 'react'
 import { useMutation } from '@tanstack/react-query'
 import { useWatchlist } from '../hooks/useApi'
+import { useMarket } from '../contexts/MarketContext'
 import { runScan } from '../api/client'
 import type { ScanResult } from '../types'
 import clsx from 'clsx'
 
-const POPULAR_SYMBOLS = [
+const US_POPULAR = [
   'AAPL', 'MSFT', 'GOOGL', 'AMZN', 'NVDA', 'META', 'TSLA', 'AMD', 'AVGO', 'CRM',
   'TQQQ', 'SOXL', 'SQQQ', 'SOXS', 'QQQ', 'SPY', 'IWM', 'XLK', 'XLF', 'XLE',
+]
+
+const KR_POPULAR = [
+  '005930', '000660', '373220', '207940', '005380', '000270', '035420', '035720',
+  '068270', '105560', '055550', '066570', '006400', '051910', '012330', '003550',
+  '247540', '086520', '377300', '196170',
 ]
 
 function gradeColor(grade: string) {
@@ -21,10 +28,13 @@ function gradeColor(grade: string) {
 }
 
 export default function ScannerPanel() {
-  const { data: watchlist } = useWatchlist()
+  const { market } = useMarket()
+  const { data: watchlist } = useWatchlist(market)
   const [results, setResults] = useState<ScanResult[]>([])
   const [minGrade, setMinGrade] = useState('B')
   const [symbolSource, setSymbolSource] = useState<'popular' | 'watchlist'>('popular')
+
+  const POPULAR_SYMBOLS = market === 'KR' ? KR_POPULAR : US_POPULAR
 
   const scanMutation = useMutation({
     mutationFn: () => {

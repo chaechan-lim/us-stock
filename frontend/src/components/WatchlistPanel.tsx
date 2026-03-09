@@ -1,10 +1,12 @@
 import { useState } from 'react'
 import { useWatchlist, useAddToWatchlist, useRemoveFromWatchlist } from '../hooks/useApi'
+import { useMarket } from '../contexts/MarketContext'
 
 export default function WatchlistPanel() {
-  const { data: watchlist } = useWatchlist()
-  const addMutation = useAddToWatchlist()
-  const removeMutation = useRemoveFromWatchlist()
+  const { market } = useMarket()
+  const { data: watchlist } = useWatchlist(market)
+  const addMutation = useAddToWatchlist(market)
+  const removeMutation = useRemoveFromWatchlist(market)
   const [input, setInput] = useState('')
 
   const handleAdd = () => {
@@ -13,6 +15,8 @@ export default function WatchlistPanel() {
       setInput('')
     }
   }
+
+  const placeholder = market === 'KR' ? 'Add symbol (e.g. 005930)' : 'Add symbol (e.g. AAPL)'
 
   return (
     <div className="space-y-4">
@@ -24,7 +28,7 @@ export default function WatchlistPanel() {
           value={input}
           onChange={e => setInput(e.target.value)}
           onKeyDown={e => e.key === 'Enter' && handleAdd()}
-          placeholder="Add symbol (e.g. AAPL)"
+          placeholder={placeholder}
           className="bg-gray-800 border border-gray-700 rounded px-3 py-1.5 text-sm
                      focus:outline-none focus:border-blue-500 w-48"
         />

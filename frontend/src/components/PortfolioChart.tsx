@@ -10,6 +10,8 @@ import {
 } from 'recharts'
 import clsx from 'clsx'
 import { useEquityHistory } from '../hooks/useApi'
+import { useMarket } from '../contexts/MarketContext'
+import { formatCurrency } from '../utils/format'
 
 interface EquityPoint {
   date: string
@@ -23,16 +25,10 @@ const PERIODS = [
   { label: '365d', days: 365 },
 ] as const
 
-function formatUSD(n: number) {
-  return new Intl.NumberFormat('en-US', {
-    style: 'currency',
-    currency: 'USD',
-  }).format(n)
-}
-
 export default function PortfolioChart() {
+  const { market, currency } = useMarket()
   const [days, setDays] = useState(30)
-  const { data, isLoading, isError } = useEquityHistory(days)
+  const { data, isLoading, isError } = useEquityHistory(days, market)
 
   const history: EquityPoint[] = data ?? []
 
@@ -41,6 +37,10 @@ export default function PortfolioChart() {
   const changeAbs = currentValue - startValue
   const changePct = startValue > 0 ? (changeAbs / startValue) * 100 : 0
   const isPositive = changeAbs >= 0
+
+  const yTickFormatter = currency === 'KRW'
+    ? (v: number) => `${(v / 10000).toFixed(0)}만`
+    : (v: number) => `$${(v / 1000).toFixed(0)}k`
 
   if (isLoading) {
     return <div className="text-gray-500">Loading equity history...</div>
@@ -61,10 +61,10 @@ export default function PortfolioChart() {
         <div className="flex items-start justify-between mb-4">
           <div>
             <div className="text-xs text-gray-400 uppercase tracking-wide">Portfolio Value</div>
-            <div className="text-3xl font-bold mt-1">{formatUSD(currentValue)}</div>
+            <div className="text-3xl font-bold mt-1">{formatCurrency(currentValue, currency)}</div>
             {history.length > 1 && (
               <div className={clsx('text-sm mt-1', isPositive ? 'text-green-400' : 'text-red-400')}>
-                {isPositive ? '+' : ''}{formatUSD(changeAbs)}{' '}
+                {isPositive ? '+' : ''}{formatCurrency(changeAbs, currency)}{' '}
                 ({isPositive ? '+' : ''}{changePct.toFixed(2)}%)
                 <span className="text-gray-500 ml-1">
                   past {days}d
@@ -109,7 +109,7 @@ export default function PortfolioChart() {
               <YAxis
                 tick={{ fill: '#9CA3AF', fontSize: 11 }}
                 tickLine={{ stroke: '#4B5563' }}
-                tickFormatter={v => `$${(v / 1000).toFixed(0)}k`}
+                tickFormatter={yTickFormatter}
                 domain={['auto', 'auto']}
               />
               <Tooltip
@@ -119,7 +119,7 @@ export default function PortfolioChart() {
                   borderRadius: '0.5rem',
                   color: '#F9FAFB',
                 }}
-                formatter={(value: number) => [formatUSD(value), 'Value']}
+                formatter={(value: number) => [formatCurrency(value, currency), 'Value']}
                 labelFormatter={label => `Date: ${label}`}
               />
               <Area

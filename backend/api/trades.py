@@ -28,6 +28,7 @@ def init_trades(session_factory) -> None:
 async def get_trades(
     limit: int = Query(50, ge=1, le=200),
     symbol: str | None = None,
+    market: str | None = None,
 ):
     """Get trade history (in-memory + DB fallback)."""
     # If in-memory has data, use it (fast path)
@@ -35,6 +36,8 @@ async def get_trades(
         trades = _trade_log
         if symbol:
             trades = [t for t in trades if t.get("symbol") == symbol.upper()]
+        if market:
+            trades = [t for t in trades if t.get("market", "US") == market]
         return trades[-limit:]
 
     # Fallback: read from DB if available
@@ -62,9 +65,13 @@ async def get_trades(
 
 
 @router.get("/summary")
-async def trade_summary():
+async def trade_summary(market: str | None = None):
     """Get aggregated trade stats."""
-    if not _trade_log:
+    trades = _trade_log
+    if market:
+        trades = [t for t in trades if t.get("market", "US") == market]
+
+    if not trades:
         return {
             "total_trades": 0,
             "wins": 0,
@@ -73,13 +80,13 @@ async def trade_summary():
             "win_rate": 0.0,
         }
 
-    sells = [t for t in _trade_log if t.get("side") == "SELL" and t.get("pnl") is not None]
+    sells = [t for t in trades if t.get("side") == "SELL" and t.get("pnl") is not None]
     wins = [t for t in sells if t["pnl"] > 0]
     losses = [t for t in sells if t["pnl"] <= 0]
     total_pnl = sum(t["pnl"] for t in sells)
 
     return {
-        "total_trades": len(_trade_log),
+        "total_trades": len(trades),
         "wins": len(wins),
         "losses": len(losses),
         "total_pnl": total_pnl,

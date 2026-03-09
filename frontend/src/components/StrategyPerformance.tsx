@@ -10,6 +10,8 @@ import {
   Cell,
 } from 'recharts'
 import { useTrades } from '../hooks/useApi'
+import { useMarket } from '../contexts/MarketContext'
+import { formatCurrency } from '../utils/format'
 
 interface StrategyMetrics {
   strategy: string
@@ -21,15 +23,9 @@ interface StrategyMetrics {
   avgPnl: number
 }
 
-function formatUSD(n: number) {
-  return new Intl.NumberFormat('en-US', {
-    style: 'currency',
-    currency: 'USD',
-  }).format(n)
-}
-
 export default function StrategyPerformance() {
-  const { data: trades, isLoading } = useTrades(200)
+  const { market, currency } = useMarket()
+  const { data: trades, isLoading } = useTrades(200, market)
 
   const strategyMetrics = useMemo(() => {
     if (!trades || trades.length === 0) return []
@@ -66,6 +62,10 @@ export default function StrategyPerformance() {
     return metrics.sort((a, b) => b.totalPnl - a.totalPnl)
   }, [trades])
 
+  const yTickFormatter = currency === 'KRW'
+    ? (v: number) => `${(v / 10000).toFixed(0)}만`
+    : (v: number) => `$${v.toLocaleString()}`
+
   if (isLoading) {
     return <div className="text-gray-500">Loading trade data...</div>
   }
@@ -95,7 +95,7 @@ export default function StrategyPerformance() {
               <YAxis
                 tick={{ fill: '#9CA3AF', fontSize: 11 }}
                 tickLine={{ stroke: '#4B5563' }}
-                tickFormatter={v => `$${v.toLocaleString()}`}
+                tickFormatter={yTickFormatter}
               />
               <Tooltip
                 contentStyle={{
@@ -104,7 +104,7 @@ export default function StrategyPerformance() {
                   borderRadius: '0.5rem',
                   color: '#F9FAFB',
                 }}
-                formatter={(value: number) => [formatUSD(value), 'Total P&L']}
+                formatter={(value: number) => [formatCurrency(value, currency), 'Total P&L']}
               />
               <Bar dataKey="totalPnl" radius={[4, 4, 0, 0]}>
                 {strategyMetrics.map((entry, index) => (
@@ -149,12 +149,12 @@ export default function StrategyPerformance() {
                   </td>
                   <td className="text-right py-2">
                     <span className={m.totalPnl >= 0 ? 'text-green-400' : 'text-red-400'}>
-                      {m.totalPnl >= 0 ? '+' : ''}{formatUSD(m.totalPnl)}
+                      {m.totalPnl >= 0 ? '+' : ''}{formatCurrency(m.totalPnl, currency)}
                     </span>
                   </td>
                   <td className="text-right py-2">
                     <span className={m.avgPnl >= 0 ? 'text-green-400' : 'text-red-400'}>
-                      {m.avgPnl >= 0 ? '+' : ''}{formatUSD(m.avgPnl)}
+                      {m.avgPnl >= 0 ? '+' : ''}{formatCurrency(m.avgPnl, currency)}
                     </span>
                   </td>
                 </tr>

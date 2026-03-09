@@ -47,41 +47,41 @@ export function useEngineStatus() {
   })
 }
 
-export function useWatchlist() {
+export function useWatchlist(market = 'US') {
   return useQuery({
-    queryKey: ['watchlist'],
-    queryFn: api.fetchWatchlist,
+    queryKey: ['watchlist', market],
+    queryFn: () => api.fetchWatchlist(market),
   })
 }
 
-export function useAddToWatchlist() {
+export function useAddToWatchlist(market = 'US') {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: api.addToWatchlist,
+    mutationFn: (symbol: string) => api.addToWatchlist(symbol, market),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['watchlist'] }),
   })
 }
 
-export function useRemoveFromWatchlist() {
+export function useRemoveFromWatchlist(market = 'US') {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: api.removeFromWatchlist,
+    mutationFn: (symbol: string) => api.removeFromWatchlist(symbol, market),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['watchlist'] }),
   })
 }
 
-export function useTrades(limit = 50) {
+export function useTrades(limit = 50, market?: string) {
   return useQuery({
-    queryKey: ['trades', limit],
-    queryFn: () => api.fetchTrades(limit),
+    queryKey: ['trades', limit, market],
+    queryFn: () => api.fetchTrades(limit, market),
     refetchInterval: 15_000,
   })
 }
 
-export function useTradeSummary() {
+export function useTradeSummary(market?: string) {
   return useQuery({
-    queryKey: ['trades', 'summary'],
-    queryFn: api.fetchTradeSummary,
+    queryKey: ['trades', 'summary', market],
+    queryFn: () => api.fetchTradeSummary(market),
     refetchInterval: 15_000,
   })
 }
@@ -99,10 +99,10 @@ export function useEngineControl() {
   return { start: startMutation, stop: stopMutation }
 }
 
-export function useEquityHistory(days = 30) {
+export function useEquityHistory(days = 30, market = 'US') {
   return useQuery({
-    queryKey: ['portfolio', 'equity-history', days],
-    queryFn: () => api.fetchEquityHistory(days),
+    queryKey: ['portfolio', 'equity-history', days, market],
+    queryFn: () => api.fetchEquityHistory(days, market),
     refetchInterval: 300_000,
   })
 }

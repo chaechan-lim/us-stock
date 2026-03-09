@@ -68,21 +68,21 @@ export const stopEngine = () =>
   api.post('/engine/stop').then(r => r.data)
 
 // Watchlist
-export const fetchWatchlist = () =>
-  api.get<WatchlistResponse>('/watchlist/').then(r => r.data)
+export const fetchWatchlist = (market = 'US') =>
+  api.get<WatchlistResponse>('/watchlist/', { params: { market } }).then(r => r.data)
 
-export const addToWatchlist = (symbol: string) =>
-  api.post<WatchlistResponse>('/watchlist/', { symbol }).then(r => r.data)
+export const addToWatchlist = (symbol: string, market = 'US') =>
+  api.post<WatchlistResponse>('/watchlist/', { symbol, market }).then(r => r.data)
 
-export const removeFromWatchlist = (symbol: string) =>
-  api.delete<WatchlistResponse>(`/watchlist/${symbol}`).then(r => r.data)
+export const removeFromWatchlist = (symbol: string, market = 'US') =>
+  api.delete<WatchlistResponse>(`/watchlist/${symbol}`, { params: { market } }).then(r => r.data)
 
 // Trades
-export const fetchTrades = (limit = 50) =>
-  api.get<Trade[]>('/trades/', { params: { limit } }).then(r => r.data)
+export const fetchTrades = (limit = 50, market?: string) =>
+  api.get<Trade[]>('/trades/', { params: { limit, ...(market && { market }) } }).then(r => r.data)
 
-export const fetchTradeSummary = () =>
-  api.get<TradeSummary>('/trades/summary').then(r => r.data)
+export const fetchTradeSummary = (market?: string) =>
+  api.get<TradeSummary>('/trades/summary', { params: { ...(market && { market }) } }).then(r => r.data)
 
 // Backtest
 export const runBacktest = (params: {
@@ -96,8 +96,8 @@ export const fetchBacktestStrategies = () =>
   api.get('/backtest/strategies').then(r => r.data)
 
 // Portfolio history
-export const fetchEquityHistory = (days = 30) =>
-  api.get('/portfolio/equity-history', { params: { days } }).then(r => r.data)
+export const fetchEquityHistory = (days = 30, market = 'US') =>
+  api.get('/portfolio/equity-history', { params: { days, market } }).then(r => r.data)
 
 // Recovery
 export const fetchRecoveryStatus = () =>
