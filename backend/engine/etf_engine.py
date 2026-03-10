@@ -88,6 +88,14 @@ class ETFEngine:
             default_stop_loss_pct=rules.default_stop_loss_pct,
         )
 
+        # Regime-adaptive allocation: stronger trend → bigger ETF positions
+        self._regime_alloc_pct: dict[str, float] = {
+            "strong_uptrend": 0.20,  # Aggressive: 20% per ETF
+            "uptrend": 0.15,         # Standard: 15% per ETF
+            "sideways": 0.00,        # Exit all leveraged
+            "downtrend": 0.10,       # Conservative bear entry (× bear_size_ratio)
+        }
+
         # Track ETF positions managed by this engine
         self._managed_positions: dict[str, ETFPosition] = {}
         self._last_regime: MarketRegime | None = None
@@ -276,8 +284,11 @@ class ETFEngine:
                         continue
                     price = float(df.iloc[-1]["close"])
 
-                    # Position sizing: bear entries use reduced size
-                    max_alloc = balance.total * self._risk.max_single_etf_pct
+                    # Position sizing: regime-adaptive allocation
+                    regime_pct = self._regime_alloc_pct.get(
+                        regime.value, self._risk.max_single_etf_pct,
+                    )
+                    max_alloc = balance.total * regime_pct
                     if is_bear_entry:
                         max_alloc *= self._bear_size_ratio
                     alloc = min(max_alloc, balance.available * 0.9)
@@ -518,4 +529,5 @@ class ETFEngine:
                 "min_confidence": self._bear_min_confidence,
                 "size_ratio": self._bear_size_ratio,
             },
+            "regime_allocation_pct": self._regime_alloc_pct,
         }
