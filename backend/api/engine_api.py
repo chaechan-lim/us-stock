@@ -74,8 +74,20 @@ async def market_state(request: Request):
     result["kr_market_phase"] = kr_phase.value
 
     kr_detector = getattr(request.app.state, "kr_market_state_detector", None)
-    if kr_detector and kr_detector.last_state:
-        kr_state = kr_detector.last_state
+    kr_state = kr_detector.last_state if kr_detector else None
+
+    # If no cached state, fetch on-demand from KODEX 200
+    if not kr_state and kr_detector:
+        kr_md = getattr(request.app.state, "kr_market_data", None)
+        if kr_md:
+            try:
+                kospi_df = await kr_md.get_ohlcv("069500", limit=250)
+                if not kospi_df.empty:
+                    kr_state = kr_detector.detect(kospi_df)
+            except Exception:
+                pass
+
+    if kr_state:
         result.update({
             "kr_regime": kr_state.regime.value,
             "kr_index_price": kr_state.spy_price,

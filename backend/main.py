@@ -1126,6 +1126,26 @@ async def lifespan(app: FastAPI):
         interval_sec=86400, phases=[MarketPhase.PRE_MARKET], market="KR",
     )
 
+    async def task_kr_market_state_update():
+        """Update KR market regime from KODEX 200 data."""
+        try:
+            kospi_df = await kr_market_data.get_ohlcv("069500", limit=250)
+            if not kospi_df.empty:
+                state = kr_market_state_detector.detect(kospi_df)
+                kr_evaluation_loop.set_market_state(state.regime.value)
+                kr_risk_manager.set_market_regime("KR", state.regime.value)
+                logger.info(
+                    "KR market state: %s (KODEX200=%.0f, SMA200=%.0f)",
+                    state.regime.value, state.spy_price, state.spy_sma200,
+                )
+        except Exception as e:
+            logger.error("KR market state update failed: %s", e)
+
+    scheduler.add_task(
+        "kr_market_state_update", task_kr_market_state_update,
+        interval_sec=900, phases=[MarketPhase.REGULAR], market="KR",
+    )
+
     async def task_kr_etf_evaluation():
         """KR ETF Engine: regime-based leveraged pair + sector ETF rotation."""
         try:
@@ -1134,7 +1154,7 @@ async def lifespan(app: FastAPI):
             if kospi_df.empty:
                 return
             state = kr_market_state_detector.detect(kospi_df)
-            risk_manager.set_market_regime("KR", state.regime.value)
+            kr_risk_manager.set_market_regime("KR", state.regime.value)
 
             # Run KR ETF engine evaluation
             actions = await kr_etf_engine.evaluate(
