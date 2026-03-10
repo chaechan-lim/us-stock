@@ -40,8 +40,20 @@ async def get_trades(
         if market:
             trades = [t for t in trades if t.get("market", "US") == market]
         result = trades[-limit:]
+
+        # Batch-resolve missing names (fills cache for future calls)
+        missing = [t for t in result if not t.get("name")]
+        if missing:
+            from data.stock_name_service import resolve_names as _resolve
+            syms_by_market: dict[str, list[str]] = {}
+            for t in missing:
+                mkt = t.get("market", "US")
+                syms_by_market.setdefault(mkt, []).append(t["symbol"])
+            for mkt, syms in syms_by_market.items():
+                await _resolve(list(set(syms)), mkt)
+
         for t in result:
-            if "name" not in t:
+            if not t.get("name"):
                 t["name"] = get_name(t.get("symbol", ""), t.get("market", "US")) or ""
         return result
 
@@ -59,6 +71,7 @@ async def get_trades(
                         "filled_price": o.filled_price,
                         "status": o.status, "strategy": o.strategy_name,
                         "pnl": o.pnl,
+                        "market": getattr(o, "market", "US"),
                         "name": get_name(o.symbol, getattr(o, "market", "US")) or "",
                         "created_at": str(o.created_at),
                     }
@@ -131,6 +144,7 @@ async def _persist_trade(trade: dict) -> None:
                 status=trade.get("status", "filled"),
                 strategy_name=trade.get("strategy", ""),
                 pnl=trade.get("pnl"),
+                market=trade.get("market", "US"),
             )
     except Exception as e:
         logger.warning("Failed to persist trade to DB: %s", e)

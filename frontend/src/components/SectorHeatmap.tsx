@@ -41,24 +41,9 @@ export default function SectorHeatmap() {
   const { market } = useMarket()
   const { data, isLoading, isError } = useQuery({
     queryKey: ['scanner', 'sectors', market],
-    queryFn: api.fetchSectorPerformance,
+    queryFn: () => api.fetchSectorPerformance(market),
     refetchInterval: 300_000,
-    enabled: market === 'US',
   })
-
-  if (market === 'KR') {
-    return (
-      <div className="space-y-4">
-        <div className="flex items-center gap-3">
-          <h2 className="text-lg font-semibold">Sector Heatmap</h2>
-          <MarketToggle />
-        </div>
-        <div className="bg-gray-900 rounded-lg p-8 text-center">
-          <p className="text-gray-500">Sector heatmap is available for US market only.</p>
-        </div>
-      </div>
-    )
-  }
 
   if (isLoading) {
     return <div className="text-gray-500">Loading sector data...</div>

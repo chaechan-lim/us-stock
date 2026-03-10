@@ -55,11 +55,14 @@ async def run_scan(
 
 
 @router.get("/sectors")
-async def sector_performance():
+async def sector_performance(market: str = "US"):
     """Get sector ETF performance data as array for frontend."""
     from data.external_data_service import ExternalDataService
     svc = ExternalDataService()
-    data = await svc.get_sector_performance()
+    if market == "KR":
+        data = await svc.get_kr_sector_performance()
+    else:
+        data = await svc.get_sector_performance()
     if not data:
         return []
     # Convert {name: {symbol, return_1d, ...}} to [{sector, etf_symbol, ...}]
@@ -69,6 +72,7 @@ async def sector_performance():
             result.append({
                 "sector": sector_name,
                 "etf_symbol": info.get("symbol", ""),
+                "return_1d": info.get("return_1d", 0),
                 "return_1w": info.get("return_1w", 0),
                 "return_1m": info.get("return_1m", 0),
             })

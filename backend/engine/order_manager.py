@@ -47,11 +47,13 @@ class OrderManager:
         risk_manager: RiskManager,
         notification=None,
         market_data=None,
+        market: str = "US",
     ):
         self._adapter = adapter
         self._risk = risk_manager
         self._notification = notification
         self._market_data = market_data
+        self._market = market
         self._active_orders: dict[str, ManagedOrder] = {}
 
     def has_pending_order(self, symbol: str, side: str | None = None) -> bool:
@@ -178,6 +180,7 @@ class OrderManager:
                     "slippage": slippage,
                     "strategy": strategy_name, "status": result.status,
                     "created_at": order.created_at,
+                    "market": self._market,
                 })
             return order
 
@@ -257,6 +260,7 @@ class OrderManager:
                     "strategy": strategy_name, "status": result.status,
                     "pnl": None,  # caller can update
                     "created_at": order.created_at,
+                    "market": self._market,
                 })
             return order
 

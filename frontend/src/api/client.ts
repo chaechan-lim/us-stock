@@ -60,8 +60,8 @@ export const runScan = (symbols: string[], minGrade = 'B', maxCandidates = 20) =
     max_candidates: maxCandidates,
   }).then(r => r.data)
 
-export const fetchSectorPerformance = () =>
-  api.get('/scanner/sectors').then(r => r.data)
+export const fetchSectorPerformance = (market: string = 'US') =>
+  api.get('/scanner/sectors', { params: { market } }).then(r => r.data)
 
 // Engine
 export const fetchEngineStatus = () =>

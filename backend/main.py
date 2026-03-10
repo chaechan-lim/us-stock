@@ -324,7 +324,7 @@ async def lifespan(app: FastAPI):
     )
     kr_order_manager = OrderManager(
         adapter=kr_adapter, risk_manager=risk_manager, notification=notification,
-        market_data=kr_market_data,
+        market_data=kr_market_data, market="KR",
     )
     kr_position_tracker = PositionTracker(
         adapter=kr_adapter,

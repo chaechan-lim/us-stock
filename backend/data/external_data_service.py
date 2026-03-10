@@ -178,6 +178,40 @@ class ExternalDataService:
 
         return result
 
+    async def get_kr_sector_performance(self) -> dict[str, dict[str, float]]:
+        """Get KR sector performance via KODEX sector ETFs."""
+        kr_sector_etfs = {
+            "091160": "반도체",
+            "305720": "2차전지",
+            "091180": "자동차",
+            "244580": "바이오",
+            "091170": "금융",
+            "315930": "IT",
+            "117680": "철강소재",
+        }
+
+        result = {}
+        for code, sector_name in kr_sector_etfs.items():
+            try:
+                yf_sym = f"{code}.KS"
+                ticker = yf.Ticker(yf_sym)
+                hist = ticker.history(period="3mo")
+                if hist.empty:
+                    continue
+
+                close = hist["Close"]
+                result[sector_name] = {
+                    "symbol": code,
+                    "return_1d": float((close.iloc[-1] / close.iloc[-2] - 1) * 100) if len(close) >= 2 else 0,
+                    "return_1w": float((close.iloc[-1] / close.iloc[-5] - 1) * 100) if len(close) >= 5 else 0,
+                    "return_1m": float((close.iloc[-1] / close.iloc[-21] - 1) * 100) if len(close) >= 21 else 0,
+                    "return_3m": float((close.iloc[-1] / close.iloc[0] - 1) * 100),
+                }
+            except Exception as e:
+                logger.warning("Failed to fetch KR sector data for %s: %s", code, e)
+
+        return result
+
     async def get_multiple_profiles(
         self, symbols: list[str], current_prices: dict[str, float] | None = None
     ) -> list[StockProfile]:
