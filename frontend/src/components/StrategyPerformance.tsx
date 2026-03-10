@@ -29,9 +29,13 @@ export default function StrategyPerformance() {
   const strategyMetrics = useMemo(() => {
     if (!trades || trades.length === 0) return []
 
+    // Only count filled trades for strategy performance
+    const filled = trades.filter(t => t.status === 'filled')
+    if (filled.length === 0) return []
+
     const grouped = new Map<string, { pnls: number[]; wins: number; losses: number }>()
 
-    for (const t of trades) {
+    for (const t of filled) {
       const key = t.strategy || 'unknown'
       if (!grouped.has(key)) {
         grouped.set(key, { pnls: [], wins: 0, losses: 0 })

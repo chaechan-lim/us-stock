@@ -25,16 +25,20 @@ class WebSocketLogHandler(logging.Handler):
         "msecs", "taskName",
     })
 
+    # Python logging level names → frontend-friendly names
+    _LEVEL_MAP = {"WARNING": "WARN", "CRITICAL": "ERROR"}
+
     def emit(self, record: logging.LogRecord):
         if not _log_clients:
             return
         from datetime import datetime, timezone
 
+        level = self._LEVEL_MAP.get(record.levelname, record.levelname)
         payload: dict = {
             "timestamp": datetime.fromtimestamp(
                 record.created, tz=timezone.utc
             ).isoformat(),
-            "level": record.levelname,
+            "level": level,
             "logger": record.name,
             "message": record.getMessage(),
         }

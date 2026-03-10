@@ -170,19 +170,42 @@ class SignalCombiner:
         sell_norm = sell_score / active_weight
 
         if buy_norm > sell_norm and buy_norm >= min_confidence:
+            attribution = top_buy[1]
+            if not attribution:
+                logger.warning(
+                    "Combiner BUY with no top contributor (buy_score=%.4f, active_weight=%.4f, signals=%d)",
+                    buy_score, active_weight, len(signals),
+                )
+                # Extract from first BUY reason as fallback
+                for s in signals:
+                    if s.signal_type == SignalType.BUY and effective_weights.get(s.strategy_name, 0) > 0:
+                        attribution = s.strategy_name
+                        break
+                attribution = attribution or "combiner"
             return Signal(
                 signal_type=SignalType.BUY,
                 confidence=buy_norm,
-                strategy_name=top_buy[1] or "combiner",
+                strategy_name=attribution,
                 reason=f"BUY consensus: {', '.join(reasons)}",
                 indicators=all_indicators,
             )
 
         if sell_norm > buy_norm and sell_norm >= min_confidence:
+            attribution = top_sell[1]
+            if not attribution:
+                logger.warning(
+                    "Combiner SELL with no top contributor (sell_score=%.4f, active_weight=%.4f, signals=%d)",
+                    sell_score, active_weight, len(signals),
+                )
+                for s in signals:
+                    if s.signal_type == SignalType.SELL and effective_weights.get(s.strategy_name, 0) > 0:
+                        attribution = s.strategy_name
+                        break
+                attribution = attribution or "combiner"
             return Signal(
                 signal_type=SignalType.SELL,
                 confidence=sell_norm,
-                strategy_name=top_sell[1] or "combiner",
+                strategy_name=attribution,
                 reason=f"SELL consensus: {', '.join(reasons)}",
                 indicators=all_indicators,
             )
