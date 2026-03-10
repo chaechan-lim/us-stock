@@ -100,7 +100,7 @@ exchanges:
 # Risk limits for leveraged ETFs
 risk_rules:
   max_hold_days: 20        # No holding leveraged >20 days (backtest: 10d too short)
-  max_portfolio_pct: 0.30  # Max 30% in leveraged ETFs
-  max_single_etf_pct: 0.15 # Max 15% in single ETF
+  max_portfolio_pct: 0.20  # Max 20% in leveraged ETFs
+  max_single_etf_pct: 0.10 # Max 10% in single ETF
   require_stop_loss: true   # Always use stop-loss
   default_stop_loss_pct: 0.08

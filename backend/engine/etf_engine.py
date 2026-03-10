@@ -89,11 +89,12 @@ class ETFEngine:
         )
 
         # Regime-adaptive allocation: stronger trend → bigger ETF positions
+        # Keep modest to avoid excessive leveraged exposure on top of stock positions
         self._regime_alloc_pct: dict[str, float] = {
-            "strong_uptrend": 0.20,  # Aggressive: 20% per ETF
-            "uptrend": 0.15,         # Standard: 15% per ETF
+            "strong_uptrend": 0.10,  # 10% per ETF → max 20% nominal, 60% effective
+            "uptrend": 0.07,         # 7% per ETF → max 14% nominal, 42% effective
             "sideways": 0.00,        # Exit all leveraged
-            "downtrend": 0.10,       # Conservative bear entry (× bear_size_ratio)
+            "downtrend": 0.05,       # 5% per ETF (× bear_size_ratio → 2%)
         }
 
         # Track ETF positions managed by this engine
