@@ -4,7 +4,9 @@ Provides fundamental data, analyst consensus, and macro indicators
 that KIS API does not offer for overseas stocks.
 """
 
+import asyncio
 import logging
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -12,6 +14,10 @@ import yfinance as yf
 import pandas as pd
 
 logger = logging.getLogger(__name__)
+
+# In-memory sector performance cache (shared across all instances)
+_sector_cache: dict[str, tuple[float, dict]] = {}  # {market: (timestamp, data)}
+_SECTOR_CACHE_TTL = 900  # 15 minutes
 
 
 @dataclass
@@ -142,7 +148,11 @@ class ExternalDataService:
             return pd.DataFrame()
 
     async def get_sector_performance(self) -> dict[str, dict[str, float]]:
-        """Get 11 GICS sector ETF performance."""
+        """Get 11 GICS sector ETF performance (cached, parallel)."""
+        cached = _sector_cache.get("US")
+        if cached and (time.time() - cached[0]) < _SECTOR_CACHE_TTL:
+            return cached[1]
+
         sector_etfs = {
             "XLK": "Technology",
             "XLF": "Financials",
@@ -157,29 +167,16 @@ class ExternalDataService:
             "XLC": "Communications",
         }
 
-        result = {}
-        for etf_symbol, sector_name in sector_etfs.items():
-            try:
-                ticker = yf.Ticker(etf_symbol)
-                hist = ticker.history(period="3mo")
-                if hist.empty:
-                    continue
-
-                close = hist["Close"]
-                result[sector_name] = {
-                    "symbol": etf_symbol,
-                    "return_1d": float((close.iloc[-1] / close.iloc[-2] - 1) * 100) if len(close) >= 2 else 0,
-                    "return_1w": float((close.iloc[-1] / close.iloc[-5] - 1) * 100) if len(close) >= 5 else 0,
-                    "return_1m": float((close.iloc[-1] / close.iloc[-21] - 1) * 100) if len(close) >= 21 else 0,
-                    "return_3m": float((close.iloc[-1] / close.iloc[0] - 1) * 100),
-                }
-            except Exception as e:
-                logger.warning("Failed to fetch sector data for %s: %s", etf_symbol, e)
-
+        result = await self._fetch_sector_batch(sector_etfs)
+        _sector_cache["US"] = (time.time(), result)
         return result
 
     async def get_kr_sector_performance(self) -> dict[str, dict[str, float]]:
-        """Get KR sector performance via KODEX sector ETFs."""
+        """Get KR sector performance via KODEX sector ETFs (cached, parallel)."""
+        cached = _sector_cache.get("KR")
+        if cached and (time.time() - cached[0]) < _SECTOR_CACHE_TTL:
+            return cached[1]
+
         kr_sector_etfs = {
             "091160": "반도체",
             "305720": "2차전지",
@@ -190,25 +187,61 @@ class ExternalDataService:
             "117680": "철강소재",
         }
 
+        # KR symbols need .KS suffix for yfinance
+        yf_map = {f"{code}.KS": name for code, name in kr_sector_etfs.items()}
+        result = await self._fetch_sector_batch(yf_map)
+        # Restore original codes (without .KS) in symbol field
+        for name, info in result.items():
+            sym = info.get("symbol", "")
+            if sym.endswith(".KS"):
+                info["symbol"] = sym.replace(".KS", "")
+        _sector_cache["KR"] = (time.time(), result)
+        return result
+
+    @staticmethod
+    async def _fetch_sector_batch(
+        etf_map: dict[str, str],
+    ) -> dict[str, dict[str, float]]:
+        """Fetch sector ETF performance in parallel using yfinance batch download."""
+        symbols = list(etf_map.keys())
+        loop = asyncio.get_event_loop()
+
+        try:
+            # yfinance batch download — single HTTP call for all tickers
+            df = await loop.run_in_executor(
+                None,
+                lambda: yf.download(symbols, period="1mo", progress=False, threads=True),
+            )
+        except Exception as e:
+            logger.warning("Batch sector download failed: %s", e)
+            return {}
+
+        if df.empty:
+            return {}
+
         result = {}
-        for code, sector_name in kr_sector_etfs.items():
+        for symbol, sector_name in etf_map.items():
             try:
-                yf_sym = f"{code}.KS"
-                ticker = yf.Ticker(yf_sym)
-                hist = ticker.history(period="3mo")
-                if hist.empty:
+                # yf.download returns MultiIndex columns for multiple tickers
+                if len(symbols) > 1:
+                    close = df[("Close", symbol)].dropna()
+                else:
+                    close = df["Close"].dropna()
+
+                if len(close) < 2:
                     continue
 
-                close = hist["Close"]
                 result[sector_name] = {
-                    "symbol": code,
+                    "symbol": symbol,
                     "return_1d": float((close.iloc[-1] / close.iloc[-2] - 1) * 100) if len(close) >= 2 else 0,
                     "return_1w": float((close.iloc[-1] / close.iloc[-5] - 1) * 100) if len(close) >= 5 else 0,
-                    "return_1m": float((close.iloc[-1] / close.iloc[-21] - 1) * 100) if len(close) >= 21 else 0,
-                    "return_3m": float((close.iloc[-1] / close.iloc[0] - 1) * 100),
+                    "return_1m": float((close.iloc[-1] / close.iloc[0] - 1) * 100),
+                    "return_3m": 0.0,  # Not available in 1mo download
                 }
             except Exception as e:
-                logger.warning("Failed to fetch KR sector data for %s: %s", code, e)
+                logger.debug("Failed to process sector %s (%s): %s", sector_name, symbol, e)
+
+        return result
 
         return result
 
