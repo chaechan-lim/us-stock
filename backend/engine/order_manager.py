@@ -179,6 +179,7 @@ class OrderManager:
                 )
             if _trade_recorder:
                 _trade_recorder({
+                    "order_id": result.order_id,
                     "symbol": symbol, "side": "BUY", "quantity": sizing.quantity,
                     "price": price, "filled_price": result.filled_price,
                     "filled_quantity": filled_qty,
@@ -261,6 +262,7 @@ class OrderManager:
                 )
             if _trade_recorder:
                 _trade_recorder({
+                    "order_id": result.order_id,
                     "symbol": symbol, "side": "SELL", "quantity": quantity,
                     "price": price, "filled_price": result.filled_price,
                     "filled_quantity": filled_qty,
@@ -347,7 +349,11 @@ class OrderManager:
                     "old_status": old_status,
                     "new_status": result.status,
                     "filled_quantity": order.filled_quantity,
+                    "filled_price": order.filled_price,
                     "quantity": order.quantity,
+                    "price": order.price,
+                    "strategy": order.strategy_name,
+                    "market": getattr(order, "exchange", "NASD"),
                 })
                 logger.info(
                     "Order %s (%s %s): %s -> %s (filled=%d/%d)",

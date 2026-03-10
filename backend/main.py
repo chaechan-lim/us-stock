@@ -507,6 +507,30 @@ async def lifespan(app: FastAPI):
         changes = await order_manager.reconcile_all()
         if changes:
             logger.info("Order reconciliation: %d status changes", len(changes))
+            # Persist status changes to DB
+            from api.trades import update_order_in_db, record_trade
+            for change in changes:
+                await update_order_in_db(
+                    kis_order_id=change.get("order_id", ""),
+                    status=change["new_status"],
+                    filled_price=change.get("filled_price"),
+                    filled_quantity=change.get("filled_quantity"),
+                )
+                # If newly filled, also record to in-memory trade log
+                if change["new_status"] == "filled" and change["old_status"] != "filled":
+                    record_trade({
+                        "order_id": change.get("order_id", ""),
+                        "symbol": change["symbol"],
+                        "side": change["side"],
+                        "quantity": change.get("quantity", 0),
+                        "price": change.get("price"),
+                        "filled_price": change.get("filled_price"),
+                        "filled_quantity": change.get("filled_quantity", 0),
+                        "strategy": change.get("strategy", ""),
+                        "status": "filled",
+                        "market": "US",
+                        "created_at": "",
+                    })
 
     async def task_market_state_update():
         """T0: Update market regime from SPY data."""
@@ -1061,6 +1085,28 @@ async def lifespan(app: FastAPI):
         changes = await kr_order_manager.reconcile_all()
         if changes:
             logger.info("KR order reconciliation: %d status changes", len(changes))
+            from api.trades import update_order_in_db, record_trade
+            for change in changes:
+                await update_order_in_db(
+                    kis_order_id=change.get("order_id", ""),
+                    status=change["new_status"],
+                    filled_price=change.get("filled_price"),
+                    filled_quantity=change.get("filled_quantity"),
+                )
+                if change["new_status"] == "filled" and change["old_status"] != "filled":
+                    record_trade({
+                        "order_id": change.get("order_id", ""),
+                        "symbol": change["symbol"],
+                        "side": change["side"],
+                        "quantity": change.get("quantity", 0),
+                        "price": change.get("price"),
+                        "filled_price": change.get("filled_price"),
+                        "filled_quantity": change.get("filled_quantity", 0),
+                        "strategy": change.get("strategy", ""),
+                        "status": "filled",
+                        "market": "KR",
+                        "created_at": "",
+                    })
 
     async def task_kr_portfolio_snapshot():
         await kr_portfolio_manager.save_snapshot()
@@ -1274,6 +1320,28 @@ async def lifespan(app: FastAPI):
                     )
     except Exception as e:
         logger.warning("Orphaned order cleanup failed: %s", e)
+
+    # Reconcile pending DB orders + restore trade log
+    try:
+        from api.trades import reconcile_pending_orders, restore_trade_log
+
+        # Collect all currently held symbols (from position restore above)
+        held_symbols: set[str] = set()
+        for p in (us_restored or []):
+            held_symbols.add(p["symbol"])
+        for p in (kr_restored or []):
+            held_symbols.add(p["symbol"])
+
+        # Update pending DB orders based on what we actually hold
+        reconciled = await reconcile_pending_orders(held_symbols)
+        if reconciled:
+            logger.info("Reconciled %d pending DB orders on startup", reconciled)
+
+        # Restore in-memory trade log from DB (includes just-reconciled orders)
+        count = await restore_trade_log()
+        logger.info("Trade log restored: %d entries from DB", count)
+    except Exception as e:
+        logger.warning("DB order reconciliation/restore failed: %s", e)
 
     # Auto-start scheduler (store task ref to detect crashes)
     _scheduler_task = asyncio.create_task(scheduler.start(), name="scheduler")

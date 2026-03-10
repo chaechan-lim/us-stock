@@ -2,6 +2,7 @@
 
 Maintains an in-memory trade log AND persists to DB via TradeRepository.
 The in-memory log is the primary fast-path; DB is the durable store.
+On startup, the trade log is restored from DB so history survives restarts.
 """
 
 import logging
@@ -12,7 +13,7 @@ from fastapi import APIRouter, Query, Request
 router = APIRouter(prefix="/trades", tags=["trades"])
 logger = logging.getLogger(__name__)
 
-# In-memory trade log (fast reads, lost on restart)
+# In-memory trade log (restored from DB on startup)
 _trade_log: list[dict] = []
 
 # Session factory — set at startup via init_trades()
@@ -143,8 +144,142 @@ async def _persist_trade(trade: dict) -> None:
                 filled_price=trade.get("filled_price"),
                 status=trade.get("status", "filled"),
                 strategy_name=trade.get("strategy", ""),
+                kis_order_id=trade.get("order_id", ""),
                 pnl=trade.get("pnl"),
                 market=trade.get("market", "US"),
             )
     except Exception as e:
         logger.warning("Failed to persist trade to DB: %s", e)
+
+
+def _order_to_dict(o) -> dict:
+    """Convert an Order ORM object to trade log dict."""
+    return {
+        "order_id": o.kis_order_id or "",
+        "symbol": o.symbol,
+        "side": o.side,
+        "quantity": o.quantity,
+        "price": o.price,
+        "filled_price": o.filled_price,
+        "filled_quantity": o.filled_quantity,
+        "status": o.status,
+        "strategy": o.strategy_name or "",
+        "pnl": o.pnl,
+        "market": getattr(o, "market", "US"),
+        "created_at": str(o.created_at) if o.created_at else "",
+        "db_id": o.id,
+    }
+
+
+async def restore_trade_log() -> int:
+    """Restore in-memory trade log from DB on startup.
+
+    Returns count of restored trades.
+    """
+    if not _session_factory:
+        return 0
+    try:
+        from db.trade_repository import TradeRepository
+        async with _session_factory() as session:
+            repo = TradeRepository(session)
+            orders = await repo.get_trade_history(limit=200)
+            _trade_log.clear()
+            for o in reversed(orders):  # oldest first
+                _trade_log.append(_order_to_dict(o))
+        logger.info("Restored %d trades from DB into trade log", len(_trade_log))
+        return len(_trade_log)
+    except Exception as e:
+        logger.warning("Failed to restore trade log from DB: %s", e)
+        return 0
+
+
+async def reconcile_pending_orders(held_symbols: set[str]) -> int:
+    """Reconcile pending DB orders using current exchange positions.
+
+    Heuristic for orders without kis_order_id:
+    - BUY + symbol in held_symbols → filled
+    - SELL + symbol NOT in held_symbols → filled
+    - Otherwise → cancelled (orphan cleanup already ran)
+
+    Returns count of updated orders.
+    """
+    if not _session_factory:
+        return 0
+    updated = 0
+    try:
+        from db.trade_repository import TradeRepository
+        async with _session_factory() as session:
+            repo = TradeRepository(session)
+            pending = await repo.get_open_orders()
+            if not pending:
+                return 0
+
+            for o in pending:
+                if o.side == "BUY" and o.symbol in held_symbols:
+                    # We hold this stock → BUY was filled
+                    await repo.update_order_status(
+                        o.id, "filled",
+                        filled_price=o.price,
+                        filled_quantity=o.quantity,
+                    )
+                    updated += 1
+                elif o.side == "SELL" and o.symbol not in held_symbols:
+                    # We don't hold this stock → SELL was filled
+                    await repo.update_order_status(
+                        o.id, "filled",
+                        filled_price=o.price,
+                        filled_quantity=o.quantity,
+                    )
+                    updated += 1
+                else:
+                    # BUY but not held / SELL but still held → cancelled
+                    await repo.update_order_status(o.id, "cancelled")
+                    updated += 1
+
+            if updated:
+                logger.info(
+                    "Reconciled %d pending DB orders (held=%s)",
+                    updated, ", ".join(sorted(held_symbols)) or "none",
+                )
+    except Exception as e:
+        logger.warning("Failed to reconcile pending DB orders: %s", e)
+    return updated
+
+
+async def update_order_in_db(
+    kis_order_id: str,
+    status: str,
+    filled_price: float | None = None,
+    filled_quantity: float | None = None,
+) -> bool:
+    """Update a specific order's status in DB by KIS order ID.
+
+    Called by reconciliation task when exchange confirms status change.
+    Also updates the in-memory trade log entry.
+    """
+    if not _session_factory or not kis_order_id:
+        return False
+    try:
+        from db.trade_repository import TradeRepository
+        async with _session_factory() as session:
+            repo = TradeRepository(session)
+            order = await repo.find_by_kis_order_id(kis_order_id)
+            if order:
+                await repo.update_order_status(
+                    order.id, status,
+                    filled_price=filled_price,
+                    filled_quantity=filled_quantity,
+                )
+                # Update in-memory trade log too
+                for t in _trade_log:
+                    if t.get("order_id") == kis_order_id:
+                        t["status"] = status
+                        if filled_price is not None:
+                            t["filled_price"] = filled_price
+                        if filled_quantity is not None:
+                            t["filled_quantity"] = filled_quantity
+                        break
+                return True
+    except Exception as e:
+        logger.warning("Failed to update order %s in DB: %s", kis_order_id, e)
+    return False

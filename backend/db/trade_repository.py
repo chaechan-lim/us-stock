@@ -88,9 +88,17 @@ class TradeRepository:
         return list(result.scalars().all())
 
     async def get_open_orders(self) -> list[Order]:
-        stmt = select(Order).where(Order.status.in_(["pending", "open"]))
+        stmt = select(Order).where(Order.status.in_(["pending", "open", "submitted"]))
         result = await self._session.execute(stmt)
         return list(result.scalars().all())
+
+    async def find_by_kis_order_id(self, kis_order_id: str) -> Order | None:
+        """Find an order by KIS exchange order ID."""
+        if not kis_order_id:
+            return None
+        stmt = select(Order).where(Order.kis_order_id == kis_order_id).limit(1)
+        result = await self._session.execute(stmt)
+        return result.scalar_one_or_none()
 
     async def get_recent_trades(self, hours: int = 24) -> list[Order]:
         """Get filled trades from the last N hours."""
