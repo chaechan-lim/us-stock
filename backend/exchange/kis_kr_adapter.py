@@ -42,6 +42,7 @@ TR_ID_KR_LIVE = {
     # Account
     "BALANCE": "TTTC8434R",
     "PENDING_ORDERS": "TTTC8036R",
+    "BUYING_POWER": "TTTC8908R",
 }
 
 TR_ID_KR_PAPER = {
@@ -51,6 +52,7 @@ TR_ID_KR_PAPER = {
     "CANCEL": "VTTC0803U",
     "BALANCE": "VTTC8434R",
     "PENDING_ORDERS": "VTTC8036R",
+    "BUYING_POWER": "VTTC8908R",
 }
 
 # Exchange code mapping: our enum -> KIS FID_COND_MRKT_DIV_CODE
@@ -213,7 +215,18 @@ class KISKRAdapter(ExchangeAdapter):
 
         total = float(output2.get("tot_evlu_amt", 0))         # 총평가금액
         invested = float(output2.get("pchs_amt_smtl_amt", 0)) # 매입금액합계
-        available = float(output2.get("dnca_tot_amt", 0))      # 예수금총금액
+        deposit = float(output2.get("dnca_tot_amt", 0))       # 예수금총금액
+
+        # Get actual orderable amount via 주문가능조회
+        # dnca_tot_amt includes unsettled US stock buys — not actual buying power
+        available = await self._fetch_orderable_amount()
+        if available is None:
+            available = deposit  # fallback
+
+        logger.debug(
+            "KR balance: deposit=%.0f, orderable=%.0f, total=%.0f, invested=%.0f",
+            deposit, available, total, invested,
+        )
 
         return Balance(
             currency="KRW",
@@ -221,6 +234,35 @@ class KISKRAdapter(ExchangeAdapter):
             available=available,
             locked=invested,
         )
+
+    async def _fetch_orderable_amount(self) -> float | None:
+        """Query actual orderable cash via 주문가능조회 API."""
+        try:
+            params = {
+                "CANO": self._config.account_no,
+                "ACNT_PRDT_CD": self._config.account_product,
+                "PDNO": "005930",       # Reference stock (삼성전자)
+                "ORD_UNPR": "0",        # 0 = market order context
+                "ORD_DVSN": "01",       # 01 = 시장가
+                "CMA_EVLU_AMT_ICLD_YN": "Y",
+                "OVRS_ICLD_YN": "Y",    # Include overseas positions
+            }
+            data = await self._get(
+                "/uapi/domestic-stock/v1/trading/inquire-psbl-order",
+                self._tr["BUYING_POWER"],
+                params,
+            )
+            if data.get("rt_cd") != "0":
+                logger.warning("주문가능조회 API failed: %s", data.get("msg1", ""))
+                return None
+            output = data.get("output", {})
+            # ord_psbl_cash = 주문가능현금 (actual orderable cash)
+            orderable = float(output.get("ord_psbl_cash", 0))
+            logger.info("KR orderable cash (주문가능현금): %.0f KRW", orderable)
+            return orderable
+        except Exception as e:
+            logger.warning("Failed to fetch KR orderable amount: %s", e)
+            return None
 
     async def fetch_positions(self) -> list[Position]:
         await self._auth.ensure_valid_token()

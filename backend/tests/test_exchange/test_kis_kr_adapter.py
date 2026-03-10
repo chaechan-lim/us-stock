@@ -72,9 +72,11 @@ class TestFetchBalance:
     @pytest.mark.asyncio
     async def test_returns_krw_balance(self, adapter):
         adapter._session = MagicMock()
-        mock_resp = AsyncMock()
-        mock_resp.status = 200
-        mock_resp.json = AsyncMock(return_value={
+
+        # Mock responses: first call = balance, second call = buying power
+        balance_resp = AsyncMock()
+        balance_resp.status = 200
+        balance_resp.json = AsyncMock(return_value={
             "rt_cd": "0",
             "output1": [],
             "output2": [{
@@ -83,16 +85,58 @@ class TestFetchBalance:
                 "dnca_tot_amt": "20000000",
             }],
         })
-        ctx = MagicMock()
-        ctx.__aenter__ = AsyncMock(return_value=mock_resp)
-        ctx.__aexit__ = AsyncMock(return_value=False)
-        adapter._session.get = MagicMock(return_value=ctx)
+
+        buying_power_resp = AsyncMock()
+        buying_power_resp.status = 200
+        buying_power_resp.json = AsyncMock(return_value={
+            "rt_cd": "0",
+            "output": {"ord_psbl_cash": "15000000"},
+        })
+
+        ctx1 = MagicMock()
+        ctx1.__aenter__ = AsyncMock(return_value=balance_resp)
+        ctx1.__aexit__ = AsyncMock(return_value=False)
+
+        ctx2 = MagicMock()
+        ctx2.__aenter__ = AsyncMock(return_value=buying_power_resp)
+        ctx2.__aexit__ = AsyncMock(return_value=False)
+
+        adapter._session.get = MagicMock(side_effect=[ctx1, ctx2])
 
         balance = await adapter.fetch_balance()
         assert balance.currency == "KRW"
         assert balance.total == 50000000.0
-        assert balance.available == 20000000.0
+        assert balance.available == 15000000.0  # from 주문가능조회
         assert balance.locked == 30000000.0
+
+    @pytest.mark.asyncio
+    async def test_balance_fallback_on_buying_power_failure(self, adapter):
+        """If 주문가능조회 fails, fall back to dnca_tot_amt."""
+        adapter._session = MagicMock()
+
+        balance_resp = AsyncMock()
+        balance_resp.status = 200
+        balance_resp.json = AsyncMock(return_value={
+            "rt_cd": "0",
+            "output2": [{"tot_evlu_amt": "50000000", "pchs_amt_smtl_amt": "30000000", "dnca_tot_amt": "20000000"}],
+        })
+
+        error_resp = AsyncMock()
+        error_resp.status = 500
+        error_resp.json = AsyncMock(return_value={"rt_cd": "-1", "msg1": "Error"})
+
+        ctx1 = MagicMock()
+        ctx1.__aenter__ = AsyncMock(return_value=balance_resp)
+        ctx1.__aexit__ = AsyncMock(return_value=False)
+
+        ctx2 = MagicMock()
+        ctx2.__aenter__ = AsyncMock(return_value=error_resp)
+        ctx2.__aexit__ = AsyncMock(return_value=False)
+
+        adapter._session.get = MagicMock(side_effect=[ctx1, ctx2, ctx2, ctx2])
+
+        balance = await adapter.fetch_balance()
+        assert balance.available == 20000000.0  # fallback to dnca_tot_amt
 
 
 class TestFetchPositions:
