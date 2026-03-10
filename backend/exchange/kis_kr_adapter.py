@@ -256,10 +256,6 @@ class KISKRAdapter(ExchangeAdapter):
                 logger.warning("주문가능조회 API failed: %s", data.get("msg1", ""))
                 return None
             output = data.get("output", {})
-            logger.info(
-                "KR 주문가능조회 raw: %s",
-                {k: v for k, v in output.items() if v and v != "0"},
-            )
             # ord_psbl_cash = 주문가능현금 (actual orderable cash)
             orderable = float(output.get("ord_psbl_cash", 0))
             logger.info("KR orderable cash (주문가능현금): %.0f KRW", orderable)
