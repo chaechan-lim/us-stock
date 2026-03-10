@@ -3,8 +3,9 @@ import { formatCurrency } from '../utils/format'
 import clsx from 'clsx'
 
 export default function TradeHistory() {
-  const { data: trades, isLoading } = useTrades(100)
+  const { data: rawTrades, isLoading } = useTrades(100)
   const { data: summary } = useTradeSummary()
+  const trades = rawTrades?.filter(t => t.status !== 'pending')
 
   return (
     <div className="space-y-4">

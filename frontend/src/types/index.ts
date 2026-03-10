@@ -31,6 +31,10 @@ export interface Position {
   unrealized_pnl: number
   unrealized_pnl_pct: number
   market?: string
+  stop_loss_pct?: number
+  take_profit_pct?: number
+  highest_price?: number
+  trailing_active?: boolean
 }
 
 export interface TickerData {
