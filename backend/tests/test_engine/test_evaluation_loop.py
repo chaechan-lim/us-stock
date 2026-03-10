@@ -264,6 +264,145 @@ class TestRiskAgentIntegration:
         mock_adapter.create_buy_order.assert_called_once()
 
 
+class TestConfidenceRankedBuy:
+    """Test that BUYs are ranked by confidence and SELLs execute immediately."""
+
+    @pytest.fixture
+    def multi_signal_loop(self, mock_adapter, mock_market_data):
+        from data.indicator_service import IndicatorService
+        from strategies.combiner import SignalCombiner
+
+        registry = MagicMock()
+        risk = RiskManager()
+        order_mgr = OrderManager(adapter=mock_adapter, risk_manager=risk)
+
+        return EvaluationLoop(
+            adapter=mock_adapter,
+            market_data=mock_market_data,
+            indicator_svc=IndicatorService(),
+            registry=registry,
+            combiner=SignalCombiner(),
+            order_manager=order_mgr,
+            risk_manager=risk,
+            watchlist=["LOW_CONF", "HIGH_CONF", "MID_CONF"],
+            market_state="uptrend",
+        ), registry
+
+    async def test_buys_execute_highest_confidence_first(
+        self, multi_signal_loop, mock_adapter,
+    ):
+        """BUY signals should execute in descending confidence order."""
+        loop, registry = multi_signal_loop
+        call_order = []
+        original_create = mock_adapter.create_buy_order
+
+        async def track_buy(*args, **kwargs):
+            call_order.append(kwargs.get("symbol") or args[0])
+            return await original_create(*args, **kwargs)
+
+        mock_adapter.create_buy_order = AsyncMock(side_effect=track_buy)
+
+        # Each symbol returns a different confidence BUY signal
+        confidence_map = {"LOW_CONF": 0.55, "HIGH_CONF": 0.95, "MID_CONF": 0.75}
+
+        def make_strategy(symbol):
+            s = AsyncMock()
+            s.name = "trend_following"
+            s.analyze = AsyncMock(return_value=Signal(
+                signal_type=SignalType.BUY,
+                confidence=confidence_map[symbol],
+                strategy_name="trend_following",
+                reason="test",
+            ))
+            return s
+
+        # Registry returns strategy per symbol
+        strategy = AsyncMock()
+        strategy.name = "trend_following"
+        call_count = [0]
+        symbols_order = ["LOW_CONF", "HIGH_CONF", "MID_CONF"]
+
+        async def dynamic_analyze(df, symbol):
+            return Signal(
+                signal_type=SignalType.BUY,
+                confidence=confidence_map[symbol],
+                strategy_name="trend_following",
+                reason="test",
+            )
+
+        strategy.analyze = AsyncMock(side_effect=dynamic_analyze)
+        registry.get_enabled.return_value = [strategy]
+        registry.get_profile_weights.return_value = {"trend_following": 1.0}
+
+        await loop._evaluate_all()
+
+        # Should be called in order: HIGH_CONF (0.95), MID_CONF (0.75), LOW_CONF (0.55)
+        assert len(call_order) == 3
+        assert call_order[0] == "HIGH_CONF"
+        assert call_order[1] == "MID_CONF"
+        assert call_order[2] == "LOW_CONF"
+
+    async def test_sells_execute_before_buys(
+        self, mock_adapter, mock_market_data,
+    ):
+        """SELL signals should execute immediately, not wait for ranking."""
+        from data.indicator_service import IndicatorService
+        from strategies.combiner import SignalCombiner
+
+        registry = MagicMock()
+        risk = RiskManager()
+        order_mgr = OrderManager(adapter=mock_adapter, risk_manager=risk)
+
+        loop = EvaluationLoop(
+            adapter=mock_adapter,
+            market_data=mock_market_data,
+            indicator_svc=IndicatorService(),
+            registry=registry,
+            combiner=SignalCombiner(),
+            order_manager=order_mgr,
+            risk_manager=risk,
+            watchlist=["BUY_STOCK", "SELL_STOCK"],
+            market_state="uptrend",
+        )
+
+        # SELL_STOCK has a position
+        mock_market_data.get_positions.return_value = [
+            Position(symbol="SELL_STOCK", exchange="NASD", quantity=10, avg_price=100.0),
+        ]
+        mock_adapter.create_sell_order = AsyncMock(return_value=OrderResult(
+            order_id="O2", symbol="SELL_STOCK", side="SELL",
+            order_type="limit", quantity=10, price=105.0,
+            status="filled", filled_price=105.0,
+        ))
+
+        signal_map = {
+            "BUY_STOCK": Signal(
+                signal_type=SignalType.BUY, confidence=0.8,
+                strategy_name="trend_following", reason="buy",
+            ),
+            "SELL_STOCK": Signal(
+                signal_type=SignalType.SELL, confidence=0.7,
+                strategy_name="trend_following", reason="sell",
+            ),
+        }
+
+        strategy = AsyncMock()
+        strategy.name = "trend_following"
+
+        async def dynamic_analyze(df, symbol):
+            return signal_map[symbol]
+
+        strategy.analyze = AsyncMock(side_effect=dynamic_analyze)
+        registry.get_enabled.return_value = [strategy]
+        registry.get_profile_weights.return_value = {"trend_following": 1.0}
+
+        await loop._evaluate_all()
+
+        # Both should execute
+        mock_adapter.create_sell_order.assert_called_once()
+        mock_adapter.create_buy_order.assert_called_once()
+
+
 class TestKRMarketExchange:
     """Test that KR market skips yfinance exchange resolution."""
 

@@ -261,8 +261,9 @@ class RiskManager:
         # Adjust by factor score: positive factor → up to 1.3x, negative → down to 0.7x
         import numpy as np
         factor_mult = 1.0 + 0.3 * np.tanh(factor_score) if factor_score != 0 else 1.0
-        # Adjust by confidence: scale linearly 0.5-1.0 → 0.7-1.0
-        conf_mult = 0.7 + 0.3 * min(signal_confidence, 1.0) if signal_confidence > 0 else 0.7
+        # Adjust by confidence: scale linearly — low confidence gets much smaller position
+        # conf=0.3→0.58, conf=0.5→0.70, conf=0.7→0.82, conf=0.9→0.94, conf=1.0→1.0
+        conf_mult = 0.4 + 0.6 * min(signal_confidence, 1.0) if signal_confidence > 0 else 0.4
         adjusted_pct = base_pct * factor_mult * conf_mult
         adjusted_pct = min(adjusted_pct, self._params.max_position_pct)
 

@@ -176,15 +176,68 @@ class EvaluationLoop:
         )
 
     async def _evaluate_all(self) -> None:
-        """Evaluate all symbols in watchlist."""
+        """Evaluate all symbols: collect signals, then execute ranked by confidence.
+
+        SELLs execute immediately. BUYs are ranked by confidence so
+        the highest-conviction signals get filled first when cash is limited.
+        """
         # Update factor scores periodically
         now = time.time()
         if now - self._last_factor_update > self._factor_update_interval:
             await self._update_factor_scores()
             self._last_factor_update = now
 
+        # Phase 1: Collect all signals (no execution yet)
+        buy_candidates: list[tuple[float, str, object, pd.DataFrame]] = []
+
         for symbol in self._watchlist:
-            await self.evaluate_symbol(symbol)
+            try:
+                df = await self._market_data.get_ohlcv(symbol, limit=250)
+                if df.empty:
+                    continue
+
+                self._maybe_classify(symbol, df)
+                df = self._indicator_svc.add_all_indicators(df)
+
+                strategies = self._registry.get_enabled()
+                signals = []
+                for strategy in strategies:
+                    try:
+                        signal = await strategy.analyze(df, symbol)
+                        signals.append(signal)
+                    except Exception as e:
+                        logger.debug("Strategy %s failed on %s: %s", strategy.name, symbol, e)
+
+                market_weights = self._registry.get_profile_weights(self._market_state)
+                weights = self._adaptive.get_weights(symbol, market_weights)
+                combined = self._combiner.combine(signals, weights)
+
+                category = self._adaptive.get_category(symbol)
+                if category:
+                    logger.debug(
+                        "%s [%s] signal=%s conf=%.2f",
+                        symbol, category.value, combined.signal_type.value,
+                        combined.confidence,
+                    )
+
+                # SELLs execute immediately (no competition for cash)
+                if combined.signal_type == SignalType.SELL:
+                    await self._execute_signal(combined, symbol, df)
+                elif combined.signal_type == SignalType.BUY:
+                    buy_candidates.append((combined.confidence, symbol, combined, df))
+
+            except Exception as e:
+                logger.error("Failed to evaluate %s: %s", symbol, e)
+
+        # Phase 2: Execute BUYs ranked by confidence (highest first)
+        if buy_candidates:
+            buy_candidates.sort(key=lambda x: x[0], reverse=True)
+            logger.info(
+                "Buy candidates ranked: %s",
+                [(s, f"{c:.2f}") for c, s, _, _ in buy_candidates[:10]],
+            )
+            for _conf, symbol, combined, df in buy_candidates:
+                await self._execute_signal(combined, symbol, df)
 
     async def _update_factor_scores(self) -> None:
         """Compute cross-sectional factor scores for the watchlist."""

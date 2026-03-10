@@ -243,3 +243,47 @@ class TestMarketAllocation:
         )
         assert result.allocation_usd <= 100_000 * 0.10 + 1
         assert result.allocation_usd > 50_000 * 0.10
+
+
+class TestConfidenceBasedSizing:
+    """Test that signal confidence affects position size meaningfully."""
+
+    def test_high_confidence_gets_larger_position(self):
+        rm = RiskManager()
+        high = rm.calculate_kelly_position_size(
+            symbol="AAPL", price=100.0,
+            portfolio_value=100_000, cash_available=100_000,
+            current_positions=0, signal_confidence=0.9,
+        )
+        low = rm.calculate_kelly_position_size(
+            symbol="AAPL", price=100.0,
+            portfolio_value=100_000, cash_available=100_000,
+            current_positions=0, signal_confidence=0.3,
+        )
+        assert high.allowed and low.allowed
+        # High confidence should get a meaningfully larger position
+        assert high.allocation_usd > low.allocation_usd
+        # At least 20% more allocation for high vs low confidence
+        assert high.allocation_usd / low.allocation_usd > 1.2
+
+    def test_zero_confidence_gets_minimum(self):
+        rm = RiskManager()
+        result = rm.calculate_kelly_position_size(
+            symbol="AAPL", price=100.0,
+            portfolio_value=100_000, cash_available=100_000,
+            current_positions=0, signal_confidence=0.0,
+        )
+        assert result.allowed
+        # Should get a much smaller position than max (10%)
+        assert result.allocation_usd < 100_000 * 0.06
+
+    def test_full_confidence_gets_near_max(self):
+        rm = RiskManager()
+        result = rm.calculate_kelly_position_size(
+            symbol="AAPL", price=100.0,
+            portfolio_value=100_000, cash_available=100_000,
+            current_positions=0, signal_confidence=1.0,
+        )
+        assert result.allowed
+        # Should be close to max position (10%)
+        assert result.allocation_usd >= 100_000 * 0.09
