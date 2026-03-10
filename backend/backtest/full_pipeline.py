@@ -122,6 +122,23 @@ class PipelineConfig:
     # Re-entry after stop loss
     recovery_watch_days: int = 20  # Keep stopped-out symbols in eval set for N days
 
+    # Strategy selection
+    disabled_strategies: list[str] = field(default_factory=list)  # Strategies to skip
+
+    # Cash parking: invest idle cash in SPY
+    enable_cash_parking: bool = False   # Park idle cash in SPY
+    cash_parking_symbol: str = "SPY"
+    cash_parking_threshold: float = 0.30  # Park if cash > 30% of portfolio
+
+    # Leveraged ETF allocation
+    enable_leveraged_etf: bool = False
+    etf_symbol: str = "TQQQ"           # Leveraged ETF to trade
+    etf_inverse_symbol: str = "SQQQ"   # Inverse ETF for downtrend
+    etf_max_allocation_pct: float = 0.20  # Max portfolio % in leveraged ETF
+    etf_uptrend_regimes: list[str] = field(
+        default_factory=lambda: ["strong_uptrend", "uptrend"],
+    )
+
     # Strategy config path
     strategy_config_path: str | None = None
 
@@ -271,7 +288,13 @@ class FullPipelineBacktest:
             "Loading data for %d universe symbols + SPY...",
             len(cfg.universe),
         )
-        all_symbols = list(dict.fromkeys([cfg.spy_symbol] + cfg.universe))
+        # Include leveraged ETF symbols in data load
+        etf_symbols = []
+        if cfg.enable_leveraged_etf:
+            etf_symbols = [cfg.etf_symbol, cfg.etf_inverse_symbol]
+        all_symbols = list(dict.fromkeys(
+            [cfg.spy_symbol] + cfg.universe + etf_symbols
+        ))
         all_data = self._data_loader.load_multiple(
             all_symbols, period=period,
         )
@@ -408,10 +431,13 @@ class FullPipelineBacktest:
                 if len(df_window) < 50:
                     continue
 
-                # Run all strategies
+                # Run all strategies (skip disabled ones)
                 strategies = self._registry.get_enabled()
+                disabled = set(cfg.disabled_strategies)
                 signals = []
                 for strategy in strategies:
+                    if strategy.name in disabled:
+                        continue
                     try:
                         signal = await strategy.analyze(df_window, symbol)
                         signals.append(signal)
@@ -446,11 +472,30 @@ class FullPipelineBacktest:
             # Execute BUYs ranked by confidence (highest first)
             if buy_candidates:
                 buy_candidates.sort(key=lambda x: x[0], reverse=True)
+                # Sell SPY parking to free cash for stock buys
+                parking_sym = cfg.cash_parking_symbol
+                if cfg.enable_cash_parking and parking_sym in self._positions:
+                    data = stock_data.get(parking_sym)
+                    if data and date_idx < len(data.df):
+                        price = float(data.df.iloc[date_idx]["close"])
+                        self._close_position(
+                            parking_sym, price, date, "cash_unpark",
+                        )
                 for _conf, symbol, combined in buy_candidates:
                     self._execute_buy(
                         symbol, stock_data, date_idx, date, combined,
                         market_state.regime,
                     )
+
+            # 4e2. Leveraged ETF regime allocation
+            if cfg.enable_leveraged_etf:
+                self._manage_leveraged_etf(
+                    stock_data, date_idx, date, regime_str,
+                )
+
+            # 4e3. Cash parking — invest idle cash in SPY
+            if cfg.enable_cash_parking:
+                self._manage_cash_parking(stock_data, date_idx, date)
 
             # 4f. Update equity and snapshot
             equity = self._calculate_equity(stock_data, date_idx)
@@ -500,6 +545,159 @@ class FullPipelineBacktest:
 
         logger.info("\n%s", result.summary())
         return result
+
+    # ------------------------------------------------------------------
+    # Cash parking (invest idle cash in SPY)
+    # ------------------------------------------------------------------
+
+    def _manage_cash_parking(
+        self, stock_data: dict, date_idx: int, date,
+    ) -> None:
+        """Park excess cash in SPY to reduce cash drag.
+
+        When cash exceeds threshold, buy SPY with the excess.
+        SPY is sold before stock buys to free up cash.
+        """
+        cfg = self._config
+        parking_sym = cfg.cash_parking_symbol
+
+        # Skip if already holding parking position
+        if parking_sym in self._positions:
+            return
+
+        data = stock_data.get(parking_sym)
+        if not data or date_idx >= len(data.df):
+            return
+
+        equity = self._calculate_equity(stock_data, date_idx)
+        cash_pct = self._cash / equity if equity > 0 else 0
+
+        # Only park if cash exceeds threshold
+        if cash_pct < cfg.cash_parking_threshold:
+            return
+
+        # Park the excess cash (keep some buffer for opportunities)
+        park_amount = self._cash - equity * 0.10  # Keep 10% cash buffer
+        if park_amount <= 0:
+            return
+
+        price = float(data.df.iloc[date_idx]["close"])
+        if price <= 0:
+            return
+
+        exec_price = price * (1 + cfg.slippage_pct / 100)
+        quantity = int(park_amount / exec_price)
+        if quantity <= 0:
+            return
+
+        cost = quantity * exec_price + cfg.commission_per_order
+        if cost > self._cash:
+            return
+
+        self._cash -= cost
+        self._positions[parking_sym] = _Position(
+            symbol=parking_sym,
+            quantity=quantity,
+            avg_price=exec_price,
+            entry_date=str(date),
+            strategy_name="cash_parking",
+            highest_price=exec_price,
+            stop_loss_pct=9.99,   # no SL for parking
+            take_profit_pct=9.99, # no TP for parking
+        )
+
+    # ------------------------------------------------------------------
+    # Leveraged ETF management
+    # ------------------------------------------------------------------
+
+    def _manage_leveraged_etf(
+        self,
+        stock_data: dict,
+        date_idx: int,
+        date,
+        regime: str,
+    ) -> None:
+        """Buy/sell leveraged ETF based on market regime.
+
+        Uptrend → hold TQQQ (up to etf_max_allocation_pct)
+        Downtrend → sell TQQQ, optionally hold SQQQ
+        Sideways → sell both (cash)
+        """
+        cfg = self._config
+        etf_long = cfg.etf_symbol
+        etf_short = cfg.etf_inverse_symbol
+        bullish = regime in cfg.etf_uptrend_regimes
+
+        # Sell inverse ETF if holding in non-downtrend
+        if etf_short in self._positions and regime != "downtrend":
+            data = stock_data.get(etf_short)
+            if data and date_idx < len(data.df):
+                price = float(data.df.iloc[date_idx]["close"])
+                self._close_position(etf_short, price, date, "etf_regime_exit")
+
+        # Sell long ETF if regime turns bearish/sideways
+        if etf_long in self._positions and not bullish:
+            data = stock_data.get(etf_long)
+            if data and date_idx < len(data.df):
+                price = float(data.df.iloc[date_idx]["close"])
+                self._close_position(etf_long, price, date, "etf_regime_exit")
+
+        # Buy long ETF in uptrend if not already holding
+        if bullish and etf_long not in self._positions:
+            data = stock_data.get(etf_long)
+            if data and date_idx < len(data.df):
+                price = float(data.df.iloc[date_idx]["close"])
+                if price <= 0:
+                    return
+                equity = self._calculate_equity(stock_data, date_idx)
+                allocation = equity * cfg.etf_max_allocation_pct
+                allocation = min(allocation, self._cash * 0.95)
+                if allocation > 0:
+                    exec_price = price * (1 + cfg.slippage_pct / 100)
+                    quantity = int(allocation / exec_price)
+                    if quantity > 0:
+                        cost = quantity * exec_price + cfg.commission_per_order
+                        if cost <= self._cash:
+                            self._cash -= cost
+                            self._positions[etf_long] = _Position(
+                                symbol=etf_long,
+                                quantity=quantity,
+                                avg_price=exec_price,
+                                entry_date=str(date),
+                                strategy_name="etf_leverage",
+                                highest_price=exec_price,
+                                stop_loss_pct=0.15,  # wider SL for leveraged
+                                take_profit_pct=1.00, # let it run
+                            )
+
+        # Buy inverse ETF in downtrend if not already holding
+        if regime == "downtrend" and etf_short not in self._positions:
+            data = stock_data.get(etf_short)
+            if data and date_idx < len(data.df):
+                price = float(data.df.iloc[date_idx]["close"])
+                if price <= 0:
+                    return
+                equity = self._calculate_equity(stock_data, date_idx)
+                # Smaller allocation for inverse (hedge)
+                allocation = equity * cfg.etf_max_allocation_pct * 0.5
+                allocation = min(allocation, self._cash * 0.95)
+                if allocation > 0:
+                    exec_price = price * (1 + cfg.slippage_pct / 100)
+                    quantity = int(allocation / exec_price)
+                    if quantity > 0:
+                        cost = quantity * exec_price + cfg.commission_per_order
+                        if cost <= self._cash:
+                            self._cash -= cost
+                            self._positions[etf_short] = _Position(
+                                symbol=etf_short,
+                                quantity=quantity,
+                                avg_price=exec_price,
+                                entry_date=str(date),
+                                strategy_name="etf_inverse",
+                                highest_price=exec_price,
+                                stop_loss_pct=0.15,
+                                take_profit_pct=0.30,
+                            )
 
     # ------------------------------------------------------------------
     # Momentum factor scoring
@@ -590,7 +788,12 @@ class FullPipelineBacktest:
         self, stock_data: dict[str, object], date_idx: int, date,
     ) -> None:
         """Check SL/TP/trailing stop on all held positions."""
+        # Skip cash parking and system-managed positions
+        skip_symbols = {"cash_parking", "etf_leverage", "etf_inverse"}
         for symbol in list(self._positions.keys()):
+            pos = self._positions[symbol]
+            if pos.strategy_name in skip_symbols:
+                continue
             if symbol not in stock_data:
                 continue
             data = stock_data[symbol]
@@ -708,12 +911,19 @@ class FullPipelineBacktest:
         # Get momentum factor score for this stock
         factor_score = self._factor_scores.get(symbol, 0.0)
 
+        # Count only stock positions (exclude parking, ETF)
+        system_strategies = {"cash_parking", "etf_leverage", "etf_inverse"}
+        active_positions = sum(
+            1 for p in self._positions.values()
+            if p.strategy_name not in system_strategies
+        )
+
         sizing = self._risk_manager.calculate_kelly_position_size(
             symbol=symbol,
             price=price,
             portfolio_value=equity,
             cash_available=self._cash,
-            current_positions=len(self._positions),
+            current_positions=active_positions,
             win_rate=win_rate,
             avg_win=avg_win,
             avg_loss=avg_loss,

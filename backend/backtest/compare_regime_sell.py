@@ -33,17 +33,6 @@ TEST_UNIVERSE = [
 ]
 
 
-def fmt(label, val_off, val_on, suffix="", higher_better=True):
-    diff = val_on - val_off
-    direction = "+" if diff > 0 else ""
-    better = (diff > 0) == higher_better
-    marker = " <<" if better and abs(diff) > 0.1 else ""
-    return (
-        f"  {label:20s}  {val_off:>10{suffix}}  {val_on:>10{suffix}}"
-        f"  ({direction}{diff:{suffix}}){marker}"
-    )
-
-
 async def main():
     period = sys.argv[1] if len(sys.argv) > 1 else "3y"
 
@@ -53,71 +42,92 @@ async def main():
         enable_regime_sells=True,
     )
 
-    # ── A: Conservative defaults (current live system) ────────────────
+    # ── A: Current best (WIDE_TP) ────────────────────────────────
     cfg_a = PipelineConfig(
         **base,
-        min_active_ratio=0.15,
-        min_confidence=0.50,
-        min_screen_grade="B",
-        screen_interval=20,
-        max_positions=20,
-        max_watchlist=30,
-    )
-
-    # ── B: Tuned (proven parameters, no complex features) ────────────
-    cfg_b = PipelineConfig(
-        **base,
-        min_active_ratio=0.05,        # allow single-strategy conviction
-        min_confidence=0.35,          # lower bar for combined signal
-        min_screen_grade="C",         # wider candidate pool
-        screen_interval=10,           # bi-weekly screening
-        max_positions=15,
-        max_watchlist=25,
-        max_position_pct=0.10,        # up to 10% per position
-        max_exposure_pct=0.95,        # use more capital
-        kelly_fraction=0.35,          # more aggressive Kelly (35% vs 25%)
-        confidence_exponent=1.5,      # less penalty for moderate confidence
-        min_position_pct=0.03,        # 3% minimum position
-    )
-
-    # ── C: Concentrated — fewer positions, bigger size, wider TP ─────
-    cfg_c = PipelineConfig(
-        **base,
         min_active_ratio=0.05,
         min_confidence=0.35,
         min_screen_grade="C",
         screen_interval=10,
-        max_positions=10,             # fewer, bigger positions
+        max_positions=10,
         max_watchlist=25,
-        max_position_pct=0.15,        # up to 15% per position
-        max_exposure_pct=0.95,
-        kelly_fraction=0.40,          # 40% Kelly
-        confidence_exponent=1.2,      # minimal confidence penalty
-        min_position_pct=0.04,        # 4% minimum position
-        default_stop_loss_pct=0.10,   # slightly wider SL
-        default_take_profit_pct=0.35, # much wider TP: let winners run
-    )
-
-    # ── D: Wide TP + concentrated + recovery ────────────────────────
-    cfg_d = PipelineConfig(
-        **base,
-        min_active_ratio=0.05,
-        min_confidence=0.35,
-        min_screen_grade="C",
-        screen_interval=10,
-        max_positions=10,             # concentrated
-        max_watchlist=25,
-        max_position_pct=0.15,        # 15% per position
+        max_position_pct=0.15,
         max_exposure_pct=0.95,
         kelly_fraction=0.40,
         confidence_exponent=1.2,
-        min_position_pct=0.05,        # 5% minimum position
-        default_stop_loss_pct=0.12,   # wide SL
-        default_take_profit_pct=0.50, # very wide TP: let winners run far
-        recovery_watch_days=30,       # longer recovery window
+        min_position_pct=0.05,
+        default_stop_loss_pct=0.12,
+        default_take_profit_pct=0.50,
+        recovery_watch_days=30,
     )
 
-    configs = {"CONSERVATIVE": cfg_a, "TUNED": cfg_b, "CONCENTRATED": cfg_c, "WIDE_TP": cfg_d}
+    # ── B: Park in QQQ instead of SPY ────────────────────────────
+    cfg_b = PipelineConfig(
+        **base,
+        min_active_ratio=0.05,
+        min_confidence=0.35,
+        min_screen_grade="C",
+        screen_interval=10,
+        max_positions=10,
+        max_watchlist=25,
+        max_position_pct=0.15,
+        max_exposure_pct=0.95,
+        kelly_fraction=0.40,
+        confidence_exponent=1.2,
+        min_position_pct=0.05,
+        default_stop_loss_pct=0.12,
+        default_take_profit_pct=0.50,
+        recovery_watch_days=30,
+        enable_cash_parking=True,
+        cash_parking_symbol="QQQ",
+        cash_parking_threshold=0.15,
+    )
+
+    # ── C: Ultra aggressive: 25% positions, 5 max, 60% Kelly ────
+    cfg_c = PipelineConfig(
+        **base,
+        min_active_ratio=0.05,
+        min_confidence=0.30,          # lower bar
+        min_screen_grade="C",
+        screen_interval=10,
+        max_positions=5,
+        max_watchlist=25,
+        max_position_pct=0.25,        # 25% per position!
+        max_exposure_pct=0.95,
+        kelly_fraction=0.60,          # 60% Kelly
+        confidence_exponent=1.0,      # no penalty
+        min_position_pct=0.10,        # 10% minimum
+        default_stop_loss_pct=0.15,
+        default_take_profit_pct=9.99, # no TP
+        recovery_watch_days=30,
+        enable_cash_parking=True,
+        cash_parking_symbol="QQQ",
+        cash_parking_threshold=0.15,
+    )
+
+    # ── D: Like C but 8 positions + 20% max ──────────────────────
+    cfg_d = PipelineConfig(
+        **base,
+        min_active_ratio=0.05,
+        min_confidence=0.30,
+        min_screen_grade="C",
+        screen_interval=10,
+        max_positions=8,
+        max_watchlist=25,
+        max_position_pct=0.20,
+        max_exposure_pct=0.95,
+        kelly_fraction=0.50,
+        confidence_exponent=1.0,
+        min_position_pct=0.08,
+        default_stop_loss_pct=0.15,
+        default_take_profit_pct=9.99,
+        recovery_watch_days=30,
+        enable_cash_parking=True,
+        cash_parking_symbol="QQQ",
+        cash_parking_threshold=0.15,
+    )
+
+    configs = {"WIDE_TP": cfg_a, "QQQ_PARK": cfg_b, "ULTRA_AGG": cfg_c, "AGG_8POS": cfg_d}
     results = {}
 
     for name, cfg in configs.items():
@@ -157,12 +167,13 @@ async def main():
     logger.info(row("Alpha %", [m.alpha for m in metrics_list], ".1f"))
     logger.info(row("SPY %", [m.benchmark_return_pct for m in metrics_list], ".1f"))
 
-    # Strategy breakdown for each config
-    for cname in config_names:
+    # Strategy breakdown for top 2 configs
+    sorted_configs = sorted(
+        config_names, key=lambda n: results[n].metrics.total_return_pct, reverse=True,
+    )
+    for cname in sorted_configs[:2]:
         result = results[cname]
-        regime_sells = [t for t in result.trades if t.strategy_name == "regime_protect"]
-        logger.info(f"\n  [{cname}] {result.metrics.total_trades} trades" +
-                     (f", regime_sells={len(regime_sells)}" if regime_sells else ""))
+        logger.info(f"\n  [{cname}] {result.metrics.total_trades} trades")
         for sname, stats in sorted(
             result.strategy_stats.items(),
             key=lambda x: x[1]["pnl"], reverse=True,
