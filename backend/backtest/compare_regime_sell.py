@@ -64,7 +64,7 @@ async def main():
         max_watchlist=30,
     )
 
-    # ── B: Tuned parameters ───────────────────────────────────────────
+    # ── B: Tuned (proven parameters, no complex features) ────────────
     cfg_b = PipelineConfig(
         **base,
         min_active_ratio=0.05,        # allow single-strategy conviction
@@ -80,27 +80,44 @@ async def main():
         min_position_pct=0.03,        # 3% minimum position
     )
 
-    # ── C: Aggressive — wider SL/TP, bigger positions ───────────────
+    # ── C: Concentrated — fewer positions, bigger size, wider TP ─────
     cfg_c = PipelineConfig(
         **base,
         min_active_ratio=0.05,
-        min_confidence=0.30,
+        min_confidence=0.35,
         min_screen_grade="C",
-        screen_interval=5,            # weekly screening
-        max_positions=15,
+        screen_interval=10,
+        max_positions=10,             # fewer, bigger positions
         max_watchlist=25,
-        max_position_pct=0.10,
+        max_position_pct=0.15,        # up to 15% per position
         max_exposure_pct=0.95,
         kelly_fraction=0.40,          # 40% Kelly
         confidence_exponent=1.2,      # minimal confidence penalty
         min_position_pct=0.04,        # 4% minimum position
-        default_stop_loss_pct=0.12,   # wider SL: 12% (more room)
-        default_take_profit_pct=0.25, # higher TP: 25%
-        trailing_activation_pct=0.08, # trail activates at +8%
-        trailing_trail_pct=0.04,      # trail by 4%
+        default_stop_loss_pct=0.10,   # slightly wider SL
+        default_take_profit_pct=0.35, # much wider TP: let winners run
     )
 
-    configs = {"CONSERVATIVE": cfg_a, "TUNED": cfg_b, "AGGRESSIVE": cfg_c}
+    # ── D: Wide TP + concentrated + recovery ────────────────────────
+    cfg_d = PipelineConfig(
+        **base,
+        min_active_ratio=0.05,
+        min_confidence=0.35,
+        min_screen_grade="C",
+        screen_interval=10,
+        max_positions=10,             # concentrated
+        max_watchlist=25,
+        max_position_pct=0.15,        # 15% per position
+        max_exposure_pct=0.95,
+        kelly_fraction=0.40,
+        confidence_exponent=1.2,
+        min_position_pct=0.05,        # 5% minimum position
+        default_stop_loss_pct=0.12,   # wide SL
+        default_take_profit_pct=0.50, # very wide TP: let winners run far
+        recovery_watch_days=30,       # longer recovery window
+    )
+
+    configs = {"CONSERVATIVE": cfg_a, "TUNED": cfg_b, "CONCENTRATED": cfg_c, "WIDE_TP": cfg_d}
     results = {}
 
     for name, cfg in configs.items():

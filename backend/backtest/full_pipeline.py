@@ -107,6 +107,21 @@ class PipelineConfig:
     confidence_exponent: float = 2.0  # Confidence scaling power (lower = bigger positions)
     min_position_pct: float = 0.02  # Minimum position size
 
+    # Momentum factor tilt
+    enable_momentum_tilt: bool = False  # Pass momentum z-scores to Kelly sizer
+    momentum_update_interval: int = 20  # Recompute momentum every N days
+
+    # Strategy quality amplification
+    enable_quality_amplification: bool = False  # Boost weights of winning strategies
+    quality_blend_alpha: float = 0.3  # 30% quality-based, 70% original weights
+    min_trades_for_quality: int = 30  # Min trades before quality weights activate
+
+    # Strategy gating
+    enable_strategy_gating: bool = False  # Disable strategies with no edge
+
+    # Re-entry after stop loss
+    recovery_watch_days: int = 20  # Keep stopped-out symbols in eval set for N days
+
     # Strategy config path
     strategy_config_path: str | None = None
 
@@ -223,6 +238,16 @@ class FullPipelineBacktest:
         self._watchlist: list[str] = []
         self._prev_regime: str = "uptrend"
 
+        # Momentum factor scores (updated periodically)
+        self._factor_scores: dict[str, float] = {}  # symbol → composite z-score
+        self._last_factor_update: int = -9999
+        self._gated_strategies: set[str] = set()
+
+        # Recovery watch: recently sold symbols stay in eval set
+        # {symbol: day_count_when_sold}
+        self._recovery_watch: dict[str, int] = {}
+        self._day_count: int = 0
+
     async def run(
         self,
         period: str = "3y",
@@ -281,6 +306,10 @@ class FullPipelineBacktest:
         self._daily_snapshots.clear()
         self._watchlist.clear()
         self._risk_manager.reset_daily()
+        self._factor_scores.clear()
+        self._last_factor_update = -9999
+        self._gated_strategies.clear()
+        self._recovery_watch.clear()
 
         # Pre-classify all stocks once
         for symbol, data in stock_data.items():
@@ -290,6 +319,7 @@ class FullPipelineBacktest:
 
         # 4. Day-by-day simulation
         day_count = 0
+        self._day_count = 0
         last_screen_day = -cfg.screen_interval  # Force screen on first day
 
         for date_idx in range(len(spy_dates)):
@@ -298,6 +328,7 @@ class FullPipelineBacktest:
                 continue
 
             day_count += 1
+            self._day_count = day_count
 
             # Daily reset of PnL tracking
             if day_count % 1 == 0:
@@ -326,9 +357,32 @@ class FullPipelineBacktest:
                     day_count, len(stock_data), len(self._watchlist),
                 )
 
-            # Merge watchlist + held positions
+            # 4b2. Update momentum factor scores periodically
+            if cfg.enable_momentum_tilt:
+                if day_count - self._last_factor_update >= cfg.momentum_update_interval:
+                    self._update_factor_scores(stock_data, date_idx)
+                    self._last_factor_update = day_count
+
+            # 4b3. Update strategy gating
+            if cfg.enable_strategy_gating:
+                self._gated_strategies = set(
+                    self._signal_quality.get_gated_strategies()
+                )
+
+            # Expire old recovery watch entries
+            expired = [
+                s for s, sold_day in self._recovery_watch.items()
+                if day_count - sold_day > cfg.recovery_watch_days
+            ]
+            for s in expired:
+                del self._recovery_watch[s]
+
+            # Merge watchlist + held positions + recovery watch
             held = set(self._positions.keys())
-            eval_symbols = list(dict.fromkeys(self._watchlist + sorted(held)))
+            recovery = set(self._recovery_watch.keys()) - held
+            eval_symbols = list(dict.fromkeys(
+                self._watchlist + sorted(held) + sorted(recovery)
+            ))
 
             # 4c. Regime-change protective sells
             if cfg.enable_regime_sells and self._positions:
@@ -367,6 +421,16 @@ class FullPipelineBacktest:
                 # Get weights: market-state profile + stock category blending
                 market_weights = self._registry.get_profile_weights(profile_name)
                 weights = self._adaptive.get_weights(symbol, market_weights)
+
+                # Amplify weights of winning strategies
+                if cfg.enable_quality_amplification:
+                    weights = self._get_quality_adjusted_weights(weights)
+
+                # Soft-gate losing strategies (halve their weight)
+                if cfg.enable_strategy_gating and self._gated_strategies:
+                    for gated in self._gated_strategies:
+                        if gated in weights:
+                            weights[gated] *= 0.5
 
                 # Combine signals
                 combined = self._combiner.combine(
@@ -436,6 +500,58 @@ class FullPipelineBacktest:
 
         logger.info("\n%s", result.summary())
         return result
+
+    # ------------------------------------------------------------------
+    # Momentum factor scoring
+    # ------------------------------------------------------------------
+
+    def _update_factor_scores(
+        self, stock_data: dict, date_idx: int,
+    ) -> None:
+        """Compute cross-sectional momentum z-scores for all stocks."""
+        price_data = {}
+        for symbol, data in stock_data.items():
+            if date_idx < len(data.df):
+                price_data[symbol] = data.df.iloc[:date_idx + 1]
+
+        if len(price_data) < 3:
+            return
+
+        # Use factor model which computes momentum + z-scores
+        scores = self._factor_model.score_universe(price_data)
+        self._factor_scores = {s.symbol: s.composite for s in scores}
+
+    def _get_quality_adjusted_weights(
+        self, base_weights: dict[str, float],
+    ) -> dict[str, float]:
+        """Blend base weights with signal quality performance weights."""
+        cfg = self._config
+        quality_weights = self._signal_quality.get_strategy_weights()
+        if not quality_weights:
+            return base_weights
+
+        # Check if enough trades have been recorded
+        total_trades = sum(
+            self._signal_quality.get_metrics(name).total_trades
+            for name in quality_weights
+        )
+        if total_trades < cfg.min_trades_for_quality:
+            return base_weights
+
+        # Blend: (1-alpha)*base + alpha*quality
+        alpha = cfg.quality_blend_alpha
+        blended = {}
+        all_keys = set(base_weights) | set(quality_weights)
+        for key in all_keys:
+            base = base_weights.get(key, 0.0)
+            qual = quality_weights.get(key, 0.0)
+            blended[key] = (1 - alpha) * base + alpha * qual
+
+        # Normalize
+        total = sum(blended.values())
+        if total > 0:
+            blended = {k: v / total for k, v in blended.items()}
+        return blended
 
     # ------------------------------------------------------------------
     # Screening
@@ -589,6 +705,9 @@ class FullPipelineBacktest:
         metrics = self._signal_quality.get_metrics(strategy_name)
         win_rate, avg_win, avg_loss = metrics.kelly_inputs
 
+        # Get momentum factor score for this stock
+        factor_score = self._factor_scores.get(symbol, 0.0)
+
         sizing = self._risk_manager.calculate_kelly_position_size(
             symbol=symbol,
             price=price,
@@ -599,6 +718,7 @@ class FullPipelineBacktest:
             avg_win=avg_win,
             avg_loss=avg_loss,
             signal_confidence=signal.confidence,
+            factor_score=factor_score,
         )
 
         if not sizing.allowed:
@@ -712,6 +832,10 @@ class FullPipelineBacktest:
         )
 
         del self._positions[symbol]
+
+        # Add to recovery watch for re-entry evaluation
+        if reason not in ("end_of_backtest",):
+            self._recovery_watch[symbol] = self._day_count
 
     def _close_all_positions(
         self, stock_data: dict, date_idx: int, date,

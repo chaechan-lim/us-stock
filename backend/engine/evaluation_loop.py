@@ -87,6 +87,9 @@ class EvaluationLoop:
         self._factor_update_interval = 3600  # update factor scores hourly
         self._prev_market_state: str = market_state
         self._news_sentiment: dict[str, float] = {}  # symbol -> sentiment (-1 to +1)
+        # Recovery watch: recently sold symbols get re-evaluated for re-entry
+        self._recovery_watch: dict[str, float] = {}  # {symbol: timestamp_when_sold}
+        self._recovery_watch_secs = 30 * 86400  # 30 days
 
     @property
     def running(self) -> bool:
@@ -200,12 +203,23 @@ class EvaluationLoop:
             await self._update_factor_scores()
             self._last_factor_update = now
 
-        # Merge watchlist + held positions so positions always get strategy evaluation
+        # Expire old recovery watch entries
+        expired = [
+            s for s, ts in self._recovery_watch.items()
+            if now - ts > self._recovery_watch_secs
+        ]
+        for s in expired:
+            del self._recovery_watch[s]
+
+        # Merge watchlist + held positions + recovery watch
         held = (
             set(self._position_tracker.tracked_symbols)
             if self._position_tracker else set()
         )
-        eval_symbols = list(dict.fromkeys(self._watchlist + sorted(held)))
+        recovery = set(self._recovery_watch.keys()) - held
+        eval_symbols = list(dict.fromkeys(
+            self._watchlist + sorted(held) + sorted(recovery)
+        ))
 
         # Phase 0: Regime-change and sentiment-based protective sells
         if held and self._position_tracker:
@@ -329,6 +343,7 @@ class EvaluationLoop:
                 )
                 if sell_order and self._position_tracker:
                     self._position_tracker.untrack(symbol)
+                    self._recovery_watch[symbol] = time.time()
 
         # Clear processed sentiments to avoid re-selling
         for symbol in held:
@@ -484,6 +499,8 @@ class EvaluationLoop:
                 )
                 if sell_order and self._position_tracker:
                     self._position_tracker.untrack(symbol)
+                    # Add to recovery watch for re-entry evaluation
+                    self._recovery_watch[symbol] = time.time()
 
     def record_trade_result(
         self, strategy: str, symbol: str, return_pct: float,

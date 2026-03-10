@@ -136,7 +136,13 @@ async def lifespan(app: FastAPI):
         "US": config.risk.market_allocation_us,
         "KR": config.risk.market_allocation_kr,
     }
-    risk_params = RiskParams(market_allocations=market_allocs)
+    risk_params = RiskParams(
+        market_allocations=market_allocs,
+        max_position_pct=0.15,          # Concentrated positions (backtest optimal)
+        max_positions=10,               # Fewer, bigger positions
+        default_stop_loss_pct=0.12,     # Wider SL: more room for volatility
+        default_take_profit_pct=0.50,   # Wide TP: let winners run
+    )
     risk_manager = RiskManager(params=risk_params)
 
     # KR-specific risk params: wider SL for ±30% daily limit, tighter TP
