@@ -284,6 +284,19 @@ async def kr_etf_engine_status(request: Request):
             except Exception:
                 pass
 
+    if not status["top_sectors"]:
+        external_data = getattr(request.app.state, "external_data", None)
+        sector_analyzer = getattr(request.app.state, "sector_analyzer", None)
+        if external_data and sector_analyzer:
+            try:
+                sector_data = await external_data.get_kr_sector_performance()
+                if sector_data:
+                    scores = sector_analyzer.analyze(sector_data)
+                    top = sector_analyzer.get_top_sectors(scores, n=3, min_score=0)
+                    status["top_sectors"] = [s.name for s in top]
+            except Exception:
+                pass
+
     return status
 
 
