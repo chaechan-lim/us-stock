@@ -119,6 +119,9 @@ async def test_trailing_stop_triggered(adapter, risk, order_mgr):
 
     tracker = PositionTracker(adapter, risk, order_mgr)
     tracker.track("GOOG", 100.0, 8)
+    # Enable trailing stop for this test
+    tracker._tracked["GOOG"].trailing_activation_pct = 0.05
+    tracker._tracked["GOOG"].trailing_stop_pct = 0.03
     # Simulate that price had gone to 115 before
     tracker._tracked["GOOG"].highest_price = 115.0
     # Drop from 115 to 108 = ~6.1% > 3% trail

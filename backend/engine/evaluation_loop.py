@@ -98,6 +98,8 @@ class EvaluationLoop:
     def set_market_state(self, state: str) -> None:
         self._prev_market_state = self._market_state
         self._market_state = state
+        # Propagate to risk manager for regime-adaptive sizing
+        self._risk_manager.set_eval_regime(state)
 
     def update_news_sentiment(self, sentiments: dict[str, float]) -> None:
         """Update per-symbol news sentiment scores.

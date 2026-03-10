@@ -308,6 +308,7 @@ class FullPipelineBacktest:
             spy_window = spy_data.df.iloc[:date_idx + 1]
             market_state = self._market_state_detector.detect(spy_window)
             regime_str = market_state.regime.value
+            self._risk_manager.set_eval_regime(regime_str)
 
             # Map regime to profile name
             profile_name = regime_str

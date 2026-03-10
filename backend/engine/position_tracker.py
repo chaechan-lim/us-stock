@@ -28,8 +28,8 @@ class TrackedPosition:
     strategy: str = ""
     stop_loss_pct: float | None = None
     take_profit_pct: float | None = None
-    trailing_activation_pct: float = 0.05
-    trailing_stop_pct: float = 0.03
+    trailing_activation_pct: float = 0.0   # disabled: cuts winners short
+    trailing_stop_pct: float = 0.0
 
 
 class PositionTracker:

@@ -36,6 +36,21 @@ class PositionSizeResult:
     allowed: bool = True
 
 
+# Regime-adaptive position sizing and exposure
+REGIME_POSITION_PCT: dict[str, float] = {
+    "strong_uptrend": 0.15,  # Concentrate on winners
+    "uptrend": 0.10,
+    "sideways": 0.08,
+    "downtrend": 0.05,       # Defensive
+}
+REGIME_EXPOSURE_PCT: dict[str, float] = {
+    "strong_uptrend": 0.95,
+    "uptrend": 0.90,
+    "sideways": 0.70,
+    "downtrend": 0.40,       # Mostly cash
+}
+
+
 class RiskManager:
     """Enforce risk rules before order placement."""
 
@@ -43,9 +58,22 @@ class RiskManager:
         self._params = params or RiskParams()
         self._daily_pnl: float = 0.0
         self._market_regimes: dict[str, str] = {}  # {"US": "bull", "KR": "sideways"}
+        self._eval_regime: str = "uptrend"  # Current regime for adaptive sizing
         self._kelly = KellyPositionSizer(
             max_position_pct=self._params.max_position_pct,
         )
+
+    def set_eval_regime(self, regime: str) -> None:
+        """Set current market regime for adaptive position/exposure sizing."""
+        self._eval_regime = regime
+
+    def _get_regime_position_pct(self) -> float:
+        """Get max position % for current regime."""
+        return REGIME_POSITION_PCT.get(self._eval_regime, self._params.max_position_pct)
+
+    def _get_regime_exposure_pct(self) -> float:
+        """Get max exposure % for current regime."""
+        return REGIME_EXPOSURE_PCT.get(self._eval_regime, self._params.max_total_exposure_pct)
 
     def set_market_regime(self, market: str, regime: str) -> None:
         """Update market regime for dynamic allocation boost.
@@ -133,8 +161,8 @@ class RiskManager:
                     allowed=False,
                 )
 
-        # Max allocation per position
-        max_alloc = portfolio_value * self._params.max_position_pct
+        # Max allocation per position (regime-adaptive)
+        max_alloc = portfolio_value * self._get_regime_position_pct()
 
         # Respect cash available (with buffer) — also respect exposure headroom
         max_from_cash = cash_available * 0.95
@@ -253,7 +281,7 @@ class RiskManager:
             # (Don't block — combiner confidence already gates entry quality)
 
         # Fallback: fixed sizing with factor/confidence adjustment
-        base_pct = self._params.max_position_pct
+        base_pct = self._get_regime_position_pct()
         # Adjust by factor score: positive factor → up to 1.3x, negative → down to 0.7x
         import numpy as np
         factor_mult = 1.0 + 0.3 * np.tanh(factor_score) if factor_score != 0 else 1.0
@@ -291,16 +319,18 @@ class RiskManager:
 
     def _check_exposure_limit(
         self, portfolio_value: float, cash_available: float,
+        exposure_limit: float | None = None,
     ) -> PositionSizeResult | None:
         """Return rejection result if total exposure exceeds limit."""
         if portfolio_value <= 0:
             return None
+        limit = exposure_limit or self._get_regime_exposure_pct()
         invested = portfolio_value - cash_available
         exposure = invested / portfolio_value
-        if exposure >= self._params.max_total_exposure_pct:
+        if exposure >= limit:
             return PositionSizeResult(
                 quantity=0, allocation_usd=0, risk_per_share=0,
-                reason=f"Max exposure reached ({exposure:.0%} >= {self._params.max_total_exposure_pct:.0%})",
+                reason=f"Max exposure reached ({exposure:.0%} >= {limit:.0%})",
                 allowed=False,
             )
         return None
@@ -311,7 +341,8 @@ class RiskManager:
         """How much more can be invested before hitting exposure limit."""
         if portfolio_value <= 0:
             return 0.0
-        max_invested = portfolio_value * self._params.max_total_exposure_pct
+        limit = self._get_regime_exposure_pct()
+        max_invested = portfolio_value * limit
         current_invested = portfolio_value - cash_available
         return max(0.0, max_invested - current_invested)
 
@@ -372,6 +403,9 @@ class RiskManager:
         from entry, then triggers if price drops trail_pct from peak.
         """
         if entry_price <= 0 or highest_price <= 0:
+            return False
+        # activation_pct=0 or trail_pct=0 means trailing stop is disabled
+        if activation_pct <= 0 or trail_pct <= 0:
             return False
         gain_from_entry = (highest_price - entry_price) / entry_price
         if gain_from_entry < activation_pct:
