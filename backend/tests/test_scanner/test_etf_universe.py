@@ -85,6 +85,34 @@ def test_all_etf_symbols(universe):
     assert "GLD" in all_syms
 
 
+def test_pair_siblings_us(universe):
+    """Bull/bear/base siblings for US ETFs (base = index key)."""
+    siblings = universe.get_pair_siblings("TQQQ")
+    assert "SQQQ" in siblings
+    assert "QQQ" in siblings
+    assert "TQQQ" not in siblings
+
+    siblings_base = universe.get_pair_siblings("QQQ")
+    assert "TQQQ" in siblings_base
+    assert "SQQQ" in siblings_base
+
+
+def test_pair_siblings_kr():
+    """KR ETFs: base symbol from YAML (069500), bull (122630), bear (114800)."""
+    config_path = Path(__file__).resolve().parent.parent.parent.parent / "config" / "kr_etf_universe.yaml"
+    kr = ETFUniverse(config_path)
+    # Base (KODEX 200) → bull + bear
+    siblings = kr.get_pair_siblings("069500")
+    assert "122630" in siblings
+    assert "114800" in siblings
+    # Bull (KODEX 레버리지) → base + bear
+    siblings = kr.get_pair_siblings("122630")
+    assert "069500" in siblings
+    assert "114800" in siblings
+    # Unknown → empty
+    assert kr.get_pair_siblings("999999") == []
+
+
 def test_missing_config():
     universe = ETFUniverse("/nonexistent/path.yaml")
     assert len(universe.all_etf_symbols) == 0

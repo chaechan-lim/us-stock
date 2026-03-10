@@ -159,6 +159,75 @@ class TestRegimeSwitch:
         assert call_args[0][0] == "etf_regime_switch"
 
 
+class TestMutualExclusivity:
+    """Test 1x/2x ETF mutual exclusivity enforcement."""
+
+    @pytest.mark.asyncio
+    async def test_sells_base_etf_before_buying_leveraged(
+        self, engine, mock_order_manager, mock_market_data, mock_etf_universe,
+    ):
+        """When buying TQQQ (bull), sell QQQ (base) if held."""
+        mock_market_data.get_ohlcv.return_value = _make_ohlcv_mock(50.0)
+
+        # Simulate holding QQQ (base ETF)
+        pos_qqq = MagicMock(symbol="QQQ", quantity=50, current_price=400.0)
+        mock_market_data.get_positions.return_value = [pos_qqq]
+
+        # Configure get_pair_siblings: TQQQ → [QQQ, SQQQ]
+        mock_etf_universe.get_pair_siblings.side_effect = lambda s: {
+            "TQQQ": ["QQQ", "SQQQ"],
+            "SOXL": ["SOXX", "SOXS"],
+            "QQQ": ["TQQQ", "SQQQ"],
+        }.get(s, [])
+
+        state = MarketState(
+            regime=MarketRegime.UPTREND, spy_price=500,
+            spy_sma200=480, confidence=0.8,
+        )
+        actions = await engine._manage_regime_etfs(state)
+
+        # QQQ should be sold before buying TQQQ
+        sell_calls = [
+            c for c in mock_order_manager.place_sell.call_args_list
+            if c.kwargs.get("symbol") == "QQQ" or (c.args and c.args[0] == "QQQ")
+        ]
+        assert len(sell_calls) >= 1, "Should sell QQQ (sibling) before buying TQQQ"
+        assert any("mutual exclusivity" in a for a in actions)
+
+    @pytest.mark.asyncio
+    async def test_no_double_sell_for_already_exited_sibling(
+        self, engine, mock_order_manager, mock_market_data, mock_etf_universe,
+    ):
+        """If sibling is already in exit_etfs, don't sell twice."""
+        mock_market_data.get_ohlcv.return_value = _make_ohlcv_mock(50.0)
+
+        # First set bull regime
+        mock_etf_universe.get_pair_siblings.return_value = []
+        await engine._manage_regime_etfs(
+            MarketState(regime=MarketRegime.UPTREND)
+        )
+
+        # Now switch to bear: SQQQ siblings include TQQQ
+        pos_tqqq = MagicMock(symbol="TQQQ", quantity=100, current_price=50.0)
+        mock_market_data.get_positions.return_value = [pos_tqqq]
+        mock_etf_universe.get_pair_siblings.side_effect = lambda s: {
+            "SQQQ": ["QQQ", "TQQQ"],
+            "SOXS": ["SOXX", "SOXL"],
+        }.get(s, [])
+
+        # TQQQ is already in exit_etfs (bull→bear transition), so shouldn't
+        # be sold again via mutual exclusivity
+        bear_state = MarketState(
+            regime=MarketRegime.DOWNTREND,
+            spy_distance_pct=-6.0, confidence=0.85,
+        )
+        actions = await engine._manage_regime_etfs(bear_state)
+
+        # TQQQ sell should only appear once (from exit_etfs, not mutual exclusivity)
+        tqqq_sells = [a for a in actions if "SELL" in a and "TQQQ" in a]
+        assert len(tqqq_sells) == 1
+
+
 class TestSectorRotation:
     """Test sector ETF rotation based on sector strength."""
 

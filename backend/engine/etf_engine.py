@@ -234,9 +234,32 @@ class ETFEngine:
                     actions.append(f"SELL {sym} (regime={regime.value})")
                     logger.info("ETF Engine: SELL %s on regime %s", sym, regime.value)
 
-        # Enter target ETFs
+        # Enter target ETFs (sell conflicting siblings first for mutual exclusivity)
         for sym in target_etfs:
             if sym not in held_symbols:
+                # Mutual exclusivity: sell any sibling (base/bull/bear) already held
+                siblings = self._etf.get_pair_siblings(sym)
+                for sib in siblings:
+                    if sib in held_symbols and sib not in exit_etfs:
+                        pos = next((p for p in positions if p.symbol == sib), None)
+                        if pos and pos.quantity > 0:
+                            price_sib = float(pos.current_price) if pos.current_price else 0
+                            sell_result = await self._order_manager.place_sell(
+                                symbol=sib,
+                                quantity=int(pos.quantity),
+                                price=price_sib,
+                                strategy_name="etf_engine_regime",
+                                exchange=self._etf.get_exchange(sib),
+                            )
+                            if sell_result:
+                                self._managed_positions.pop(sib, None)
+                                held_symbols.discard(sib)
+                                actions.append(f"SELL {sib} (mutual exclusivity for {sym})")
+                                logger.info(
+                                    "ETF Engine: SELL %s (sibling conflict with target %s)",
+                                    sib, sym,
+                                )
+
                 try:
                     df = await self._market_data.get_ohlcv(sym, limit=5)
                     if df.empty:

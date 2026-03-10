@@ -51,6 +51,8 @@ class ETFUniverse:
         self._safe_haven: list[str] = []
         self._volatility: list[str] = []
         self._risk_rules = ETFRiskRules()
+        # Map from index name -> base ETF symbol (e.g. "KOSPI200" -> "069500")
+        self._base_symbols: dict[str, str] = {}
         self._load()
 
     def _load(self) -> None:
@@ -69,6 +71,10 @@ class ETFUniverse:
                 bear=pair.get("bear"),
                 leverage=pair.get("leverage", 3),
             )
+            # Store base ETF symbol (explicit 'base' field in KR config,
+            # or the key itself is the base ETF in US config like QQQ/SPY)
+            base_sym = pair.get("base", base)
+            self._base_symbols[base] = base_sym
 
         # Sectors
         for name, sec in (data.get("sectors") or {}).items():
@@ -139,6 +145,21 @@ class ETFUniverse:
         Most ETFs trade on NYSE Arca (AMEX). Overrides loaded from config.
         """
         return self._exchanges.get(symbol, "AMEX")
+
+    def get_pair_siblings(self, symbol: str) -> list[str]:
+        """Get all sibling ETFs in the same leveraged pair (excluding self).
+
+        For example, if symbol is KODEX 코스닥150 (229200, base),
+        returns [233740, 251340] (bull and bear).
+        Used to enforce mutual exclusivity: only one member of a pair
+        should be held at any time.
+        """
+        for index_name, pair in self._pairs.items():
+            base_sym = self._base_symbols.get(index_name, index_name)
+            all_members = [m for m in (base_sym, pair.bull, pair.bear) if m]
+            if symbol in all_members:
+                return [m for m in all_members if m != symbol]
+        return []
 
     def is_leveraged(self, symbol: str) -> bool:
         """Check if a symbol is a leveraged ETF."""

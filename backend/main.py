@@ -132,13 +132,20 @@ async def lifespan(app: FastAPI):
 
     # Engine components
     from engine.risk_manager import RiskParams
-    risk_params = RiskParams(
-        market_allocations={
-            "US": config.risk.market_allocation_us,
-            "KR": config.risk.market_allocation_kr,
-        },
-    )
+    market_allocs = {
+        "US": config.risk.market_allocation_us,
+        "KR": config.risk.market_allocation_kr,
+    }
+    risk_params = RiskParams(market_allocations=market_allocs)
     risk_manager = RiskManager(params=risk_params)
+
+    # KR-specific risk params: wider SL for ±30% daily limit, tighter TP
+    kr_risk_params = RiskParams(
+        market_allocations=market_allocs,
+        default_stop_loss_pct=0.12,     # 12% (wider for KR volatility)
+        default_take_profit_pct=0.25,   # 25% (allow larger moves)
+    )
+    kr_risk_manager = RiskManager(params=kr_risk_params)
     order_manager = OrderManager(adapter=adapter, risk_manager=risk_manager, notification=notification, market_data=market_data)
     app.state.risk_manager = risk_manager
     app.state.order_manager = order_manager
@@ -323,12 +330,12 @@ async def lifespan(app: FastAPI):
         yf_symbol_mapper=lambda s: kr_to_yfinance(s, "KRX"),
     )
     kr_order_manager = OrderManager(
-        adapter=kr_adapter, risk_manager=risk_manager, notification=notification,
+        adapter=kr_adapter, risk_manager=kr_risk_manager, notification=notification,
         market_data=kr_market_data, market="KR",
     )
     kr_position_tracker = PositionTracker(
         adapter=kr_adapter,
-        risk_manager=risk_manager,
+        risk_manager=kr_risk_manager,
         order_manager=kr_order_manager,
         notification=notification,
         market_data=kr_market_data,
@@ -355,7 +362,7 @@ async def lifespan(app: FastAPI):
         sector_analyzer=sector_analyzer,
         notification=notification,
         market="KR",
-        risk_manager=risk_manager,
+        risk_manager=kr_risk_manager,
     )
     app.state.kr_etf_engine = kr_etf_engine
     kr_market_state_detector = MarketStateDetector()
@@ -1026,7 +1033,7 @@ async def lifespan(app: FastAPI):
         registry=registry,
         combiner=SignalCombiner(consensus_config=consensus_cfg),
         order_manager=kr_order_manager,
-        risk_manager=risk_manager,
+        risk_manager=kr_risk_manager,
         adaptive_weights=AdaptiveWeightManager(
             alpha=adaptive_cfg.get("alpha", 0.6),
             ema_decay=adaptive_cfg.get("ema_decay", 0.1),
