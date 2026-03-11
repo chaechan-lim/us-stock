@@ -1407,6 +1407,14 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("DB order reconciliation/restore failed: %s", e)
 
+    # Run initial data fetches (so dashboard has data immediately)
+    try:
+        await task_news_analysis()
+        await task_event_calendar_refresh()
+        logger.info("Initial news + event calendar data loaded")
+    except Exception as e:
+        logger.warning("Initial data fetch failed (non-fatal): %s", e)
+
     # Auto-start scheduler (store task ref to detect crashes)
     _scheduler_task = asyncio.create_task(scheduler.start(), name="scheduler")
 
