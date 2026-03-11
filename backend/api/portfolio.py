@@ -13,6 +13,15 @@ logger = logging.getLogger(__name__)
 # Cached exchange rate (refreshed via summary calls)
 _cached_usd_krw: float = 1450.0  # sensible default
 
+# Session factory (set from main.py init)
+_session_factory = None
+
+
+def init_portfolio(session_factory):
+    """Set session factory for portfolio endpoints."""
+    global _session_factory
+    _session_factory = session_factory
+
 
 @router.get("/summary")
 async def portfolio_summary(request: Request, market: str = "ALL"):
@@ -184,8 +193,7 @@ async def portfolio_returns(request: Request):
     from core.models import PortfolioSnapshot
     from sqlalchemy import select
 
-    session_factory = getattr(request.app.state, "session_factory", None)
-    if not session_factory:
+    if not _session_factory:
         return {"daily": None, "weekly": None, "monthly": None}
 
     now = datetime.utcnow()
@@ -196,7 +204,7 @@ async def portfolio_returns(request: Request):
     }
 
     # Get the latest snapshot per market as "current" equity
-    async with session_factory() as session:
+    async with _session_factory() as session:
         result = {}
         for period_name, since in periods.items():
             # Get oldest snapshot after `since` for each market

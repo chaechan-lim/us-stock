@@ -205,6 +205,10 @@ async def lifespan(app: FastAPI):
     from api.trades import init_trades
     init_trades(session_factory)
 
+    # Wire portfolio DB access
+    from api.portfolio import init_portfolio
+    init_portfolio(session_factory)
+
     # LLM client (multi-provider with fallback)
     llm_client = None
     if config.llm.enabled and (config.llm.api_key or config.llm.gemini_api_key):
