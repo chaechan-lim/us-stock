@@ -239,7 +239,10 @@ async def lifespan(app: FastAPI):
         ai_agent = MarketAnalystAgent(llm_client=llm_client, context_service=agent_ctx)
         risk_agent = RiskAssessmentAgent(llm_client=llm_client, context_service=agent_ctx)
         trade_review_agent = TradeReviewAgent(llm_client=llm_client, context_service=agent_ctx)
-        news_sentiment_agent = NewsSentimentAgent(llm_client=llm_client, context_service=agent_ctx)
+        news_sentiment_agent = NewsSentimentAgent(
+            llm_client=llm_client, context_service=agent_ctx,
+            model_override=config.llm.gemini_fallback_model or None,
+        )
         logger.info("AI agents enabled (analyst, risk, trade_review, news_sentiment)")
     app.state.risk_agent = risk_agent
     app.state.trade_review_agent = trade_review_agent

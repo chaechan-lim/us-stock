@@ -123,9 +123,11 @@ class NewsSentimentAgent:
         self,
         llm_client: LLMClient | None = None,
         context_service: AgentContextService | None = None,
+        model_override: str | None = None,
     ):
         self._llm_client = llm_client
         self._ctx = context_service
+        self._model_override = model_override  # e.g. "gemini-3-flash-preview"
 
     async def analyze_batch(
         self, articles: list[NewsArticle],
@@ -180,6 +182,7 @@ class NewsSentimentAgent:
                 messages=[{"role": "user", "content": prompt}],
                 system=SYSTEM_PROMPT,
                 max_tokens=2048,
+                model=self._model_override,
             )
             return self._parse_response(response.text or "")
 
