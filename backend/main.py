@@ -1121,6 +1121,84 @@ async def lifespan(app: FastAPI):
         interval_sec=86400, phases=[MarketPhase.PRE_MARKET],
     )
 
+    # KR news sentiment analysis (Naver Finance)
+    from data.naver_news_service import NaverNewsService
+    naver_news_service = NaverNewsService()
+    app.state.naver_news_service = naver_news_service
+
+    async def task_kr_news_analysis():
+        """Fetch Naver Finance news and run LLM sentiment analysis for KR stocks.
+
+        Runs pre-market (once) + every 30min during KR regular hours.
+        Results cached on API endpoint + fed to KR evaluation loop.
+        """
+        try:
+            from db.trade_repository import TradeRepository
+            from api.news import update_kr_sentiment_cache
+
+            async with session_factory() as session:
+                repo = TradeRepository(session)
+                wl = await repo.get_watchlist(active_only=True, market="KR")
+                symbols = [
+                    w.symbol for w in wl
+                    if w.source != "etf_universe"
+                ][:30]
+
+            if not symbols:
+                return
+
+            batch = await naver_news_service.fetch_batch(
+                symbols=symbols, max_per_symbol=5,
+            )
+
+            if not batch.articles:
+                logger.debug("KR news analysis: no articles found")
+                return
+
+            if news_sentiment_agent:
+                summary = await news_sentiment_agent.analyze_batch(batch.articles)
+
+                actionable = len(summary.actionable_signals)
+                logger.info(
+                    "KR news analysis: %d articles -> %d symbols, "
+                    "market_sentiment=%.2f, actionable=%d",
+                    len(batch.articles), len(summary.symbol_sentiments),
+                    summary.market_sentiment, actionable,
+                )
+
+                # Cache for API endpoint
+                update_kr_sentiment_cache(
+                    summary.to_dict(),
+                    [s.to_dict() for s in summary.actionable_signals],
+                )
+
+                # Feed sentiment to KR evaluation loop for protective sells
+                if summary.symbol_sentiments:
+                    kr_evaluation_loop.update_news_sentiment(summary.symbol_sentiments)
+
+                # Discord alert for high-impact KR news
+                if actionable > 0:
+                    msg = "KR News Sentiment Alert\n"
+                    for sig in summary.actionable_signals[:5]:
+                        emoji = "+" if sig.sentiment > 0 else "-"
+                        msg += (
+                            f"  {sig.symbol}: [{sig.trading_signal}] "
+                            f"{sig.key_event} "
+                            f"(sentiment={sig.sentiment:{emoji}.2f}, "
+                            f"impact={sig.impact})\n"
+                        )
+                    msg += f"\nKR market sentiment: {summary.market_sentiment:+.2f}"
+                    await notification.notify_system_event("kr_news_sentiment", msg)
+
+        except Exception as e:
+            logger.error("KR news analysis failed: %s", e)
+
+    scheduler.add_task(
+        "kr_news_analysis", task_kr_news_analysis,
+        interval_sec=1800, phases=[MarketPhase.PRE_MARKET, MarketPhase.REGULAR],
+        market="KR",
+    )
+
     # ── KR market tasks ──────────────────────────────────────────────
 
     # KR evaluation loop (same strategies, KR market data + order manager)
@@ -1410,8 +1488,9 @@ async def lifespan(app: FastAPI):
     # Run initial data fetches (so dashboard has data immediately)
     try:
         await task_news_analysis()
+        await task_kr_news_analysis()
         await task_event_calendar_refresh()
-        logger.info("Initial news + event calendar data loaded")
+        logger.info("Initial news (US+KR) + event calendar data loaded")
     except Exception as e:
         logger.warning("Initial data fetch failed (non-fatal): %s", e)
 
@@ -1446,6 +1525,7 @@ async def lifespan(app: FastAPI):
     if kis_ws and kis_ws.is_connected:
         await kis_ws.close()
     await news_service.close()
+    await naver_news_service.close()
     await cache.close()
     await adapter.close()
     await kr_adapter.close()

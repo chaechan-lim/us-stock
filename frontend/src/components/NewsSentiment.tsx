@@ -1,5 +1,6 @@
-import { useMemo } from 'react'
+import { useMemo, useState } from 'react'
 import { useNewsSentiment } from '../hooks/useApi'
+import type { SentimentSummary, SentimentSignal } from '../api/client'
 
 function sentimentColor(v: number): string {
   if (v >= 0.3) return 'text-green-400'
@@ -61,51 +62,21 @@ function SentimentBar({ value, label }: { value: number; label: string }) {
   )
 }
 
-export default function NewsSentiment() {
-  const { data, isLoading } = useNewsSentiment()
-
-  const symbolList = useMemo(() => {
-    if (!data?.summary.symbol_sentiments) return []
-    return Object.entries(data.summary.symbol_sentiments)
-      .map(([symbol, score]) => ({ symbol, score }))
-      .sort((a, b) => Math.abs(b.score) - Math.abs(a.score))
-  }, [data])
-
-  const sectorList = useMemo(() => {
-    if (!data?.summary.sector_sentiments) return []
-    return Object.entries(data.summary.sector_sentiments)
-      .map(([sector, score]) => ({ sector, score }))
-      .sort((a, b) => b.score - a.score)
-  }, [data])
-
-  if (isLoading) {
-    return <div className="text-gray-500">Loading sentiment data...</div>
-  }
-
-  if (!data || !data.updated_at) {
-    return (
-      <div className="bg-gray-900 rounded-lg p-8 text-center">
-        <p className="text-gray-500">No sentiment data available yet.</p>
-        <p className="text-gray-600 text-xs mt-1">Sentiment analysis runs pre-market and every 30 min during trading hours.</p>
-      </div>
-    )
-  }
-
-  const { summary, signals } = data
-  const updatedAt = new Date(data.updated_at).toLocaleString()
-
+function SentimentPanel({ summary, signals, symbolList, sectorList, updatedAt }: {
+  summary: SentimentSummary
+  signals: SentimentSignal[]
+  symbolList: { symbol: string; score: number }[]
+  sectorList: { sector: string; score: number }[]
+  updatedAt: string
+}) {
   return (
     <div className="space-y-6">
-      {/* Header */}
+      {/* Stats row */}
       <div className="flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <h2 className="text-lg font-semibold">News Sentiment</h2>
-          <span className="text-xs text-gray-500">{summary.analyzed_count} articles analyzed</span>
-        </div>
+        <span className="text-xs text-gray-500">{summary.analyzed_count} articles analyzed</span>
         <span className="text-xs text-gray-500">Updated: {updatedAt}</span>
       </div>
 
-      {/* Market Sentiment + Stats */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         <div className="bg-gray-900 rounded-lg p-4">
           <div className="text-xs text-gray-400 uppercase mb-2">Market Sentiment</div>
@@ -144,7 +115,6 @@ export default function NewsSentiment() {
         </div>
       </div>
 
-      {/* Sector Sentiment */}
       {sectorList.length > 0 && (
         <div className="bg-gray-900 rounded-lg p-4">
           <h3 className="text-sm font-semibold mb-3 text-gray-300">Sector Sentiment</h3>
@@ -156,7 +126,6 @@ export default function NewsSentiment() {
         </div>
       )}
 
-      {/* Symbol Sentiment */}
       {symbolList.length > 0 && (
         <div className="bg-gray-900 rounded-lg p-4">
           <h3 className="text-sm font-semibold mb-3 text-gray-300">Symbol Sentiment</h3>
@@ -168,7 +137,6 @@ export default function NewsSentiment() {
         </div>
       )}
 
-      {/* Actionable Signals */}
       {signals.length > 0 && (
         <div className="bg-gray-900 rounded-lg p-4">
           <h3 className="text-sm font-semibold mb-3 text-gray-300">Actionable Signals</h3>
@@ -200,6 +168,86 @@ export default function NewsSentiment() {
               </tbody>
             </table>
           </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+export default function NewsSentiment() {
+  const { data, isLoading } = useNewsSentiment()
+  const [market, setMarket] = useState<'US' | 'KR'>('US')
+
+  const activeData = useMemo(() => {
+    if (!data) return null
+    if (market === 'KR' && data.kr) {
+      return { summary: data.kr.summary, signals: data.kr.signals, updated_at: data.kr.updated_at }
+    }
+    return { summary: data.summary, signals: data.signals, updated_at: data.updated_at }
+  }, [data, market])
+
+  const symbolList = useMemo(() => {
+    if (!activeData?.summary.symbol_sentiments) return []
+    return Object.entries(activeData.summary.symbol_sentiments)
+      .map(([symbol, score]) => ({ symbol, score }))
+      .sort((a, b) => Math.abs(b.score) - Math.abs(a.score))
+  }, [activeData])
+
+  const sectorList = useMemo(() => {
+    if (!activeData?.summary.sector_sentiments) return []
+    return Object.entries(activeData.summary.sector_sentiments)
+      .map(([sector, score]) => ({ sector, score }))
+      .sort((a, b) => b.score - a.score)
+  }, [activeData])
+
+  if (isLoading) {
+    return <div className="text-gray-500">Loading sentiment data...</div>
+  }
+
+  const hasUs = data?.updated_at
+  const hasKr = data?.kr?.updated_at
+
+  if (!data || (!hasUs && !hasKr)) {
+    return (
+      <div className="bg-gray-900 rounded-lg p-8 text-center">
+        <p className="text-gray-500">No sentiment data available yet.</p>
+        <p className="text-gray-600 text-xs mt-1">Sentiment analysis runs pre-market and every 30 min during trading hours.</p>
+      </div>
+    )
+  }
+
+  return (
+    <div className="space-y-4">
+      {/* Header with market toggle */}
+      <div className="flex items-center gap-3">
+        <h2 className="text-lg font-semibold">News Sentiment</h2>
+        <div className="flex rounded-md overflow-hidden border border-gray-700">
+          <button
+            onClick={() => setMarket('US')}
+            className={`px-3 py-1 text-xs font-medium ${market === 'US' ? 'bg-blue-600 text-white' : 'bg-gray-800 text-gray-400 hover:bg-gray-700'}`}
+          >
+            US {hasUs ? '' : '(-)'}
+          </button>
+          <button
+            onClick={() => setMarket('KR')}
+            className={`px-3 py-1 text-xs font-medium ${market === 'KR' ? 'bg-blue-600 text-white' : 'bg-gray-800 text-gray-400 hover:bg-gray-700'}`}
+          >
+            KR {hasKr ? '' : '(-)'}
+          </button>
+        </div>
+      </div>
+
+      {activeData && activeData.updated_at ? (
+        <SentimentPanel
+          summary={activeData.summary}
+          signals={activeData.signals}
+          symbolList={symbolList}
+          sectorList={sectorList}
+          updatedAt={new Date(activeData.updated_at).toLocaleString()}
+        />
+      ) : (
+        <div className="bg-gray-900 rounded-lg p-8 text-center">
+          <p className="text-gray-500">No {market} sentiment data available yet.</p>
         </div>
       )}
     </div>

@@ -1,13 +1,10 @@
 """Tests for news sentiment API."""
 
-from api.news import update_sentiment_cache, _last_summary, _last_signals
-
-
 import pytest
 from httpx import ASGITransport, AsyncClient
 from fastapi import FastAPI
 
-from api.news import router, update_sentiment_cache
+from api.news import router, update_sentiment_cache, update_kr_sentiment_cache
 import api.news as news_module
 
 
@@ -23,10 +20,16 @@ def reset_cache():
     news_module._last_summary = None
     news_module._last_signals = []
     news_module._last_updated = None
+    news_module._kr_last_summary = None
+    news_module._kr_last_signals = []
+    news_module._kr_last_updated = None
     yield
     news_module._last_summary = None
     news_module._last_signals = []
     news_module._last_updated = None
+    news_module._kr_last_summary = None
+    news_module._kr_last_signals = []
+    news_module._kr_last_updated = None
 
 
 @pytest.mark.asyncio
@@ -84,3 +87,40 @@ def test_update_sentiment_cache(reset_cache):
     assert news_module._last_summary["market_sentiment"] == 0.1
     assert len(news_module._last_signals) == 1
     assert news_module._last_updated is not None
+
+
+def test_update_kr_sentiment_cache(reset_cache):
+    update_kr_sentiment_cache(
+        {"market_sentiment": -0.2, "analyzed_count": 8},
+        [{"symbol": "005930", "sentiment": 0.4}],
+    )
+    assert news_module._kr_last_summary["market_sentiment"] == -0.2
+    assert len(news_module._kr_last_signals) == 1
+    assert news_module._kr_last_updated is not None
+
+
+@pytest.mark.asyncio
+async def test_sentiment_with_kr_data(app, reset_cache):
+    update_sentiment_cache(
+        {"symbol_sentiments": {}, "sector_sentiments": {},
+         "market_sentiment": 0.1, "actionable_count": 0, "analyzed_count": 5},
+        [],
+    )
+    update_kr_sentiment_cache(
+        {"symbol_sentiments": {"005930": 0.6}, "sector_sentiments": {},
+         "market_sentiment": -0.1, "actionable_count": 1, "analyzed_count": 12},
+        [{"symbol": "005930", "sentiment": 0.6, "impact": "HIGH"}],
+    )
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/api/v1/news/sentiment")
+    data = resp.json()
+    # US data
+    assert data["summary"]["market_sentiment"] == 0.1
+    # KR data
+    assert "kr" in data
+    assert data["kr"]["summary"]["market_sentiment"] == -0.1
+    assert data["kr"]["summary"]["symbol_sentiments"]["005930"] == 0.6
+    assert len(data["kr"]["signals"]) == 1
+    assert data["kr"]["updated_at"] is not None

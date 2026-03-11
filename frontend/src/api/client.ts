@@ -170,16 +170,22 @@ export interface SentimentSignal {
   time_sensitivity: string
   is_actionable: boolean
 }
+export interface SentimentSummary {
+  symbol_sentiments: Record<string, number>
+  sector_sentiments: Record<string, number>
+  market_sentiment: number
+  actionable_count: number
+  analyzed_count: number
+}
 export interface NewsSentimentData {
-  summary: {
-    symbol_sentiments: Record<string, number>
-    sector_sentiments: Record<string, number>
-    market_sentiment: number
-    actionable_count: number
-    analyzed_count: number
-  }
+  summary: SentimentSummary
   signals: SentimentSignal[]
   updated_at: string | null
+  kr?: {
+    summary: SentimentSummary
+    signals: SentimentSignal[]
+    updated_at: string | null
+  }
 }
 export const fetchNewsSentiment = () =>
   api.get<NewsSentimentData>('/news/sentiment').then(r => r.data)
