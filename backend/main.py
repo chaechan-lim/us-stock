@@ -1511,17 +1511,32 @@ async def lifespan(app: FastAPI):
 
     # Run initial data fetches in background (non-blocking startup)
     async def _initial_data_fetch():
+        errors = []
         try:
             await task_event_calendar_refresh()
             logger.info("Event calendar loaded")
         except Exception as e:
             logger.warning("Event calendar fetch failed: %s", e)
+            errors.append(f"Event calendar: {e}")
         try:
             await task_news_analysis()
-            await task_kr_news_analysis()
-            logger.info("Initial news sentiment (US+KR) loaded")
+            logger.info("US news sentiment loaded")
         except Exception as e:
-            logger.warning("Initial news analysis failed (non-fatal): %s", e)
+            logger.warning("US news analysis failed: %s", e)
+            errors.append(f"US news: {e}")
+        try:
+            await task_kr_news_analysis()
+            logger.info("KR news sentiment loaded")
+        except Exception as e:
+            logger.warning("KR news analysis failed: %s", e)
+            errors.append(f"KR news: {e}")
+
+        if errors and notification:
+            try:
+                msg = "⚠️ **Startup Background Tasks Failed**\n" + "\n".join(f"- {e}" for e in errors)
+                await notification.send_message(msg)
+            except Exception:
+                pass
 
     asyncio.create_task(_initial_data_fetch(), name="initial-data-fetch")
 

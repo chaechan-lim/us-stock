@@ -3,14 +3,18 @@
 import asyncio
 import json
 import logging
+from collections import deque
 from typing import Set
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
 
 router = APIRouter(prefix="/ws", tags=["websocket"])
 
 # Connected log clients
 _log_clients: Set[WebSocket] = set()
+
+# In-memory ring buffer for HTTP polling fallback
+_log_buffer: deque[dict] = deque(maxlen=500)
 
 
 class WebSocketLogHandler(logging.Handler):
@@ -29,8 +33,6 @@ class WebSocketLogHandler(logging.Handler):
     _LEVEL_MAP = {"WARNING": "WARN", "CRITICAL": "ERROR"}
 
     def emit(self, record: logging.LogRecord):
-        if not _log_clients:
-            return
         from datetime import datetime, timezone
 
         level = self._LEVEL_MAP.get(record.levelname, record.levelname)
@@ -48,6 +50,12 @@ class WebSocketLogHandler(logging.Handler):
             if key.startswith("_") or key in self._STANDARD_FIELDS:
                 continue
             payload[key] = value
+
+        # Always store in ring buffer (for HTTP polling)
+        _log_buffer.append(payload)
+
+        if not _log_clients:
+            return
 
         entry = json.dumps(payload, default=str)
 
@@ -71,6 +79,15 @@ def install_log_handler():
     """Install the WebSocket log handler on the root logger."""
     handler = WebSocketLogHandler()
     logging.getLogger().addHandler(handler)
+
+
+@router.get("/logs")
+async def get_logs(limit: int = Query(200, ge=1, le=500), level: str = Query("ALL")):
+    """Get recent logs from in-memory buffer (HTTP fallback for WebSocket)."""
+    logs = list(_log_buffer)
+    if level != "ALL":
+        logs = [l for l in logs if l.get("level") == level]
+    return logs[-limit:]
 
 
 @router.websocket("/logs")
