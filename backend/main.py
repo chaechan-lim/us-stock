@@ -231,6 +231,7 @@ async def lifespan(app: FastAPI):
     risk_agent = None
     trade_review_agent = None
     news_sentiment_agent = None
+    kr_news_sentiment_agent = None
     if llm_client:
         from agents.market_analyst import MarketAnalystAgent
         from agents.risk_assessment import RiskAssessmentAgent
@@ -242,6 +243,10 @@ async def lifespan(app: FastAPI):
         news_sentiment_agent = NewsSentimentAgent(
             llm_client=llm_client, context_service=agent_ctx,
             model_override=config.llm.gemini_fallback_model or None,
+        )
+        # KR agent: no Gemini override — Gemini Flash struggles with Korean text
+        kr_news_sentiment_agent = NewsSentimentAgent(
+            llm_client=llm_client, context_service=agent_ctx,
         )
         logger.info("AI agents enabled (analyst, risk, trade_review, news_sentiment)")
     app.state.risk_agent = risk_agent
@@ -1163,8 +1168,8 @@ async def lifespan(app: FastAPI):
                 logger.debug("KR news analysis: no articles found")
                 return
 
-            if news_sentiment_agent:
-                summary = await news_sentiment_agent.analyze_batch(
+            if kr_news_sentiment_agent:
+                summary = await kr_news_sentiment_agent.analyze_batch(
                     batch.articles, symbol_names=kr_names,
                 )
 
