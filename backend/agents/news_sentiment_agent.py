@@ -131,11 +131,16 @@ class NewsSentimentAgent:
 
     async def analyze_batch(
         self, articles: list[NewsArticle],
+        symbol_names: dict[str, str] | None = None,
     ) -> NewsSentimentSummary:
         """Analyze a batch of news articles using LLM.
 
         Processes articles in chunks to stay within token limits.
         Returns aggregated sentiment summary.
+
+        Args:
+            articles: News articles to analyze
+            symbol_names: Optional symbol->name mapping for context
         """
         if not self._llm_client or not articles:
             return NewsSentimentSummary()
@@ -146,7 +151,7 @@ class NewsSentimentAgent:
 
         for i in range(0, len(articles), chunk_size):
             chunk = articles[i:i + chunk_size]
-            results = await self._analyze_chunk(chunk)
+            results = await self._analyze_chunk(chunk, symbol_names)
             all_results.extend(results)
 
         # Aggregate into summary
@@ -160,6 +165,7 @@ class NewsSentimentAgent:
 
     async def _analyze_chunk(
         self, articles: list[NewsArticle],
+        symbol_names: dict[str, str] | None = None,
     ) -> list[SentimentResult]:
         """Analyze a chunk of articles via LLM call."""
         if not self._llm_client:
@@ -175,7 +181,7 @@ class NewsSentimentAgent:
             except Exception:
                 pass
 
-        prompt = self._build_prompt(articles, memory_context)
+        prompt = self._build_prompt(articles, memory_context, symbol_names)
 
         try:
             response = await self._llm_client.generate(
@@ -191,16 +197,33 @@ class NewsSentimentAgent:
             return []
 
     def _build_prompt(
-        self, articles: list[NewsArticle], memory_context: str = "",
+        self,
+        articles: list[NewsArticle],
+        memory_context: str = "",
+        symbol_names: dict[str, str] | None = None,
     ) -> str:
         parts = [
             f"Analyze the following {len(articles)} financial news articles "
             "and provide sentiment assessments.\n",
         ]
 
-        for i, article in enumerate(articles, 1):
+        # If KR stocks, provide symbol-name mapping for context
+        if symbol_names:
+            names_str = ", ".join(
+                f"{sym}={name}" for sym, name in list(symbol_names.items())[:40]
+            )
             parts.append(
-                f"### Article {i} [{article.symbol}] "
+                f"**Symbol reference (code=company):** {names_str}\n"
+                "Use the numeric stock codes (e.g. 005930) as the symbol field "
+                "in your response, NOT the company names.\n"
+            )
+
+        for i, article in enumerate(articles, 1):
+            label = article.symbol
+            if symbol_names and article.symbol in symbol_names:
+                label = f"{article.symbol} ({symbol_names[article.symbol]})"
+            parts.append(
+                f"### Article {i} [{label}] "
                 f"({article.source}, {article.published_at.strftime('%Y-%m-%d')})\n"
                 f"**Headline:** {article.headline}\n"
                 f"**Summary:** {article.summary[:300]}\n"
@@ -211,6 +234,7 @@ class NewsSentimentAgent:
 
         parts.append(
             "\nProvide your sentiment analysis as a JSON array. "
+            "You MUST produce one entry per stock symbol that has news. "
             "Consolidate duplicate events. Focus on actionable signals."
         )
         return "\n".join(parts)

@@ -1,5 +1,6 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useNewsSentiment } from '../hooks/useApi'
+import { fetchStockNames } from '../api/client'
 import type { SentimentSummary, SentimentSignal } from '../api/client'
 
 function sentimentColor(v: number): string {
@@ -36,10 +37,23 @@ function signalBadge(signal: string) {
   return <span className={`font-medium ${cls}`}>{signal}</span>
 }
 
-function SentimentBar({ value, label }: { value: number; label: string }) {
+function SymbolLabel({ symbol, names }: { symbol: string; names: Record<string, string> }) {
+  const name = names[symbol]
+  if (!name) return <span>{symbol}</span>
+  return (
+    <span>
+      {symbol} <span className="text-gray-500 text-xs">{name}</span>
+    </span>
+  )
+}
+
+function SentimentBar({ value, label, subLabel }: { value: number; label: string; subLabel?: string }) {
   return (
     <div className="flex items-center gap-2">
-      <span className="text-xs text-gray-400 w-20 text-right">{label}</span>
+      <div className="text-xs text-gray-400 w-28 text-right truncate" title={subLabel || label}>
+        <span>{label}</span>
+        {subLabel && <span className="text-gray-600 ml-1">{subLabel}</span>}
+      </div>
       <div className="flex-1 h-3 bg-gray-800 rounded-full relative overflow-hidden">
         {/* Center line */}
         <div className="absolute left-1/2 top-0 bottom-0 w-px bg-gray-600 z-10" />
@@ -62,13 +76,25 @@ function SentimentBar({ value, label }: { value: number; label: string }) {
   )
 }
 
-function SentimentPanel({ summary, signals, symbolList, sectorList, updatedAt }: {
+function SentimentPanel({ summary, signals, symbolList, sectorList, updatedAt, names }: {
   summary: SentimentSummary
   signals: SentimentSignal[]
   symbolList: { symbol: string; score: number }[]
   sectorList: { sector: string; score: number }[]
   updatedAt: string
+  names: Record<string, string>
 }) {
+  // Build per-symbol signal map from actionable signals
+  const symbolSignals = useMemo(() => {
+    const map: Record<string, SentimentSignal> = {}
+    for (const s of signals) {
+      if (s.symbol !== 'MARKET' && !map[s.symbol]) {
+        map[s.symbol] = s
+      }
+    }
+    return map
+  }, [signals])
+
   return (
     <div className="space-y-6">
       {/* Stats row */}
@@ -126,17 +152,39 @@ function SentimentPanel({ summary, signals, symbolList, sectorList, updatedAt }:
         </div>
       )}
 
+      {/* Symbol Sentiment with signal */}
       {symbolList.length > 0 && (
         <div className="bg-gray-900 rounded-lg p-4">
           <h3 className="text-sm font-semibold mb-3 text-gray-300">Symbol Sentiment</h3>
           <div className="space-y-1.5">
             {symbolList.map(s => (
-              <SentimentBar key={s.symbol} label={s.symbol} value={s.score} />
+              <div key={s.symbol} className="flex items-center gap-1">
+                <div className="flex-1">
+                  <SentimentBar
+                    label={s.symbol}
+                    subLabel={names[s.symbol] || ''}
+                    value={s.score}
+                  />
+                </div>
+                {/* Per-symbol signal badge */}
+                {symbolSignals[s.symbol] ? (
+                  <span className="w-16 text-center">
+                    {signalBadge(symbolSignals[s.symbol].trading_signal)}
+                  </span>
+                ) : s.score !== 0 ? (
+                  <span className="w-16 text-center">
+                    {signalBadge(s.score > 0.2 ? 'BULLISH' : s.score < -0.2 ? 'BEARISH' : 'NEUTRAL')}
+                  </span>
+                ) : (
+                  <span className="w-16" />
+                )}
+              </div>
             ))}
           </div>
         </div>
       )}
 
+      {/* Actionable Signals table */}
       {signals.length > 0 && (
         <div className="bg-gray-900 rounded-lg p-4">
           <h3 className="text-sm font-semibold mb-3 text-gray-300">Actionable Signals</h3>
@@ -155,7 +203,9 @@ function SentimentPanel({ summary, signals, symbolList, sectorList, updatedAt }:
               <tbody>
                 {signals.map((s, i) => (
                   <tr key={i} className="border-b border-gray-800/50">
-                    <td className="py-2 font-medium">{s.symbol}</td>
+                    <td className="py-2 font-medium">
+                      <SymbolLabel symbol={s.symbol} names={names} />
+                    </td>
                     <td className={`text-right py-2 font-mono ${sentimentColor(s.sentiment)}`}>
                       {s.sentiment >= 0 ? '+' : ''}{s.sentiment.toFixed(2)}
                     </td>
@@ -177,6 +227,46 @@ function SentimentPanel({ summary, signals, symbolList, sectorList, updatedAt }:
 export default function NewsSentiment() {
   const { data, isLoading } = useNewsSentiment()
   const [market, setMarket] = useState<'US' | 'KR'>('US')
+  const [names, setNames] = useState<Record<string, string>>({})
+
+  // Resolve stock names when data changes
+  useEffect(() => {
+    if (!data) return
+
+    const allSymbols = new Set<string>()
+    // US symbols
+    for (const sym of Object.keys(data.summary?.symbol_sentiments || {})) {
+      if (sym !== 'MARKET') allSymbols.add(sym)
+    }
+    for (const s of data.signals || []) {
+      if (s.symbol !== 'MARKET') allSymbols.add(s.symbol)
+    }
+    // KR symbols
+    if (data.kr) {
+      for (const sym of Object.keys(data.kr.summary?.symbol_sentiments || {})) {
+        if (sym !== 'MARKET') allSymbols.add(sym)
+      }
+      for (const s of data.kr.signals || []) {
+        if (s.symbol !== 'MARKET') allSymbols.add(s.symbol)
+      }
+    }
+
+    // Separate US and KR symbols
+    const usSyms = [...allSymbols].filter(s => !/^\d{6}$/.test(s))
+    const krSyms = [...allSymbols].filter(s => /^\d{6}$/.test(s))
+
+    const promises: Promise<Record<string, string>>[] = []
+    if (usSyms.length) promises.push(fetchStockNames(usSyms, 'US'))
+    if (krSyms.length) promises.push(fetchStockNames(krSyms, 'KR'))
+
+    if (promises.length) {
+      Promise.all(promises).then(results => {
+        const merged: Record<string, string> = {}
+        for (const r of results) Object.assign(merged, r)
+        setNames(merged)
+      }).catch(() => {})
+    }
+  }, [data])
 
   const activeData = useMemo(() => {
     if (!data) return null
@@ -189,6 +279,7 @@ export default function NewsSentiment() {
   const symbolList = useMemo(() => {
     if (!activeData?.summary.symbol_sentiments) return []
     return Object.entries(activeData.summary.symbol_sentiments)
+      .filter(([sym]) => sym !== 'MARKET')
       .map(([symbol, score]) => ({ symbol, score }))
       .sort((a, b) => Math.abs(b.score) - Math.abs(a.score))
   }, [activeData])
@@ -244,6 +335,7 @@ export default function NewsSentiment() {
           symbolList={symbolList}
           sectorList={sectorList}
           updatedAt={new Date(activeData.updated_at).toLocaleString()}
+          names={names}
         />
       ) : (
         <div className="bg-gray-900 rounded-lg p-8 text-center">

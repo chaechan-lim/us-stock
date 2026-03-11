@@ -1135,6 +1135,7 @@ async def lifespan(app: FastAPI):
         try:
             from db.trade_repository import TradeRepository
             from api.news import update_kr_sentiment_cache
+            from data.stock_name_service import get_name as get_stock_name
 
             async with session_factory() as session:
                 repo = TradeRepository(session)
@@ -1147,6 +1148,13 @@ async def lifespan(app: FastAPI):
             if not symbols:
                 return
 
+            # Build symbol->name mapping for LLM context
+            kr_names = {}
+            for sym in symbols:
+                name = get_stock_name(sym, "KR")
+                if name:
+                    kr_names[sym] = name
+
             batch = await naver_news_service.fetch_batch(
                 symbols=symbols, max_per_symbol=5,
             )
@@ -1156,7 +1164,9 @@ async def lifespan(app: FastAPI):
                 return
 
             if news_sentiment_agent:
-                summary = await news_sentiment_agent.analyze_batch(batch.articles)
+                summary = await news_sentiment_agent.analyze_batch(
+                    batch.articles, symbol_names=kr_names,
+                )
 
                 actionable = len(summary.actionable_signals)
                 logger.info(
