@@ -19,18 +19,24 @@ class TestNaverNewsService:
         mock_resp.status = 200
         mock_resp.json = AsyncMock(return_value=[
             {
-                "title": "삼성전자 반도체 투자 확대",
-                "body": "삼성전자가 반도체 신규 라인 투자를 발표했다.",
-                "officeName": "한국경제",
-                "datetime": "2026-03-10T09:30:00",
-                "url": "https://example.com/news/1",
+                "total": 1,
+                "items": [{
+                    "title": "삼성전자 반도체 투자 확대",
+                    "body": "삼성전자가 반도체 신규 라인 투자를 발표했다.",
+                    "officeName": "한국경제",
+                    "datetime": "202603100930",
+                    "url": "https://example.com/news/1",
+                }],
             },
             {
-                "title": "삼성전자 <b>실적</b> 전망",
-                "body": "애널리스트들이 삼성전자 1분기 실적을 긍정적으로 전망했다.",
-                "officeName": "매일경제",
-                "datetime": "2026-03-09T14:00:00",
-                "url": "https://example.com/news/2",
+                "total": 1,
+                "items": [{
+                    "title": "삼성전자 <b>실적</b> 전망",
+                    "body": "애널리스트들이 삼성전자 1분기 실적을 긍정적으로 전망했다.",
+                    "officeName": "매일경제",
+                    "datetime": "202603091400",
+                    "url": "https://example.com/news/2",
+                }],
             },
         ])
 
@@ -52,7 +58,7 @@ class TestNaverNewsService:
 
     @pytest.mark.asyncio
     async def test_fetch_company_news_dict_format(self):
-        """Test when Naver returns {'items': [...]} format."""
+        """Test when Naver returns single dict {'items': [...]} format."""
         svc = NaverNewsService()
         mock_resp = AsyncMock()
         mock_resp.status = 200
@@ -60,9 +66,9 @@ class TestNaverNewsService:
             "items": [
                 {
                     "title": "SK하이닉스 HBM 수주",
-                    "summary": "HBM 공급 확대",
+                    "body": "HBM 공급 확대",
                     "officeName": "서울경제",
-                    "datetime": "2026-03-10T10:00:00",
+                    "datetime": "202603101000",
                 },
             ]
         })
@@ -144,6 +150,13 @@ class TestNaverNewsService:
         assert call_count == 3
         assert batch.articles[0].symbol == "005930"
         assert batch.articles[2].symbol == "035420"
+
+    def test_parse_date_compact(self):
+        dt = NaverNewsService._parse_date("202603100930")
+        assert dt.year == 2026
+        assert dt.month == 3
+        assert dt.day == 10
+        assert dt.hour == 9
 
     def test_parse_date_iso(self):
         dt = NaverNewsService._parse_date("2026-03-10T09:30:00")

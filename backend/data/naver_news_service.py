@@ -77,13 +77,24 @@ class NaverNewsService:
 
                 data = await resp.json()
 
-                # Naver API response structure: {"items": [...]}
-                items = data if isinstance(data, list) else data.get("items", [])
-                if not items:
+                # Naver mobile API returns:
+                # List of {"total": N, "items": [{article}, ...]}
+                # Flatten nested structure into article list
+                raw_items: list[dict] = []
+                if isinstance(data, list):
+                    for group in data:
+                        if isinstance(group, dict) and "items" in group:
+                            raw_items.extend(group["items"])
+                        elif isinstance(group, dict) and "title" in group:
+                            raw_items.append(group)
+                elif isinstance(data, dict):
+                    raw_items = data.get("items", [])
+
+                if not raw_items:
                     return []
 
                 articles = []
-                for item in items[:max_articles]:
+                for item in raw_items[:max_articles]:
                     try:
                         # Parse datetime from various Naver formats
                         pub_date = self._parse_date(
@@ -92,7 +103,7 @@ class NaverNewsService:
                             or item.get("publishedAt", "")
                         )
                         title = (
-                            item.get("title", "")
+                            (item.get("title", "") or item.get("titleFull", ""))
                             .replace("<b>", "").replace("</b>", "")
                             .replace("&quot;", '"').replace("&amp;", "&")
                         )
@@ -162,7 +173,9 @@ class NaverNewsService:
             return datetime.now()
 
         for fmt in (
-            "%Y-%m-%dT%H:%M:%S%z",      # ISO with TZ
+            "%Y%m%d%H%M",                # Naver compact: 202603111649
+            "%Y%m%d%H%M%S",              # Compact with seconds
+            "%Y-%m-%dT%H:%M:%S%z",       # ISO with TZ
             "%Y-%m-%dT%H:%M:%S",         # ISO without TZ
             "%Y-%m-%d %H:%M:%S",         # Standard datetime
             "%Y-%m-%d %H:%M",            # Without seconds
