@@ -308,6 +308,7 @@ class ETFEngine:
                         current_positions=current_count,
                         strategy_name="etf_engine_regime",
                         exchange=self._etf.get_exchange(sym),
+                        skip_position_limit=True,
                     )
                     if result is None:
                         logger.warning("ETF Engine: BUY %s failed — skipping", sym)
@@ -422,6 +423,7 @@ class ETFEngine:
                     current_positions=current_count,
                     strategy_name="etf_engine_sector",
                     exchange=self._etf.get_exchange(etf_sym),
+                    skip_position_limit=True,
                 )
                 if result is None:
                     logger.warning("ETF Engine: BUY %s (sector) failed — skipping", etf_sym)

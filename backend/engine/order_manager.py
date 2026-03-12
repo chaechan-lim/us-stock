@@ -76,12 +76,15 @@ class OrderManager:
         exchange: str = "NASD",
         atr: float | None = None,
         sizing_override: PositionSizeResult | None = None,
+        skip_position_limit: bool = False,
     ) -> ManagedOrder | None:
         """Place a buy order after risk checks and deduplication.
 
         Args:
             sizing_override: Pre-computed sizing (e.g. from Kelly). Skips
                 internal sizing calculation when provided.
+            skip_position_limit: If True, bypasses max_positions check (used by
+                ETF engine which has its own position limits).
         """
         # Duplicate check: prevent double-buying same symbol
         if self.has_pending_order(symbol, "BUY"):
@@ -96,7 +99,7 @@ class OrderManager:
                 price=price,
                 portfolio_value=portfolio_value,
                 cash_available=cash_available,
-                current_positions=current_positions,
+                current_positions=0 if skip_position_limit else current_positions,
                 atr=atr,
             )
 
