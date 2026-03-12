@@ -5,16 +5,18 @@
 
 ## 1. 프로젝트 개요
 
-한국투자증권(KIS) Open API를 활용한 미국주식 자동매매 시스템.
+한국투자증권(KIS) Open API를 활용한 **US + KR 듀얼마켓** 자동매매 시스템.
 기존 ~/coin 프로젝트의 아키텍처를 계승하면서 주식시장 특성에 맞게 확장.
+**현재 실계좌 라이브 운용 중** (US + KR 동시 운영).
 
 ### 핵심 목표
-- 미국주식 실시간 시세 감시 및 자동 매매
-- 추세 매매 전략 중심 + 다중 전략 조합
-- 레버리지/인버스 ETF 적극 활용 (TQQQ, SQQQ, SOXL, SOXS 등)
+- US/KR 주식 실시간 시세 감시 및 자동 매매
+- 추세 매매 전략 중심 + 14개 다중 전략 조합
+- 레버리지/인버스 ETF 적극 활용 (US: TQQQ/SQQQ, KR: KODEX 레버리지/인버스)
 - 종목 스캐닝 및 섹터 분석 기반 동적 종목 선정
+- 뉴스 감성 분석 + 이벤트 캘린더 통합
 - 충분한 백테스트 후 라이브 전환
-- 외부 데이터 소스 통합 (yfinance, FRED, 뉴스 등)
+- 외부 데이터 소스 통합 (yfinance, FRED, Finnhub, Naver)
 
 ---
 
@@ -40,8 +42,8 @@
 │  ┌──────▼──────────────────────────────────▼───────────────────┐   │
 │  │                    Trading Engine                            │   │
 │  │  ┌────────────┐ ┌────────────┐ ┌────────────┐              │   │
-│  │  │  US Stock   │ │  ETF       │ │  Extended   │              │   │
-│  │  │  Engine     │ │  Engine    │ │  Hours Eng  │              │   │
+│  │  │  US Stock   │ │  KR Stock  │ │  ETF        │              │   │
+│  │  │  Engine     │ │  Engine    │ │  Engine     │              │   │
 │  │  └────────────┘ └────────────┘ └────────────┘              │   │
 │  │       │               │               │                     │   │
 │  │  ┌────▼───────────────▼───────────────▼──────────────────┐  │   │
@@ -80,7 +82,7 @@
 │                                                                     │
 │  ┌────────────┐  ┌────────────┐  ┌────────────┐                   │
 │  │ PostgreSQL │  │   Redis    │  │ Notification│                   │
-│  │ (persist)  │  │  (cache)   │  │ (Telegram)  │                   │
+│  │ (persist)  │  │  (cache)   │  │ (Discord)   │                   │
 │  └────────────┘  └────────────┘  └────────────┘                   │
 └─────────────────────────────────────────────────────────────────────┘
 ```
@@ -104,6 +106,9 @@
 | DB | PostgreSQL 16 | 주문/포지션/백테스트 |
 | Logging | structlog | 구조화 로깅 |
 | Serialization | orjson | 고속 JSON |
+| News | finnhub-python | 미국 뉴스 (Finnhub API) |
+| KR News | Naver Finance API | 한국 뉴스 (API key 불필요) |
+| MCP | mcp==1.26.0 | Claude Desktop/Code 통합 |
 
 ### Frontend (coin 프로젝트 계승)
 | 구분 | 기술 |
@@ -119,10 +124,13 @@
 ### Infra
 | 구분 | 기술 |
 |------|------|
-| Container | Docker Compose |
-| DB | PostgreSQL 16 (Docker) |
-| Cache | Redis 7 (Docker) |
-| Deploy | Docker Compose / systemd (Raspberry Pi) |
+| Server | Raspberry Pi ARM64 (192.168.50.244) |
+| DB | PostgreSQL 16 (coin 프로젝트 Docker 컨테이너 공유, DB: us_stock_trading) |
+| Cache | Redis 7 (공유, db 1 — coin은 db 0) |
+| Deploy | systemd (usstock-backend.service, usstock-frontend.service) |
+| HTTPS | nginx reverse proxy (port 8443, coin과 인증서 공유) |
+| Backup | local daily (7-day) + GitHub weekly (4-week), systemd timers |
+| Ports | Backend 8001, Frontend 3001 (coin: 8000/3000) |
 
 ---
 
@@ -132,199 +140,218 @@
 ~/us-stock/
 ├── CLAUDE.md                     # AI Agent 지침서
 ├── SYSTEM_DESIGN.md              # 이 문서
-├── README.md                     # 프로젝트 소개
-├── CONTRIBUTING.md               # 개발 규칙
-├── CHANGELOG.md                  # 변경 이력
-├── docker-compose.yml
-├── .env.example
+├── docker-compose.yml            # DB/Redis 참조용 (실서비스는 systemd)
+├── .env                          # 환경 설정 (gitignored)
+├── .env.example                  # 환경 설정 예시
+├── .mcp.json                     # MCP 서버 설정 (gitignored)
+├── .mcp.json.example             # MCP 설정 예시
 │
-├── .github/
-│   ├── workflows/
-│   │   ├── ci.yml                # PR 테스트 자동화
-│   │   ├── backtest.yml          # 전략 변경 시 백테스트
-│   │   └── deploy.yml            # 배포
-│   └── pull_request_template.md
+├── .github/workflows/
+│   ├── ci.yml                    # PR 테스트 자동화
+│   └── backtest.yml              # 전략 변경 시 백테스트
 │
 ├── config/
-│   ├── strategies.yaml           # 전략 파라미터 + 가중치 (메인)
-│   ├── strategies.example.yaml   # 예시 설정
-│   └── etf_universe.yaml         # ETF 유니버스 정의
+│   ├── strategies.yaml           # 전략 파라미터 + 가중치 (메인, 핫 리로드)
+│   ├── etf_universe.yaml         # US ETF 유니버스 정의
+│   └── kr_etf_universe.yaml      # KR ETF 유니버스 정의
 │
-├── docs/
-│   ├── architecture.md           # 아키텍처 상세
-│   ├── api-reference.md          # REST API 명세
-│   ├── strategy-guide.md         # 전략 개발 가이드
-│   ├── backtest-guide.md         # 백테스트 사용법
-│   ├── deployment.md             # 배포 가이드
-│   └── troubleshooting.md        # 트러블슈팅
+├── deploy/
+│   ├── usstock-backend.service   # Backend systemd
+│   ├── usstock-frontend.service  # Frontend systemd
+│   ├── setup-db.sh               # DB 초기화
+│   ├── backup-db.sh              # DB 백업
+│   ├── db-backup.service/timer   # 로컬 백업 systemd
+│   ├── db-backup-remote.*        # GitHub 원격 백업 systemd
+│   └── install.sh                # 설치 스크립트
 │
 ├── backend/
-│   ├── main.py                   # FastAPI 앱 + lifespan
-│   ├── config.py                 # Pydantic Settings (전체 설정)
+│   ├── main.py                   # FastAPI 앱 + lifespan (1600+ lines)
+│   ├── config.py                 # Pydantic Settings
+│   ├── mcp_server.py             # MCP 서버 (FastMCP, 28 tools)
 │   ├── requirements.txt
-│   ├── Dockerfile
 │   │
 │   ├── core/
 │   │   ├── models.py             # SQLAlchemy ORM (10+ 테이블)
-│   │   ├── enums.py              # SignalType, OrderStatus, MarketState 등
-│   │   ├── schemas.py            # Pydantic 응답 스키마
+│   │   ├── enums.py              # SignalType, OrderStatus, MarketState, Market 등
 │   │   └── events.py             # EventBus (내부 이벤트)
 │   │
 │   ├── db/
 │   │   ├── session.py            # async engine, session factory
-│   │   └── migrations/           # Alembic
+│   │   └── trade_repository.py   # 거래 CRUD
 │   │
 │   ├── exchange/
-│   │   ├── base.py               # AbstractExchangeAdapter
-│   │   ├── kis_adapter.py        # KIS REST API 래퍼
-│   │   ├── kis_websocket.py      # KIS WebSocket (실시간 시세)
-│   │   ├── kis_auth.py           # OAuth2 토큰 관리 (자동 갱신)
+│   │   ├── base.py               # ExchangeAdapter Protocol
+│   │   ├── kis_adapter.py        # KIS US REST API (주문/잔고/체결내역)
+│   │   ├── kis_kr_adapter.py     # KIS KR REST API (한국주식)
+│   │   ├── kis_websocket.py      # KIS WebSocket (실시간 시세, 41종목)
+│   │   ├── kis_auth.py           # OAuth2 토큰 관리 (Redis 캐싱, 자동 갱신)
 │   │   └── paper_adapter.py      # 모의투자 어댑터
 │   │
 │   ├── engine/
-│   │   ├── trading_engine.py     # 메인 매매 엔진
+│   │   ├── evaluation_loop.py    # 메인 평가 루프 (US/KR)
 │   │   ├── etf_engine.py         # 레버리지/인버스 ETF 전용 엔진
-│   │   ├── order_manager.py      # 주문 생명주기 관리
-│   │   ├── portfolio_manager.py  # 잔고/포지션/PnL
-│   │   ├── risk_manager.py       # 리스크 관리 (drawdown, 집중도 등)
-│   │   ├── position_tracker.py   # SL/TP/Trailing Stop
-│   │   ├── scheduler.py          # APScheduler 작업 등록
-│   │   ├── health_monitor.py     # 헬스체크 + 자동복구
+│   │   ├── order_manager.py      # 주문 생명주기 (dedup, partial fill)
+│   │   ├── portfolio_manager.py  # 잔고/포지션/PnL/스냅샷
+│   │   ├── risk_manager.py       # 리스크 관리 (US/KR 별도 파라미터)
+│   │   ├── position_tracker.py   # ATR-based 동적 SL/TP, 보유 추적
+│   │   ├── scheduler.py          # APScheduler 작업 등록 (29 tasks)
+│   │   ├── adaptive_weights.py   # 적응형 가중치
+│   │   ├── stock_classifier.py   # 종목 분류
 │   │   └── recovery.py           # 에러 복구
 │   │
-│   ├── strategies/
+│   ├── strategies/               # 14 active strategies
 │   │   ├── base.py               # BaseStrategy (abstract)
 │   │   ├── registry.py           # StrategyRegistry (동적 등록)
-│   │   ├── combiner.py           # SignalCombiner (가중 투표)
-│   │   │
-│   │   │  # 추세 매매 전략 (핵심)
-│   │   ├── trend_following.py    # 이동평균 추세 추종
-│   │   ├── dual_momentum.py      # 듀얼 모멘텀 (절대+상대)
+│   │   ├── combiner.py           # SignalCombiner (Mode B, 그룹 합의)
+│   │   ├── config_loader.py      # YAML 핫 리로드
+│   │   │  # 추세 매매 (Core)
+│   │   ├── trend_following.py    # EMA Cross + ADX
+│   │   ├── dual_momentum.py      # 절대+상대 모멘텀
 │   │   ├── donchian_breakout.py  # 돈치안 채널 돌파
-│   │   ├── supertrend.py         # 슈퍼트렌드 지표
-│   │   │
-│   │   │  # coin 포팅 전략 (4h crypto → 1D stocks)
-│   │   ├── cis_momentum.py      # CIS 모멘텀 (ROC + 거래량)
-│   │   ├── larry_williams.py    # 래리 윌리엄스 (변동성 돌파 + %R)
-│   │   ├── bnf_deviation.py     # BNF 이격도 (평균 회귀)
-│   │   │
+│   │   ├── supertrend_strategy.py # ATR 기반 슈퍼트렌드
+│   │   │  # coin 포팅 전략
+│   │   ├── cis_momentum.py       # CIS 모멘텀 (ROC + 거래량)
+│   │   ├── larry_williams.py     # 래리 윌리엄스 (변동성 돌파 + %R)
+│   │   ├── bnf_deviation.py      # BNF 이격도 (평균 회귀)
 │   │   │  # 보조 전략
 │   │   ├── macd_histogram.py     # MACD 히스토그램 다이버전스
 │   │   ├── rsi_divergence.py     # RSI 다이버전스
 │   │   ├── bollinger_squeeze.py  # 볼린저 밴드 스퀴즈
 │   │   ├── volume_profile.py     # 거래량 프로파일
-│   │   │
+│   │   ├── volume_surge_strategy.py # 거래량 급증 확인
 │   │   │  # ETF 전용 전략
-│   │   ├── regime_switch.py      # 시장 레짐 전환 (Bull/Bear ETF 스위칭)
+│   │   ├── regime_switch.py      # 시장 레짐 전환
 │   │   └── sector_rotation.py    # 섹터 로테이션
 │   │
 │   ├── scanner/
-│   │   ├── stock_scanner.py      # KIS API 기반 종목 스캔
+│   │   ├── stock_scanner.py      # 종목 스캔 인터페이스
+│   │   ├── indicator_screener.py # Layer 1: 기술적 지표 스크리닝
+│   │   ├── fundamental_enricher.py # Layer 2: yfinance 데이터 보강 (US)
+│   │   ├── kr_fundamental_enricher.py # Layer 2: KR 펀더멘털
+│   │   ├── news_enricher.py      # Layer 2.5: 뉴스 감성 분석 (±15pt)
+│   │   ├── pipeline.py           # 풀 스캐닝 파이프라인
+│   │   ├── kr_screener.py        # KR 종목 스크리닝
 │   │   ├── sector_analyzer.py    # 섹터별 강도 분석
-│   │   ├── universe_manager.py   # 감시 종목 유니버스 관리
+│   │   ├── universe_expander.py  # 동적 유니버스 확장 (yfinance+KIS ranking)
 │   │   └── etf_universe.py       # ETF 유니버스 (레버리지/인버스 매핑)
 │   │
 │   ├── data/
-│   │   ├── market_data_service.py    # KIS 시세 + 캐싱
+│   │   ├── market_data_service.py    # yfinance-first OHLCV + 캐싱
 │   │   ├── external_data_service.py  # yfinance 기본 데이터
-│   │   ├── fred_service.py           # FRED 매크로 경제지표
+│   │   ├── fred_service.py           # FRED 매크로 (async via to_thread)
 │   │   ├── market_state.py           # SPY/VIX 시장 레짐 감지
 │   │   ├── indicator_service.py      # 기술적 지표 계산
-│   │   └── historical_data.py        # 과거 데이터 수집/저장
+│   │   ├── news_service.py           # US 뉴스 (Finnhub API)
+│   │   ├── naver_news_service.py     # KR 뉴스 (Naver Finance)
+│   │   ├── earnings_service.py       # 실적 발표 일정 (Finnhub)
+│   │   ├── insider_service.py        # 내부자 매매 (Finnhub)
+│   │   ├── macro_calendar.py         # US 매크로 캘린더 (FOMC, CPI 등)
+│   │   ├── kr_macro_calendar.py      # KR 매크로 캘린더
+│   │   ├── event_calendar.py         # 통합 이벤트 캘린더 (파사드)
+│   │   ├── stock_name_service.py     # 종목명 캐싱 (DB batch)
+│   │   ├── kr_symbol_mapper.py       # KR 심볼 매핑 (005930→005930.KS)
+│   │   └── kr_tick_size.py           # KR 호가 단위
 │   │
 │   ├── services/
 │   │   ├── llm/
-│   │   │   ├── __init__.py          # LLMClient, LLMResponse, ToolCall
-│   │   │   ├── providers.py         # LLMProvider Protocol + Anthropic/Gemini
-│   │   │   └── client.py            # 멀티 프로바이더 클라이언트 (폴백 + 재시도)
+│   │   │   ├── __init__.py          # LLMClient, LLMResponse
+│   │   │   ├── providers.py         # AnthropicProvider + GeminiProvider
+│   │   │   └── client.py            # 멀티 프로바이더 (폴백 + 재시도)
 │   │   ├── cache.py                 # Redis CacheService
-│   │   ├── notification.py          # Discord/Telegram/Slack
-│   │   └── ...
+│   │   ├── notification.py          # Discord (primary) / Telegram / Slack
+│   │   ├── rate_limiter.py          # KIS API Rate Limit
+│   │   ├── exchange_resolver.py     # Exchange 코드 자동 감지
+│   │   ├── health.py                # 헬스체크 + Discord 알림
+│   │   └── log_manager.py           # 로그 로테이션
 │   │
 │   ├── agents/
-│   │   ├── market_analyst.py    # 시장 분석 (LLMClient + AgentContext)
-│   │   ├── risk_assessment.py   # 리스크 평가 + 매매 전 리스크 체크
-│   │   └── trade_review.py      # 매매 리뷰 (일일 리뷰, 교훈 저장)
+│   │   ├── market_analyst.py        # 시장 분석 (LLMClient + AgentContext)
+│   │   ├── risk_assessment.py       # 매매 전 리스크 체크
+│   │   ├── trade_review.py          # 일일 매매 리뷰
+│   │   └── news_sentiment_agent.py  # 뉴스 감성 분석 (US+KR)
+│   │
+│   ├── analytics/
+│   │   ├── factor_model.py          # MultiFactorModel (z-scores)
+│   │   ├── position_sizing.py       # KellyPositionSizer
+│   │   └── signal_quality.py        # SignalQualityTracker
 │   │
 │   ├── backtest/
-│   │   ├── engine.py             # 백테스트 엔진
-│   │   ├── data_loader.py        # 과거 데이터 로더 (yfinance)
-│   │   ├── simulator.py          # 주문 시뮬레이션 (슬리피지, 수수료)
-│   │   ├── metrics.py            # 성과 지표 (Sharpe, MDD, Win Rate 등)
-│   │   ├── optimizer.py          # 파라미터 최적화
-│   │   └── report.py             # 결과 리포트 생성
+│   │   ├── engine.py                # 백테스트 엔진
+│   │   ├── full_pipeline.py         # 풀 파이프라인 백테스트
+│   │   ├── data_loader.py           # yfinance 과거 데이터
+│   │   ├── simulator.py             # 주문 시뮬레이션
+│   │   ├── metrics.py               # 성과 지표 (Sharpe, MDD 등)
+│   │   ├── optimizer.py             # 파라미터 최적화
+│   │   ├── result_store.py          # 결과 DB 저장
+│   │   └── verify_strategies.py     # 전략 검증 스크립트
 │   │
-│   ├── services/
-│   │   ├── notification.py       # Telegram/Discord 알림
-│   │   └── rate_limiter.py       # KIS API Rate Limit 관리
+│   ├── api/                          # 13 모듈
+│   │   ├── router.py                # 메인 라우터
+│   │   ├── portfolio.py             # 포트폴리오
+│   │   ├── trades.py                # 거래 이력
+│   │   ├── strategies.py            # 전략 관리
+│   │   ├── scanner_api.py           # 스캐너 결과
+│   │   ├── backtest_api.py          # 백테스트 실행/결과
+│   │   ├── engine_api.py            # 엔진 제어
+│   │   ├── market.py                # 시장 데이터 + 이벤트
+│   │   ├── watchlist.py             # 감시 목록
+│   │   ├── news.py                  # 뉴스 감성 분석
+│   │   ├── ws.py                    # WebSocket
+│   │   └── dependencies.py          # DI
 │   │
-│   ├── api/
-│   │   ├── router.py             # 메인 라우터
-│   │   ├── portfolio.py          # 포트폴리오 엔드포인트
-│   │   ├── trades.py             # 거래 이력
-│   │   ├── strategies.py         # 전략 관리
-│   │   ├── scanner.py            # 스캐너 결과
-│   │   ├── backtest.py           # 백테스트 실행/결과
-│   │   ├── engine.py             # 엔진 제어
-│   │   ├── events.py             # 이벤트 로그
-│   │   └── websocket.py          # WebSocket 매니저
-│   │
-│   └── tests/
-│       ├── conftest.py               # 공통 fixture
-│       ├── test_exchange/            # KIS, Paper 어댑터
-│       ├── test_strategies/          # 전략별 유닛 테스트
-│       ├── test_engine/              # 엔진/주문/포지션/리스크
-│       ├── test_scanner/             # 3-Layer 스캐너
-│       ├── test_data/                # 데이터 서비스
-│       ├── test_backtest/            # 백테스트 엔진
-│       ├── test_api/                 # REST/WebSocket API
-│       ├── test_agents/              # AI 에이전트
-│       └── scenarios/                # E2E 시나리오 테스트
-│           ├── test_scenario_normal_buy_sell.py
-│           ├── test_scenario_stop_loss_triggered.py
-│           ├── test_scenario_regime_switch.py
-│           ├── test_scenario_daily_full_scan.py
-│           ├── test_scenario_risk_limit_breach.py
-│           ├── test_scenario_api_failure_recovery.py
-│           ├── test_scenario_market_hours.py
-│           └── test_scenario_strategy_hot_reload.py
+│   └── tests/                        # 103 test files, 1276+ tests
+│       ├── conftest.py
+│       ├── test_exchange/ (4)
+│       ├── test_strategies/ (15)
+│       ├── test_engine/ (10)
+│       ├── test_scanner/ (11)
+│       ├── test_data/ (11)
+│       ├── test_backtest/ (7)
+│       ├── test_api/ (3)
+│       ├── test_agents/ (4)
+│       ├── test_analytics/ (3)
+│       ├── test_services/ (6)
+│       └── scenarios/ (8)
 │
 └── frontend/
     ├── package.json
     ├── vite.config.ts
-    ├── tailwind.config.js
-    ├── Dockerfile
     │
     └── src/
         ├── main.tsx
-        ├── App.tsx
-        │
-        ├── components/
-        │   ├── Dashboard.tsx          # 메인 레이아웃 (탭 네비게이션)
-        │   ├── PortfolioSummary.tsx    # 포트폴리오 요약 (잔고, PnL)
-        │   ├── PortfolioChart.tsx      # 자산 추이 차트
-        │   ├── TradeHistory.tsx        # 거래 이력 테이블
-        │   ├── SignalLog.tsx           # 전략 신호 로그
+        ├── components/              # 20 components
+        │   ├── App.tsx
+        │   ├── Dashboard.tsx        # 메인 레이아웃 (탭 네비게이션)
+        │   ├── PortfolioChart.tsx    # 자산 추이 차트
+        │   ├── PositionList.tsx     # 보유 종목 (SL/TP 표시)
+        │   ├── TradeHistory.tsx     # 거래 이력 (US/KR 필터)
+        │   ├── SignalPanel.tsx      # 전략 신호 로그
+        │   ├── StrategyPanel.tsx    # 전략 설정
         │   ├── StrategyPerformance.tsx # 전략별 성과
-        │   ├── StockScanner.tsx        # 종목 스캐너 결과
-        │   ├── SectorHeatmap.tsx       # 섹터 히트맵
-        │   ├── CandlestickChart.tsx    # 캔들차트 + 지표 오버레이
-        │   ├── BacktestPanel.tsx       # 백테스트 실행/결과
-        │   ├── AgentStatus.tsx         # AI 에이전트 상태
-        │   ├── EngineControl.tsx       # 엔진 시작/정지
-        │   ├── ETFMonitor.tsx          # 레버리지/인버스 ETF 모니터
-        │   ├── DailyPnLStats.tsx       # 일일 PnL 통계
-        │   └── SystemLog.tsx           # 시스템 로그
+        │   ├── ScannerPanel.tsx     # 스캐너 결과
+        │   ├── SectorHeatmap.tsx    # 섹터 히트맵 (US/KR)
+        │   ├── WatchlistPanel.tsx   # 감시 목록
+        │   ├── StockChart.tsx       # 캔들차트
+        │   ├── BacktestPanel.tsx    # 백테스트 실행/결과
+        │   ├── ETFPanel.tsx         # ETF 모니터
+        │   ├── EngineControl.tsx    # 엔진 제어
+        │   ├── LogPanel.tsx         # 시스템 로그
+        │   ├── MarketToggle.tsx     # US/KR 마켓 전환
+        │   ├── NewsSentiment.tsx    # 뉴스 감성 분석
+        │   ├── EventsCalendar.tsx   # 이벤트 캘린더
+        │   └── OptimizePanel.tsx    # 최적화
         │
+        ├── contexts/
+        │   └── MarketContext.tsx     # US/KR 마켓 상태 관리
         ├── hooks/
-        │   ├── useWebSocket.ts
-        │   └── usePortfolio.ts
-        │
+        │   ├── useApi.ts
+        │   └── usePriceStream.ts
         ├── api/
-        │   └── client.ts              # REST API 클라이언트
-        │
+        │   └── client.ts
+        ├── utils/
+        │   └── format.ts            # 통화 포맷 (USD/KRW)
         └── types/
-            └── index.ts               # TypeScript 타입 정의
+            └── index.ts
 ```
 
 ---
@@ -1185,6 +1212,7 @@ class StockProfile:
 │  │  9. RSI Divergence                        │   │
 │  │ 10. Bollinger Squeeze (변동성 확장)         │   │
 │  │ 11. Volume Profile (거래량 분석)            │   │
+│  │ 14. Volume Surge (거래량 급증 확인)          │   │
 │  └───────────────────────────────────────────┘   │
 │                                                   │
 │  ┌─── ETF 전용 전략 ─────────────────────────┐   │
@@ -1339,7 +1367,7 @@ class StockProfile:
 ### 7.3 Signal Combiner (적응형 가중 투표)
 
 ```
-시장 상태별 가중치 프로파일 (13전략):
+시장 상태별 가중치 프로파일 (14전략):
 
 STRONG_UPTREND:
   TrendFollowing: 0.25, DualMomentum: 0.15, Donchian: 0.15,
@@ -1447,57 +1475,70 @@ ETF 유니버스:
 - VIX 급등 시 포지션 크기 자동 축소
 ```
 
-### 8.3 스케줄러
+### 8.3 스케줄러 (29 tasks)
 
 ```
-미국 시장 시간 (한국 시간):
-  프리마켓:   18:00 ~ 23:30 (서머타임: 17:00 ~ 22:30)
-  정규장:     23:30 ~ 06:00 (서머타임: 22:30 ~ 05:00)
-  애프터마켓: 06:00 ~ 10:00 (서머타임: 05:00 ~ 09:00)
-  장 마감:    10:00 ~ 18:00 (서머타임: 09:00 ~ 17:00)
+시장 시간 (KST 기준, DST 자동 감지):
+  US: PRE_MARKET → REGULAR → AFTER_HOURS → CLOSED
+  KR: PRE_MARKET(08:30-09:00) → REGULAR(09:00-15:30) → CLOSED
 
-┌─────────────────────────────────────────────────────────────────┐
-│  Task                     │ Interval   │ 시간대     │ 데이터소스 │
-├───────────────────────────┼────────────┼────────────┼───────────┤
-│  [T1] 일일 풀스캔          │ 1일 1회    │ 장전 2시간  │ KIS+yf+AI│
-│  [T2] 장중 핫스캔          │ 30분       │ 정규장 중   │ KIS      │
-│  [T3] 섹터 분석           │ 1시간      │ 정규장 중   │ KIS+yf   │
-│  [T4] AI 일일 브리핑       │ 1일 1회    │ 장 마감 후  │ All+AI   │
-│  전략 평가 루프            │ 5분        │ 정규장 중   │ KIS+캐시  │
-│  포지션 SL/TP 체크         │ 1분        │ 정규장 중   │ KIS WS   │
-│  시장 상태 업데이트         │ 15분       │ 정규장 중   │ SPY/VIX  │
-│  매크로 레짐 업데이트       │ 6시간      │ 상시       │ FRED     │
-│  yfinance 프리로딩         │ 1일 1회    │ 12:00 KST │ yfinance │
-│  프리마켓 AI 분석          │ 1일 1회    │ 17:00 KST │ yf+AI    │
-│  헬스 체크                │ 2분        │ 상시       │ 내부      │
-│  KIS 토큰 갱신            │ 12시간     │ 상시       │ KIS Auth │
-└─────────────────────────────────────────────────────────────────┘
+US 태스크 (20개):
+  health_check           │ 2분    │ always      │ 시스템 + Discord 알림
+  position_check         │ 1분    │ regular     │ SL/TP/ATR 동적 관리
+  daily_reset            │ daily  │ pre-market  │ 일일 리셋
+  evaluation_loop        │ 5분    │ regular     │ 14전략 평가 + 주문
+  daily_scan (T1)        │ daily  │ pre-market  │ 3-Layer 풀스캔
+  intraday_hot_scan (T2) │ 30분   │ regular     │ 장중 핫종목
+  sector_analysis (T3)   │ 1시간  │ regular     │ 섹터 강도
+  after_hours_scan (T4a) │ daily  │ after-hours │ 장후 스캔
+  daily_briefing (T4b)   │ daily  │ after-hours │ AI 일일 브리핑
+  macro_update           │ daily  │ pre-market  │ FRED 매크로
+  market_state_update    │ 15분   │ regular     │ SPY/VIX 레짐
+  etf_evaluation         │ 15분   │ regular     │ ETF 엔진
+  portfolio_snapshot     │ 1시간  │ regular     │ 자산 스냅샷
+  order_reconciliation   │ 2분    │ regular     │ 주문 대사 + 체결 확인
+  ws_lifecycle           │ 5분    │ always      │ WebSocket 세션 관리
+  trade_review           │ daily  │ after-hours │ AI 매매 리뷰
+  agent_memory_cleanup   │ daily  │ closed      │ 에이전트 메모리 정리
+  update_watchlist_names │ daily  │ pre-market  │ 종목명 DB 캐싱
+  news_analysis          │ 30분   │ pre+regular │ Finnhub 뉴스 감성
+  event_calendar_refresh │ daily  │ pre-market  │ 실적/매크로/내부자
+
+KR 태스크 (7개):
+  kr_position_check      │ 1분    │ regular     │ KR SL/TP 관리
+  kr_order_reconciliation│ 2분    │ regular     │ KR 주문 대사
+  kr_portfolio_snapshot  │ 1시간  │ regular     │ KR 자산 스냅샷
+  kr_evaluation_loop     │ 5분    │ regular     │ KR 14전략 평가
+  kr_daily_scan          │ daily  │ pre-market  │ KR 종목 스캔
+  kr_etf_evaluation      │ 15분   │ regular     │ KR ETF 엔진
+  kr_news_analysis       │ 30분   │ pre+regular │ Naver 뉴스 감성
 ```
 
 ---
 
 ## 9. 리스크 관리
 
-### 9.1 포지션 레벨
+### 9.1 포지션 레벨 (현재 라이브 설정)
+
+| 항목 | US | KR | 설명 |
+|------|-----|-----|------|
+| 종목당 최대 비중 | 8% | 8% | 분산 투자 (20 포지션) |
+| 동적 손절 | ATR 3-15% | ATR 5-20% | ATR 기반 동적 SL |
+| 이익실현 | 50% | 25% | 와이드 TP (winners run) |
+| Trailing Stop | 비활성 | 비활성 | 수익 조기 차단 방지 |
+| Kelly fraction | 0.40 | 0.40 | 공격적 사이징 |
+
+### 9.2 포트폴리오 레벨 (현재 라이브 설정)
 
 | 항목 | 기본값 | 설명 |
 |------|--------|------|
-| 종목당 최대 비중 | 20% | 단일 종목 집중 방지 |
-| 초기 손절 | -3% ~ -5% | ATR 기반 동적 조정 |
-| 이익실현 | +8% ~ +15% | 리스크:리워드 = 1:2~3 |
-| Trailing Stop | 고점 대비 -5% | 수익 보전 |
-| 최대 보유기간 | 20일 | 추세 전략 기준 (조정 가능) |
-
-### 9.2 포트폴리오 레벨
-
-| 항목 | 기본값 | 설명 |
-|------|--------|------|
-| 최대 투자비율 | 80% | 현금 20% 유지 |
-| 최대 동시 보유 | 10종목 | 분산 투자 |
+| 최대 동시 보유 | 20종목 | 분산 투자 (백테스트 최적) |
+| 마켓 배분 | 50:50 US/KR | 레짐 기반 동적 ±20% (clamp 20-70%) |
 | 일일 손실 한도 | -3% | 초과 시 신규 매수 중단 |
 | 최대 낙폭 (MDD) | -15% | 초과 시 전량 청산 |
 | 레버리지 ETF 비중 | 30% | 전체 포트폴리오 대비 |
 | 섹터 집중 한도 | 40% | 단일 섹터 |
+| 레짐 적응 | 강상승 15%/95% | 하락장 5%/40% |
 
 ### 9.3 시스템 레벨
 
@@ -1633,7 +1674,7 @@ ETF 유니버스:
 │  │    ├─ 섹터 전환 제안                                         │   │
 │  │    └─ 리스크 경고 (이벤트, 실적 발표 등)                       │   │
 │  │                                                             │   │
-│  │ 3. Telegram 알림 발송 (요약)                                  │   │
+│  │ 3. Discord 알림 발송 (요약)                                   │   │
 │  │ 4. DB 저장 (agent_logs)                                      │   │
 │  │                                                             │   │
 │  │ Rate Limit: Claude API 1 req (8K~15K tokens)                 │   │
@@ -2184,9 +2225,8 @@ REDIS_URL=redis://localhost:6379/0
 
 # ===== Notifications =====
 NOTIFY_ENABLED=true
-NOTIFY_PROVIDER=telegram
-NOTIFY_TELEGRAM_BOT_TOKEN=your_bot_token
-NOTIFY_TELEGRAM_CHAT_ID=your_chat_id
+NOTIFY_PROVIDER=discord
+DISCORD_WEBHOOK_URL=your_discord_webhook_url
 
 # ===== LLM (AI Agent — Multi-Provider) =====
 LLM_ENABLED=true
@@ -2199,6 +2239,15 @@ LLM_MAX_TOKENS=4096
 
 # ===== External Data =====
 FRED_API_KEY=your_fred_api_key          # 경제지표 (무료)
+EXTERNAL_FINNHUB_API_KEY=your_key       # Finnhub 뉴스 (무료 tier)
+
+# ===== Auth =====
+AUTH_API_TOKEN=                          # Bearer token (empty=disabled)
+
+# ===== KR Market =====
+KIS_KR_APP_KEY=                         # KR 계좌 앱키
+KIS_KR_APP_SECRET=                      # KR 계좌 시크릿
+KIS_KR_ACCOUNT_NO=                      # KR 계좌번호
 
 # ===== Logging =====
 APP_LOG_LEVEL=INFO
@@ -2206,129 +2255,39 @@ APP_LOG_LEVEL=INFO
 
 ---
 
-## 16. Docker Compose
+## 16. 배포 구조
 
-```yaml
-services:
-  postgres:
-    image: postgres:16-alpine
-    environment:
-      POSTGRES_DB: us_stock_trading
-      POSTGRES_USER: usstock
-      POSTGRES_PASSWORD: usstock
-    ports:
-      - "5432:5432"
-    volumes:
-      - pgdata:/var/lib/postgresql/data
+**참고**: 실제 운영 환경에서는 Docker Compose가 아닌 systemd 서비스로 배포.
+PostgreSQL/Redis는 coin 프로젝트의 Docker 컨테이너를 공유.
 
-  redis:
-    image: redis:7-alpine
-    ports:
-      - "6379:6379"
-
-  backend:
-    build: ./backend
-    ports:
-      - "8000:8000"
-    depends_on:
-      - postgres
-      - redis
-    env_file:
-      - .env
-    restart: unless-stopped
-
-  frontend:
-    build: ./frontend
-    ports:
-      - "3000:80"
-    depends_on:
-      - backend
-
-volumes:
-  pgdata:
+```
+실서비스 구성:
+- PostgreSQL: coin-postgres-1 컨테이너 공유 (DB: us_stock_trading)
+- Redis: 공유 (db 1, coin은 db 0)
+- Backend: systemd (usstock-backend.service) — port 8001
+- Frontend: systemd (usstock-frontend.service) — port 3001
+- HTTPS: nginx reverse proxy (port 8443)
+- Backup: systemd timers (local daily + GitHub weekly)
 ```
 
 ---
 
-## 17. 구현 로드맵
+## 17. 구현 현황
 
-### Phase 1: 기반 구축 (1주)
-- [ ] 프로젝트 구조 생성
-- [ ] KIS API 인증 (OAuth2 토큰 관리)
-- [ ] KIS REST API 어댑터 (시세조회, 주문, 잔고)
-- [ ] Paper Trading 어댑터
-- [ ] 기본 DB 스키마 + SQLAlchemy 모델
-- [ ] FastAPI 앱 스켈레톤
-- [ ] Docker Compose 환경
+모든 Phase 완료. 현재 US + KR 실계좌 라이브 운용 중.
 
-### Phase 2: 데이터 파이프라인 (1주)
-- [ ] Market Data Service (KIS 시세 + 캐싱)
-- [ ] External Data Service (yfinance, FRED)
-- [ ] Indicator Service (pandas-ta 기술지표)
-- [ ] Historical Data 수집/저장
-- [ ] KIS WebSocket 실시간 시세
-- [ ] Rate Limiter
-
-### Phase 3: 백테스트 엔진 (1주)
-- [ ] Data Loader (yfinance 과거 데이터)
-- [ ] Backtest Engine (주문 시뮬레이션)
-- [ ] 성과 지표 계산 (Sharpe, MDD, Win Rate)
-- [ ] Report Generator
-- [ ] Walk-Forward Optimization
-
-### Phase 4: 전략 구현 (1~2주)
-- [ ] BaseStrategy + StrategyRegistry
-- [ ] Trend Following (EMA + ADX)
-- [ ] Dual Momentum
-- [ ] Donchian Breakout
-- [ ] Supertrend
-- [ ] 보조 전략 (MACD, RSI, Bollinger, Volume)
-- [ ] Signal Combiner (가중 투표)
-- [ ] 전략별 백테스트 검증
-
-### Phase 5: 매매 엔진 (1주)
-- [ ] Trading Engine (평가 루프)
-- [ ] Order Manager (KIS 주문 실행)
-- [ ] Portfolio Manager (잔고/포지션)
-- [ ] Position Tracker (SL/TP/Trailing)
-- [ ] Risk Manager
-- [ ] Market State Detector
-- [ ] Scheduler (APScheduler)
-
-### Phase 6: ETF 엔진 + 스캐너 (1주)
-- [ ] ETF Engine (Regime Switch)
-- [ ] ETF Universe 관리
-- [ ] Sector Rotation 전략
-- [ ] Stock Scanner (KIS API 기반)
-- [ ] Sector Analyzer
-- [ ] Universe Manager
-
-### Phase 7: AI + 알림 (3일)
-- [ ] Market Analysis Agent (Claude)
-- [ ] Risk Assessment Agent
-- [ ] Trade Review Agent
-- [ ] Notification Service (Telegram)
-
-### Phase 8: 프론트엔드 (1주)
-- [ ] Dashboard 레이아웃 (탭 네비게이션)
-- [ ] Portfolio Summary + Chart
-- [ ] Trade History
-- [ ] Strategy Performance
-- [ ] Stock Scanner + Sector Heatmap
-- [ ] ETF Monitor
-- [ ] Backtest Panel
-- [ ] Agent Status
-- [ ] Engine Control + System Log
-- [ ] WebSocket 실시간 업데이트
-
-### Phase 9: 검증 + 라이브 (1~2주)
-- [ ] 단위 테스트 (300+)
-- [ ] 통합 테스트 (API, Engine)
-- [ ] 3년 백테스트 검증 (통과 기준 확인)
-- [ ] KIS 모의투자 2주 실행
-- [ ] 소액 라이브 테스트
-- [ ] Health Monitor + Recovery
-- [ ] 운영 문서화
+- Phase 1: 기반 구축 — ✅ KIS API, Paper adapter, DB, FastAPI
+- Phase 2: 데이터 파이프라인 — ✅ yfinance, FRED, KIS WebSocket, Redis cache
+- Phase 3: 백테스트 엔진 — ✅ 단일 전략 + 풀 파이프라인 백테스트
+- Phase 4: 전략 구현 — ✅ 14개 전략 + Signal Combiner (Mode B)
+- Phase 5: 매매 엔진 — ✅ 평가 루프, ATR-based SL/TP, Kelly sizing
+- Phase 6: ETF + 스캐너 — ✅ US/KR ETF 엔진, 3-Layer scanner
+- Phase 7: AI + 알림 — ✅ 4 agents (market/risk/review/news), Discord notification
+- Phase 8: 프론트엔드 — ✅ 20 components, US/KR 토글
+- Phase 9: 검증 + 라이브 — ✅ 1276+ tests, 실계좌 운용
+- Phase 10: KR 주식 — ✅ KIS KR adapter, 듀얼마켓, KR 스크리너
+- Phase 11: 뉴스/이벤트 — ✅ Finnhub/Naver 뉴스, 실적/매크로/내부자 캘린더
+- Phase 12: 시스템 고도화 — ✅ MCP 서버, DB 백업, 주문 안전장치
 
 ---
 
@@ -2853,96 +2812,28 @@ CI에서 백테스트 실패 시:
 
 ## 22. 개발 프로세스 + Agent 문서 체계
 
-### 22.1 프로젝트 문서 구조 (GitHub + AI Agent용)
+### 22.1 프로젝트 문서 구조
 
 ```
 ~/us-stock/
-├── CLAUDE.md                    # AI Agent 핵심 지침서 (필수)
-├── SYSTEM_DESIGN.md             # 이 문서 (시스템 설계)
-├── README.md                    # 프로젝트 소개, 빠른 시작
-├── CONTRIBUTING.md              # 기여 가이드 (개발 규칙)
-├── CHANGELOG.md                 # 버전별 변경 이력
-├── .github/
-│   ├── workflows/
-│   │   ├── ci.yml               # PR 시 자동 테스트
-│   │   ├── backtest.yml         # 전략 변경 시 백테스트
-│   │   └── deploy.yml           # main 머지 시 배포
-│   └── pull_request_template.md
-│
+├── CLAUDE.md                    # AI Agent 핵심 지침서 (코드 규칙, 아키텍처)
+├── SYSTEM_DESIGN.md             # 이 문서 (시스템 설계 상세)
+├── .github/workflows/
+│   ├── ci.yml                   # PR 시 자동 테스트
+│   └── backtest.yml             # 전략 변경 시 백테스트
 ├── config/
-│   ├── strategies.yaml          # 전략 파라미터 (메인)
-│   ├── strategies.example.yaml  # 예시 설정
-│   └── etf_universe.yaml       # ETF 유니버스 정의
-│
-├── docs/
-│   ├── architecture.md          # 아키텍처 상세
-│   ├── api-reference.md         # REST API 명세
-│   ├── strategy-guide.md        # 전략 개발 가이드
-│   ├── backtest-guide.md        # 백테스트 사용법
-│   ├── deployment.md            # 배포 가이드
-│   └── troubleshooting.md       # 트러블슈팅
-│
-├── backend/
-│   └── ...
-└── frontend/
-    └── ...
+│   ├── strategies.yaml          # 전략 파라미터 (메인, 핫 리로드)
+│   ├── etf_universe.yaml        # US ETF 유니버스
+│   └── kr_etf_universe.yaml     # KR ETF 유니버스
+├── deploy/                      # systemd 서비스, DB 설정/백업
+├── backend/                     # Python 3.12+ FastAPI
+└── frontend/                    # React 18 + Vite
 ```
 
 ### 22.2 CLAUDE.md (AI Agent 지침서)
 
-```markdown
-# US Stock Auto-Trading Engine
-
-## 프로젝트 개요
-한국투자증권(KIS) API 기반 미국주식 자동매매 시스템.
-기존 ~/coin 프로젝트 아키텍처를 계승.
-
-## 기술 스택
-- Backend: Python 3.12+, FastAPI, SQLAlchemy 2.0, PostgreSQL, Redis
-- Frontend: React 18, TypeScript, Vite, TailwindCSS
-- 전략 설정: config/strategies.yaml (YAML 기반 파라미터 관리)
-
-## 핵심 규칙
-
-### 코드 작성
-- 모든 코드는 유닛 테스트 동반 필수 (테스트 없는 코드 커밋 금지)
-- 비동기 함수는 async/await 패턴 사용 (asyncpg, aiohttp)
-- 외부 API 호출은 반드시 에러 핸들링 + 재시도 로직
-- Type hints 필수 (mypy strict 통과)
-- Pydantic 모델로 데이터 검증
-
-### 전략 관련
-- 전략 파라미터는 코드에 하드코딩 금지 → config/strategies.yaml에서 관리
-- 새 전략 추가 시 반드시 백테스트 선행 (통과 기준: CAGR>12%, Sharpe>1.0, MDD<25%)
-- BaseStrategy 상속, evaluate(ohlcv, indicators) → Signal 반환
-- 전략 가중치는 시장 상태별로 profiles에 정의
-
-### 테스트
-- 유닛 테스트: pytest + pytest-asyncio (coverage 90%+)
-- 시나리오 테스트: tests/scenarios/ (핵심 매매 플로우)
-- 백테스트: 전략 코드 변경 시 필수 실행
-- DB 테스트: aiosqlite 인메모리 (테스트 격리)
-- 외부 API: 반드시 모킹 (KIS, yfinance, Claude)
-
-### 커밋/PR
-- 커밋 메시지: Conventional Commits (feat/fix/refactor/test/docs)
-- PR은 반드시 테스트 통과 후 머지
-- 전략 변경 PR은 백테스트 결과 첨부
-
-### 디렉토리 규칙
-- backend/exchange/: 거래소 어댑터 (KIS, Paper)
-- backend/strategies/: 매매 전략 (각 전략 1파일)
-- backend/engine/: 매매 엔진 (주문, 포지션, 리스크)
-- backend/scanner/: 종목 스캐닝 (3-Layer 파이프라인)
-- backend/data/: 데이터 서비스 (시세, 지표, 외부데이터)
-- backend/agents/: AI 에이전트 (시장분석, 리스크, 리뷰)
-- backend/api/: REST + WebSocket 엔드포인트
-- config/: 전략/ETF YAML 설정 파일
-
-### 참고 프로젝트
-- ~/coin: 코인 자동매매 (아키텍처 참고)
-- 설계: SYSTEM_DESIGN.md (이 프로젝트 전체 설계)
-```
+CLAUDE.md는 프로젝트 루트에 위치. 최신 내용은 CLAUDE.md 파일 직접 참조.
+주요 포함 내용: 프로젝트 개요, 기술 스택, 코드/전략/테스트 규칙, 디렉토리 구조, 아키텍처 결정사항.
 
 ### 22.3 개발 워크플로우 (GitHub Flow)
 
@@ -3045,22 +2936,14 @@ jobs:
 └─────────────────────────────────────────────────────────┘
 
 배포 체크리스트 (prod):
-  ✓ staging에서 2주 이상 안정 운영
-  ✓ 모의투자 수익률 양수
-  ✓ 에러율 < 0.1%
-  ✓ 모든 시나리오 테스트 통과
+  ✓ 모든 테스트 통과 (1276+ tests)
   ✓ 백테스트 통과 기준 충족
-  ✓ CHANGELOG.md 업데이트
   ✓ 환경 변수 확인 (KIS 실투자 URL, 실계좌)
 
-롤백:
-  - prod 장애 시 이전 버전 즉시 롤백
-  - docker compose down && git checkout v{prev} && docker compose up
-  - 롤백 후 포지션 동기화 자동 실행
-
-서버 배포 방식:
-  - Docker Compose (PostgreSQL + Redis + Backend + Frontend)
-  - 또는 systemd 서비스 (Raspberry Pi 환경)
+배포 방법:
+  - systemd 서비스 (Raspberry Pi): sudo systemctl restart usstock-backend
+  - 정규장 외 시간에만 배포 (미체결 주문 없는지 확인)
+  - 배포 후 자동 헬스체크 (API, DB, Redis, KIS 연결)
 
 무중단 배포:
   - 정규장 외 시간에만 배포 (10:00~18:00 KST)
@@ -3068,40 +2951,7 @@ jobs:
   - 배포 후 자동 헬스체크 (API, DB, Redis, KIS 연결)
 ```
 
-### 22.6 버전 관리
+### 22.6 현재 상태
 
-```
-Semantic Versioning: MAJOR.MINOR.PATCH
-
-MAJOR: 아키텍처 변경, 호환성 깨지는 변경
-MINOR: 새 전략 추가, 새 기능
-PATCH: 버그 수정, 파라미터 튜닝
-
-예시:
-v0.1.0 - 프로젝트 초기화, KIS 인증
-v0.2.0 - 데이터 파이프라인
-v0.3.0 - 백테스트 엔진
-v0.4.0 - 추세 전략 4종
-v0.5.0 - 매매 엔진
-v0.6.0 - ETF 엔진 + 스캐너
-v0.7.0 - AI 추천 + 알림
-v0.8.0 - 프론트엔드
-v0.9.0 - 시나리오 테스트 + 모의투자 검증
-v1.0.0 - 라이브 릴리스
-
-CHANGELOG.md 형식:
-## [v0.4.0] - 2026-03-20
-### Added
-- Trend Following strategy (EMA crossover + ADX filter)
-- Dual Momentum strategy
-- Donchian Breakout strategy
-- Supertrend strategy
-- Signal Combiner with adaptive weights
-
-### Changed
-- Updated strategies.yaml with new strategy params
-
-### Backtest Results
-- Trend Following: CAGR 18.2%, Sharpe 1.45, MDD 12.3%
-- Dual Momentum: CAGR 15.8%, Sharpe 1.62, MDD 9.8%
-```
+시스템은 v1.0 이상으로 US + KR 실계좌 라이브 운용 중.
+변경 이력은 git log로 관리. 커밋 메시지에 Conventional Commits 적용.

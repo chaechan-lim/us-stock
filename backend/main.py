@@ -361,10 +361,11 @@ async def lifespan(app: FastAPI):
 
     # KR engine components (separate instances, same classes)
     from data.kr_symbol_mapper import to_yfinance as kr_to_yfinance
+    from scanner.kr_screener import get_kr_exchange
     # Share rate limiter with US — same KIS credentials, same rate limit
     kr_market_data = MarketDataService(
         adapter=kr_adapter, rate_limiter=rate_limiter,
-        yf_symbol_mapper=lambda s: kr_to_yfinance(s, "KRX"),
+        yf_symbol_mapper=lambda s: kr_to_yfinance(s, get_kr_exchange(s)),
     )
     kr_order_manager = OrderManager(
         adapter=kr_adapter, risk_manager=kr_risk_manager, notification=notification,
@@ -1284,7 +1285,7 @@ async def lifespan(app: FastAPI):
 
     async def task_kr_daily_scan():
         """KR daily scan: discover stocks via KRScreener, update KR watchlist."""
-        from scanner.kr_screener import KRScreener
+        from scanner.kr_screener import KRScreener, get_kr_exchange
         from db.trade_repository import TradeRepository
 
         try:
@@ -1304,10 +1305,11 @@ async def lifespan(app: FastAPI):
                 existing = await repo.get_watchlist(active_only=True, market="KR")
                 existing_syms = {w.symbol for w in existing}
                 added = []
-                for sym in result.symbols[:30]:
+                for sym in result.symbols[:40]:
                     if sym not in existing_syms:
                         await repo.add_to_watchlist(
-                            symbol=sym, exchange="KRX", source="scanner", market="KR",
+                            symbol=sym, exchange=get_kr_exchange(sym),
+                            source="scanner", market="KR",
                         )
                         added.append(sym)
 

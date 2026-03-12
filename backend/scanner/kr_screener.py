@@ -64,7 +64,26 @@ _KR_UNIVERSE = [
     ("293490", "KOSDAQ", "카카오게임즈"),
     ("112040", "KOSDAQ", "위메이드"),
     ("403870", "KOSDAQ", "HPSP"),
+    # KOSDAQ 추가 (반도체/IT/바이오/엔터)
+    ("058470", "KOSDAQ", "리노공업"),
+    ("357780", "KOSDAQ", "솔브레인"),
+    ("036930", "KOSDAQ", "주성엔지니어링"),
+    ("005290", "KOSDAQ", "동진쎄미켐"),
+    ("078600", "KOSDAQ", "대주전자재료"),
+    ("067160", "KOSDAQ", "아프리카TV"),
+    ("145020", "KOSDAQ", "휴젤"),
+    ("091990", "KOSDAQ", "셀트리온헬스케어"),
+    ("240810", "KOSDAQ", "원익IPS"),
+    ("095340", "KOSDAQ", "ISC"),
+    ("039030", "KOSDAQ", "이오테크닉스"),
+    ("352820", "KOSDAQ", "하이브"),
+    ("222080", "KOSDAQ", "씨아이에스"),
+    ("950160", "KOSDAQ", "코오롱티슈진"),
+    ("141080", "KOSDAQ", "레고켐바이오"),
 ]
+
+# Quick lookup: symbol -> exchange
+_EXCHANGE_MAP = {sym: ex for sym, ex, _ in _KR_UNIVERSE}
 
 
 @dataclass
@@ -141,7 +160,9 @@ class KRScreener:
 
     def _get_exchange(self, symbol: str) -> str:
         """Look up exchange from curated universe."""
-        for s, ex, _ in _KR_UNIVERSE:
-            if s == symbol:
-                return ex
-        return "KRX"
+        return _EXCHANGE_MAP.get(symbol, "KRX")
+
+
+def get_kr_exchange(symbol: str) -> str:
+    """Public helper: get exchange code for a KR symbol from curated universe."""
+    return _EXCHANGE_MAP.get(symbol, "KRX")

@@ -84,6 +84,15 @@ class KISKRAdapter(ExchangeAdapter):
             await self._session.close()
         await self._auth.close()
 
+    @staticmethod
+    def _detect_exchange(symbol: str) -> str:
+        """Detect exchange from symbol using kr_screener universe map."""
+        try:
+            from scanner.kr_screener import get_kr_exchange
+            return get_kr_exchange(symbol)
+        except Exception:
+            return "KRX"
+
     # -- Market Data --
 
     async def fetch_ticker(self, symbol: str, exchange: str = "KRX") -> Ticker:
@@ -310,7 +319,7 @@ class KISKRAdapter(ExchangeAdapter):
             positions.append(
                 Position(
                     symbol=item.get("pdno", ""),
-                    exchange="KRX",  # TODO: distinguish KOSDAQ
+                    exchange=self._detect_exchange(item.get("pdno", "")),
                     quantity=qty,
                     avg_price=avg_price,
                     current_price=cur_price,
