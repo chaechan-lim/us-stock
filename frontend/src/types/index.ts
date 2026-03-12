@@ -16,6 +16,7 @@ export interface PortfolioSummary {
   total_unrealized_pnl: number
   total_unrealized_pnl_usd?: number
   total_equity: number
+  available_cash?: number
 }
 
 export interface PositionWithMarket extends Position {

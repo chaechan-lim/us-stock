@@ -79,9 +79,9 @@ export default function Dashboard() {
         />
         <Card
           title="Available Cash"
-          value={formatCurrency(summary.balance.available + (summary.usd_balance?.available ?? 0) * rate, 'KRW')}
+          value={formatCurrency(summary.available_cash ?? summary.balance.available, 'KRW')}
           sub={hasUsd
-            ? `KRW ${formatCurrency(summary.balance.available, 'KRW')} + USD ${formatCurrency(summary.usd_balance!.available, 'USD')}`
+            ? `KRW ${formatCurrency(summary.balance.available, 'KRW')} / USD ${formatCurrency(summary.usd_balance!.available, 'USD')}`
             : undefined
           }
         />

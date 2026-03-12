@@ -110,6 +110,11 @@ async def _combined_summary(request: Request) -> dict:
     total_unrealized_pnl_krw = sum(p.unrealized_pnl for p in kr_positions)
     total_unrealized_pnl_usd = sum(p.unrealized_pnl for p in us_positions)
 
+    # Available cash: same shared deposit, pick the larger KRW-equivalent
+    # to avoid double-counting (통합증거금 = single pool for both markets)
+    usd_available_krw = usd_available * _cached_usd_krw
+    available_cash = max(krw_available, usd_available_krw)
+
     return {
         "market": "ALL",
         "balance": {
@@ -126,6 +131,7 @@ async def _combined_summary(request: Request) -> dict:
         "total_unrealized_pnl": total_unrealized_pnl_krw,
         "total_unrealized_pnl_usd": total_unrealized_pnl_usd,
         "total_equity": total_equity,
+        "available_cash": available_cash,
     }
 
 
