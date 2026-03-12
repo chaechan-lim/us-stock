@@ -82,6 +82,8 @@ class EvaluationLoop:
         self._position_tracker = position_tracker
         self._market = market
         self._event_calendar = event_calendar
+        self._other_market_data: MarketDataService | None = None
+        self._exchange_rate: float = 1450.0  # USD/KRW default
         self._factor_scores: dict[str, FactorScores] = {}
         self._last_classify_time: dict[str, float] = {}
         self._reclassify_interval = 86400  # re-classify every 24h
@@ -113,6 +115,15 @@ class EvaluationLoop:
         # Index ETFs (benchmark, not for active trading)
         "SPY", "QQQ", "SOXX", "ARKK",
     })
+
+    def set_other_market_data(self, other_md: MarketDataService) -> None:
+        """Set the other market's data service for combined portfolio calculation."""
+        self._other_market_data = other_md
+
+    def set_exchange_rate(self, rate: float) -> None:
+        """Update USD/KRW exchange rate for cross-market value conversion."""
+        if rate > 0:
+            self._exchange_rate = rate
 
     def set_watchlist(self, symbols: list[str]) -> None:
         self._watchlist = [s for s in symbols if s not in self._ETF_ONLY]
@@ -412,6 +423,34 @@ class EvaluationLoop:
         except Exception as e:
             logger.warning("Factor score update failed: %s", e)
 
+    async def _get_combined_portfolio_value(self, own_balance_total: float) -> float | None:
+        """Compute combined portfolio value across both markets.
+
+        For integrated margin (통합증거금) accounts, returns the total value
+        of both markets converted to this market's currency. Returns None
+        if other market data is not available.
+
+        Avoids double-counting the shared deposit by adding only the other
+        market's position value (total - available = invested portion).
+        """
+        if not self._other_market_data:
+            return None
+        try:
+            other_balance = await self._other_market_data.get_balance()
+            # Only add position value from other market (not deposit, to avoid double-count)
+            other_positions = max(0, other_balance.total - other_balance.available)
+            if self._market == "US":
+                # Own is USD, other KR positions are in KRW → convert to USD
+                other_in_own = other_positions / self._exchange_rate
+            else:
+                # Own is KRW, other US positions are in USD → convert to KRW
+                other_in_own = other_positions * self._exchange_rate
+            combined = own_balance_total + other_in_own
+            return combined
+        except Exception as e:
+            logger.debug("Failed to fetch other market balance for combined total: %s", e)
+            return None
+
     async def _execute_signal(
         self, signal, symbol: str, df: pd.DataFrame
     ) -> None:
@@ -436,6 +475,9 @@ class EvaluationLoop:
 
             balance = await self._market_data.get_balance()
             positions = await self._market_data.get_positions()
+
+            # Combined portfolio value for integrated margin allocation
+            combined_pv = await self._get_combined_portfolio_value(balance.total)
 
             # Get factor score for this stock
             factor = self._factor_scores.get(symbol)
@@ -465,6 +507,7 @@ class EvaluationLoop:
                 signal_confidence=confidence,
                 factor_score=factor_score,
                 market=self._market,
+                combined_portfolio_value=combined_pv,
             )
 
             # Macro event sizing reduction (CPI/JOBS day = half size)

@@ -279,6 +279,53 @@ class TestMarketAllocation:
         assert result.allocation_usd <= 100_000 * 0.10 + 1
         assert result.allocation_usd > 50_000 * 0.10
 
+    def test_combined_portfolio_value_increases_cap(self):
+        """With combined_portfolio_value, 50% cap applies to combined total."""
+        rm = self._make_rm(us=0.5, kr=0.5)
+        # Without combined: 50% of 60,000 = 30,000
+        without = rm.calculate_position_size(
+            symbol="AAPL", price=100.0,
+            portfolio_value=60_000, cash_available=60_000,
+            current_positions=0, market="US",
+        )
+        # With combined=100,000: 50% of 100,000 = 50,000, clamped to 60,000
+        with_combined = rm.calculate_position_size(
+            symbol="AAPL", price=100.0,
+            portfolio_value=60_000, cash_available=60_000,
+            current_positions=0, market="US",
+            combined_portfolio_value=100_000,
+        )
+        assert with_combined.quantity >= without.quantity
+
+    def test_combined_clamped_to_own_portfolio(self):
+        """Combined cap never exceeds own market's portfolio value."""
+        rm = self._make_rm(us=0.5, kr=0.5)
+        # 50% of 200,000 = 100,000 → but own portfolio is only 60,000
+        result = rm.calculate_position_size(
+            symbol="AAPL", price=100.0,
+            portfolio_value=60_000, cash_available=60_000,
+            current_positions=0, market="US",
+            combined_portfolio_value=200_000,
+        )
+        # Should be capped by portfolio_value (60,000), not combined cap (100,000)
+        assert result.allocation_usd <= 60_000 * 0.10 + 1
+
+    def test_combined_with_kelly_sizing(self):
+        """Kelly sizing also uses combined_portfolio_value."""
+        rm = self._make_rm(us=0.5, kr=0.5)
+        without = rm.calculate_kelly_position_size(
+            symbol="AAPL", price=100.0,
+            portfolio_value=60_000, cash_available=60_000,
+            current_positions=0, market="US",
+        )
+        with_combined = rm.calculate_kelly_position_size(
+            symbol="AAPL", price=100.0,
+            portfolio_value=60_000, cash_available=60_000,
+            current_positions=0, market="US",
+            combined_portfolio_value=100_000,
+        )
+        assert with_combined.quantity >= without.quantity
+
 
 class TestConfidenceBasedSizing:
     """Test that signal confidence affects position size meaningfully."""

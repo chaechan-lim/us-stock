@@ -460,6 +460,11 @@ async def lifespan(app: FastAPI):
         logger.info("Daily risk counters reset")
 
     async def task_evaluation_loop():
+        # Sync exchange rate for combined portfolio allocation
+        exrt = getattr(adapter, "_last_exchange_rate", 0)
+        if exrt > 0:
+            evaluation_loop.set_exchange_rate(exrt)
+            kr_evaluation_loop.set_exchange_rate(exrt)
         await evaluation_loop._evaluate_all()
 
     async def task_daily_scan():
@@ -1244,6 +1249,10 @@ async def lifespan(app: FastAPI):
         market="KR",
     )
     app.state.kr_evaluation_loop = kr_evaluation_loop
+
+    # Cross-link market data for combined portfolio allocation (통합증거금)
+    evaluation_loop.set_other_market_data(kr_market_data)
+    kr_evaluation_loop.set_other_market_data(market_data)
 
     async def task_kr_position_check():
         await kr_position_tracker.check_all()

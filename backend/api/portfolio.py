@@ -87,17 +87,24 @@ async def _combined_summary(request: Request) -> dict:
 
     # Fetch exchange rate from KIS adapter
     adapter = getattr(request.app.state, "adapter", None)
-    if adapter and hasattr(adapter, "_fetch_exchange_rate"):
+    if adapter:
+        # Try live exchange rate first, fall back to cached rate from balance fetch
         try:
             rate = await adapter._fetch_exchange_rate()
             if rate > 0:
                 _cached_usd_krw = rate
         except Exception:
             pass
+        if _cached_usd_krw <= 0:
+            _cached_usd_krw = getattr(adapter, "_last_exchange_rate", 1450.0)
 
-    # Total equity = KRW + USD×환율
+    # Total equity: avoid double-counting the shared deposit (통합증거금)
+    # US present-balance total already includes KRW deposit + US positions.
+    # KR total also includes the same KRW deposit + KR positions.
+    # So only add KR's position value (total - available = invested portion).
     usd_in_krw = usd_total * _cached_usd_krw
-    total_equity = krw_total + usd_in_krw
+    kr_position_value = max(0, krw_total - krw_available) if krw_total else 0
+    total_equity = usd_in_krw + kr_position_value
 
     all_positions = kr_positions + us_positions
     total_unrealized_pnl_krw = sum(p.unrealized_pnl for p in kr_positions)

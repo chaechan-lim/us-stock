@@ -106,20 +106,31 @@ class RiskManager:
         return effective
 
     def _apply_market_cap(
-        self, portfolio_value: float, cash_available: float, market: str | None = None,
+        self,
+        portfolio_value: float,
+        cash_available: float,
+        market: str | None = None,
+        combined_portfolio_value: float | None = None,
     ) -> tuple[float, float]:
         """Apply market-level allocation cap to portfolio_value and cash_available.
 
         If market allocations are configured (e.g. US=50%, KR=50%),
         each market can only use its share of the total portfolio for sizing.
         Regime-aware: bull markets get a boost, bear markets get reduced.
+
+        When combined_portfolio_value is provided (integrated margin accounts),
+        the cap is applied to the combined total instead of the per-market total.
+        This ensures 50% means 50% of the whole account, not 50% of one market's view.
         """
         if not market:
             return portfolio_value, cash_available
         cap_pct = self.get_effective_allocation(market)
         if cap_pct is None:
             return portfolio_value, cash_available
-        capped_portfolio = portfolio_value * cap_pct
+        base = combined_portfolio_value if combined_portfolio_value else portfolio_value
+        capped_portfolio = base * cap_pct
+        # Never exceed what this market actually has
+        capped_portfolio = min(capped_portfolio, portfolio_value)
         capped_cash = min(cash_available, capped_portfolio)
         return capped_portfolio, capped_cash
 
@@ -132,10 +143,11 @@ class RiskManager:
         current_positions: int,
         atr: float | None = None,
         market: str | None = None,
+        combined_portfolio_value: float | None = None,
     ) -> PositionSizeResult:
         """Calculate allowed position size given risk constraints."""
         portfolio_value, cash_available = self._apply_market_cap(
-            portfolio_value, cash_available, market,
+            portfolio_value, cash_available, market, combined_portfolio_value,
         )
 
         # Check position limit
@@ -207,6 +219,7 @@ class RiskManager:
         signal_confidence: float = 0.5,
         factor_score: float = 0.0,
         market: str | None = None,
+        combined_portfolio_value: float | None = None,
     ) -> PositionSizeResult:
         """Kelly-enhanced position sizing.
 
@@ -215,7 +228,7 @@ class RiskManager:
         signal confidence scale position size up/down.
         """
         portfolio_value, cash_available = self._apply_market_cap(
-            portfolio_value, cash_available, market,
+            portfolio_value, cash_available, market, combined_portfolio_value,
         )
 
         # Standard risk checks first
