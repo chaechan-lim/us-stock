@@ -58,6 +58,7 @@ TR_ID_LIVE = {
     "BUYING_POWER": "TTTS3007R",
     "ORDER_HISTORY": "TTTS3035R",
     "PENDING_ORDERS": "TTTS3018R",
+    "PRESENT_BALANCE": "CTRP6504R",
     # Scanner / Ranking
     "VOLUME_SURGE": "HHDFS76270000",
     "UPDOWN_RATE": "HHDFS76290000",
@@ -204,7 +205,33 @@ class KISAdapter(ExchangeAdapter):
     async def fetch_balance(self) -> Balance:
         await self._auth.ensure_valid_token()
 
-        # 1. Position-based balance (total equity, realized P&L)
+        # 1. Present balance (includes KRW deposits + USD positions/cash)
+        pb_params = {
+            "CANO": self._config.account_no,
+            "ACNT_PRDT_CD": self._config.account_product,
+            "WCRC_FRCR_DVSN_CD": "01",  # 외화
+            "NATN_CD": "840",            # USA
+            "TR_MKET_CD": "00",          # 전체
+            "INQR_DVSN_CD": "00",
+        }
+        pb_data = await self._get(
+            "/uapi/overseas-stock/v1/trading/inquire-present-balance",
+            self._tr.get("PRESENT_BALANCE", "CTRP6504R"),
+            pb_params,
+        )
+        # output3 has total asset in KRW (tot_asst_amt) and exchange rate
+        pb_o3 = pb_data.get("output3", {})
+        if isinstance(pb_o3, list) and pb_o3:
+            pb_o3 = pb_o3[0]
+
+        # Get exchange rate and total KRW deposits
+        exrt = float(pb_o3.get("frst_bltn_exrt", 0)) if pb_o3 else 0
+        if exrt <= 0:
+            exrt = 1450.0  # fallback
+        tot_asst_krw = float(pb_o3.get("tot_asst_amt", 0)) if pb_o3 else 0
+        tot_dncl_krw = float(pb_o3.get("tot_dncl_amt", 0)) if pb_o3 else 0
+
+        # 2. Position value from inquire-balance (more accurate per-position data)
         bal_params = {
             "CANO": self._config.account_no,
             "ACNT_PRDT_CD": self._config.account_product,
@@ -218,8 +245,6 @@ class KISAdapter(ExchangeAdapter):
             self._tr["BALANCE"],
             bal_params,
         )
-        # Calculate position value from output1 (all exchanges) instead of
-        # output2 summary which may only cover the queried exchange code.
         position_value = 0.0
         for item in data.get("output1", []):
             qty = float(item.get("ovrs_cblc_qty", 0))
@@ -227,7 +252,7 @@ class KISAdapter(ExchangeAdapter):
             if qty > 0 and cur_price > 0:
                 position_value += qty * cur_price
 
-        # 2. Buying power (available cash for orders)
+        # 3. Buying power (available cash for orders)
         bp_params = {
             "CANO": self._config.account_no,
             "ACNT_PRDT_CD": self._config.account_product,
@@ -241,30 +266,31 @@ class KISAdapter(ExchangeAdapter):
             bp_params,
         )
         bp_output = bp_data.get("output", {})
-        logger.debug("inquire-psamount full response: %s", bp_output)
 
-        # Try multiple fields: USD available, then convertible amount
-        available = float(bp_output.get("ord_psbl_frcr_amt", 0))
+        # Use frcr_ord_psbl_amt1 (includes KRW auto-conversion) as available
+        available = float(bp_output.get("frcr_ord_psbl_amt1", 0))
         if available <= 0:
-            # Try other buying power fields that may include KRW auto-conversion
-            for field in ("frcr_ord_psbl_amt1", "echm_af_ord_psbl_frcr_amt",
-                          "ovrs_ord_psbl_amt", "max_ord_psbl_qty"):
-                val = bp_output.get(field, "")
-                if val and float(val) > 0:
-                    available = float(val)
-                    logger.info("Using %s=%.2f as buying power (KRW auto-convert)", field, available)
-                    break
-
-        # 3. If still 0, estimate from KRW balance (account has KRW, not USD)
+            available = float(bp_output.get("ord_psbl_frcr_amt", 0))
         if available <= 0:
             available = await self._estimate_usd_from_krw()
 
-        total = available + position_value
+        # 4. Total: use present-balance total if available, else fallback
+        if tot_asst_krw > 0:
+            total = tot_asst_krw / exrt  # Convert KRW total to USD
+            locked = total - available
+            logger.info(
+                "US balance: total=₩%s ($%.2f), deposits=₩%s, available=$%.2f (rate=%.1f)",
+                f"{tot_asst_krw:,.0f}", total, f"{tot_dncl_krw:,.0f}", available, exrt,
+            )
+        else:
+            total = available + position_value
+            locked = position_value
+
         return Balance(
             currency="USD",
             total=total,
             available=available,
-            locked=position_value,
+            locked=locked,
         )
 
     async def _estimate_usd_from_krw(self) -> float:
