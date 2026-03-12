@@ -110,10 +110,10 @@ async def _combined_summary(request: Request) -> dict:
     total_unrealized_pnl_krw = sum(p.unrealized_pnl for p in kr_positions)
     total_unrealized_pnl_usd = sum(p.unrealized_pnl for p in us_positions)
 
-    # Available cash: same shared deposit, pick the larger KRW-equivalent
-    # to avoid double-counting (통합증거금 = single pool for both markets)
-    usd_available_krw = usd_available * _cached_usd_krw
-    available_cash = max(krw_available, usd_available_krw)
+    # Available cash = KR orderable + USD deposit (달러예수금)
+    # KR orderable covers the KRW deposit; USD deposit from present-balance API
+    usd_deposit_krw = getattr(adapter, "_usd_deposit_krw", 0) if adapter else 0
+    available_cash = krw_available + usd_deposit_krw
 
     return {
         "market": "ALL",

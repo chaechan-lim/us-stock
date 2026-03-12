@@ -92,6 +92,7 @@ class KISAdapter(ExchangeAdapter):
         self._is_paper = "vts" in config.base_url
         self._tr = TR_ID_PAPER if self._is_paper else TR_ID_LIVE
         self._last_exchange_rate: float = 1450.0  # USD/KRW
+        self._usd_deposit_krw: float = 0.0  # 달러예수금 (KRW equivalent)
 
     async def initialize(self) -> None:
         self._session = aiohttp.ClientSession()
@@ -275,8 +276,9 @@ class KISAdapter(ExchangeAdapter):
         if available <= 0:
             available = await self._estimate_usd_from_krw()
 
-        # Cache exchange rate for cross-market calculations
+        # Cache exchange rate and USD deposit for cross-market calculations
         self._last_exchange_rate = exrt
+        self._usd_deposit_krw = float(pb_o3.get("frcr_evlu_tota", 0)) if pb_o3 else 0
 
         # 4. Total: use present-balance total if available, else fallback
         if tot_asst_krw > 0:
