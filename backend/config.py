@@ -20,7 +20,7 @@ class TradingConfig(BaseSettings):
     min_confidence: float = 0.50
     max_positions: int = 10
     cooldown_after_sell_sec: int = 14400  # 4 hours
-    daily_buy_limit: int = 3  # Max buys per day per market (was 10 — too many)
+    daily_buy_limit: int = 5  # Max buys per day per market
 
     model_config = {"env_prefix": "TRADING_"}
 
