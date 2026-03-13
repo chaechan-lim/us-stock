@@ -150,29 +150,58 @@ class TestEvaluationLoop:
 
 
 class TestDailyBuyLimit:
-    """Test daily buy limit enforcement."""
+    """Test daily buy limit with dynamic confidence escalation."""
 
-    async def test_daily_limit_blocks_excess_buys(self, eval_loop, mock_adapter):
-        """After N buys, subsequent buys should be blocked."""
-        eval_loop._daily_buy_limit = 2
+    async def test_daily_limit_blocks_low_conf_at_hard_cap(self, eval_loop, mock_adapter, mock_registry):
+        """After limit reached, low-confidence buys blocked."""
+        eval_loop._daily_buy_limit = 1
+        eval_loop._daily_buy_count = 1  # already at limit
+        from datetime import date as _date
+        eval_loop._daily_buy_date = _date.today().isoformat()
 
-        # First buy - should succeed
+        # confidence=0.8 signal (below 0.90 override threshold)
+        await eval_loop.evaluate_symbol("AAPL")
+        mock_adapter.create_buy_order.assert_not_called()
+
+    async def test_daily_limit_allows_ultra_high_conf_override(self, eval_loop, mock_adapter, mock_registry):
+        """Ultra-high confidence (0.90+) bypasses hard cap."""
+        eval_loop._daily_buy_limit = 1
+        eval_loop._daily_buy_count = 1
+        from datetime import date as _date
+        eval_loop._daily_buy_date = _date.today().isoformat()
+
+        # Set strategy to return 0.95 confidence
+        strategy = mock_registry.get_enabled.return_value[0]
+        strategy.analyze.return_value = Signal(
+            signal_type=SignalType.BUY, confidence=0.95,
+            strategy_name="trend_following", reason="strong signal",
+        )
+        await eval_loop.evaluate_symbol("AAPL")
+        mock_adapter.create_buy_order.assert_called_once()
+
+    async def test_escalating_confidence_at_80pct_usage(self, eval_loop, mock_adapter, mock_registry):
+        """At 80%+ usage, need confidence >= 0.75."""
+        eval_loop._daily_buy_limit = 5
+        eval_loop._daily_buy_count = 4  # 80% used
+        from datetime import date as _date
+        eval_loop._daily_buy_date = _date.today().isoformat()
+
+        # Signal with 0.60 confidence — should be blocked (need 0.75)
+        strategy = mock_registry.get_enabled.return_value[0]
+        strategy.analyze.return_value = Signal(
+            signal_type=SignalType.BUY, confidence=0.60,
+            strategy_name="trend_following", reason="moderate",
+        )
+        await eval_loop.evaluate_symbol("AAPL")
+        mock_adapter.create_buy_order.assert_not_called()
+
+    async def test_early_buys_unrestricted(self, eval_loop, mock_adapter):
+        """First buys (< 60% usage) have no extra confidence requirement."""
+        eval_loop._daily_buy_limit = 5
+
+        # First buy (0% usage) — should succeed with normal confidence
         await eval_loop.evaluate_symbol("AAPL")
         assert mock_adapter.create_buy_order.call_count == 1
-
-        # Clear signal dedup so second symbol can trigger
-        eval_loop._last_signal.clear()
-
-        # Second buy - should succeed
-        await eval_loop.evaluate_symbol("MSFT")
-        assert mock_adapter.create_buy_order.call_count == 2
-
-        # Clear signal dedup
-        eval_loop._last_signal.clear()
-
-        # Third buy - should be BLOCKED (daily limit = 2)
-        await eval_loop.evaluate_symbol("GOOGL")
-        assert mock_adapter.create_buy_order.call_count == 2  # unchanged
 
     async def test_daily_limit_resets_on_new_day(self, eval_loop, mock_adapter):
         """Counter resets when date changes."""

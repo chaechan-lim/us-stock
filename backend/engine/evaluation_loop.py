@@ -482,16 +482,42 @@ class EvaluationLoop:
         price = float(df.iloc[-1]["close"])
 
         if signal.signal_type == SignalType.BUY:
-            # Daily buy limit enforcement
+            # Daily buy budget with dynamic confidence escalation
+            # As more slots are used, require higher confidence to preserve
+            # remaining slots for stronger opportunities later in the day.
             from datetime import date as _date
             today = _date.today().isoformat()
             if self._daily_buy_date != today:
                 self._daily_buy_count = 0
                 self._daily_buy_date = today
             daily_limit = getattr(self, "_daily_buy_limit", 5)
-            if self._daily_buy_count >= daily_limit:
-                logger.info("Skipping BUY for %s: daily limit reached (%d/%d)", symbol, self._daily_buy_count, daily_limit)
-                return
+            if daily_limit > 0 and self._daily_buy_count >= daily_limit:
+                # Hard cap reached — only ultra-high confidence (0.90+) can override
+                if signal.confidence < 0.90:
+                    logger.info(
+                        "Skipping BUY for %s: daily limit reached (%d/%d, conf=%.2f < 0.90)",
+                        symbol, self._daily_buy_count, daily_limit, signal.confidence,
+                    )
+                    return
+                logger.info(
+                    "High-confidence override for %s (conf=%.2f, %d/%d used)",
+                    symbol, signal.confidence, self._daily_buy_count, daily_limit,
+                )
+            elif daily_limit > 0:
+                # Dynamic confidence bar: higher as budget depletes
+                usage_ratio = self._daily_buy_count / daily_limit
+                if usage_ratio >= 0.8:
+                    min_conf = 0.75
+                elif usage_ratio >= 0.6:
+                    min_conf = 0.65
+                else:
+                    min_conf = 0.0  # Use normal min_confidence from combiner
+                if min_conf > 0 and signal.confidence < min_conf:
+                    logger.info(
+                        "Skipping BUY for %s: budget %d/%d, need conf>=%.2f (got %.2f)",
+                        symbol, self._daily_buy_count, daily_limit, min_conf, signal.confidence,
+                    )
+                    return
 
             # Skip if there's already a pending buy order for this symbol
             if self._order_manager.has_pending_order(symbol, "BUY"):
