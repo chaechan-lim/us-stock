@@ -15,12 +15,12 @@ class KISConfig(BaseSettings):
 
 class TradingConfig(BaseSettings):
     mode: str = "paper"  # "paper" or "live"
-    evaluation_interval_sec: int = 300
+    evaluation_interval_sec: int = 600  # 10 min (was 5 min — too frequent)
     initial_balance_usd: float = 10_000
     min_confidence: float = 0.50
     max_positions: int = 10
     cooldown_after_sell_sec: int = 14400  # 4 hours
-    daily_buy_limit: int = 10
+    daily_buy_limit: int = 3  # Max buys per day per market (was 10 — too many)
 
     model_config = {"env_prefix": "TRADING_"}
 

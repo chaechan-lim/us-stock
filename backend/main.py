@@ -325,6 +325,7 @@ async def lifespan(app: FastAPI):
         market="US",
         event_calendar=event_calendar,
     )
+    evaluation_loop._daily_buy_limit = config.trading.daily_buy_limit
     app.state.evaluation_loop = evaluation_loop
 
     # Stock scanner & sector analyzer
@@ -1254,6 +1255,7 @@ async def lifespan(app: FastAPI):
         position_tracker=kr_position_tracker,
         market="KR",
     )
+    kr_evaluation_loop._daily_buy_limit = config.trading.daily_buy_limit
     app.state.kr_evaluation_loop = kr_evaluation_loop
 
     # Cross-link market data for combined portfolio allocation (통합증거금)

@@ -96,6 +96,9 @@ class EvaluationLoop:
         # Recovery watch: recently sold symbols get re-evaluated for re-entry
         self._recovery_watch: dict[str, float] = {}  # {symbol: timestamp_when_sold}
         self._recovery_watch_secs = 7 * 86400  # 7 days
+        # Daily buy counter (resets at midnight)
+        self._daily_buy_count: int = 0
+        self._daily_buy_date: str = ""
         # Recent signals buffer for frontend display (last N signals)
         from collections import deque
         self._recent_signals: deque[dict] = deque(maxlen=200)
@@ -479,6 +482,17 @@ class EvaluationLoop:
         price = float(df.iloc[-1]["close"])
 
         if signal.signal_type == SignalType.BUY:
+            # Daily buy limit enforcement
+            from datetime import date as _date
+            today = _date.today().isoformat()
+            if self._daily_buy_date != today:
+                self._daily_buy_count = 0
+                self._daily_buy_date = today
+            daily_limit = getattr(self, "_daily_buy_limit", 5)
+            if self._daily_buy_count >= daily_limit:
+                logger.info("Skipping BUY for %s: daily limit reached (%d/%d)", symbol, self._daily_buy_count, daily_limit)
+                return
+
             # Skip if there's already a pending buy order for this symbol
             if self._order_manager.has_pending_order(symbol, "BUY"):
                 logger.debug("Skipping BUY for %s: pending order exists", symbol)
@@ -591,6 +605,10 @@ class EvaluationLoop:
                 sizing_override=sizing,
                 exchange=exchange,
             )
+
+            # Increment daily buy counter
+            if order:
+                self._daily_buy_count += 1
 
             # Register position for SL/TP/trailing stop monitoring
             if order and self._position_tracker:

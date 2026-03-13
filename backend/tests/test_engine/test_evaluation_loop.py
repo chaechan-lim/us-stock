@@ -149,6 +149,43 @@ class TestEvaluationLoop:
             pass
 
 
+class TestDailyBuyLimit:
+    """Test daily buy limit enforcement."""
+
+    async def test_daily_limit_blocks_excess_buys(self, eval_loop, mock_adapter):
+        """After N buys, subsequent buys should be blocked."""
+        eval_loop._daily_buy_limit = 2
+
+        # First buy - should succeed
+        await eval_loop.evaluate_symbol("AAPL")
+        assert mock_adapter.create_buy_order.call_count == 1
+
+        # Clear signal dedup so second symbol can trigger
+        eval_loop._last_signal.clear()
+
+        # Second buy - should succeed
+        await eval_loop.evaluate_symbol("MSFT")
+        assert mock_adapter.create_buy_order.call_count == 2
+
+        # Clear signal dedup
+        eval_loop._last_signal.clear()
+
+        # Third buy - should be BLOCKED (daily limit = 2)
+        await eval_loop.evaluate_symbol("GOOGL")
+        assert mock_adapter.create_buy_order.call_count == 2  # unchanged
+
+    async def test_daily_limit_resets_on_new_day(self, eval_loop, mock_adapter):
+        """Counter resets when date changes."""
+        eval_loop._daily_buy_limit = 1
+        eval_loop._daily_buy_count = 1
+        eval_loop._daily_buy_date = "2020-01-01"  # old date
+
+        # Should reset counter and allow buy
+        await eval_loop.evaluate_symbol("AAPL")
+        assert mock_adapter.create_buy_order.call_count == 1
+        assert eval_loop._daily_buy_count == 1
+
+
 class TestRiskAgentIntegration:
     """Test AI risk agent pre-trade check in evaluation loop."""
 
