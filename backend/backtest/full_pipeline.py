@@ -124,7 +124,7 @@ class PipelineConfig:
     enable_strategy_gating: bool = False  # Disable strategies with no edge
 
     # Re-entry after stop loss
-    recovery_watch_days: int = 20  # Keep stopped-out symbols in eval set for N days
+    recovery_watch_days: int = 7  # Keep stopped-out symbols in eval set for N days
 
     # Extended hours simulation (backtest-optimized)
     extended_hours_enabled: bool = False
