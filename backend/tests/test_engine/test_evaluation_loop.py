@@ -47,6 +47,7 @@ def mock_market_data():
         currency="USD", total=100_000, available=80_000,
     ))
     svc.get_positions = AsyncMock(return_value=[])
+    svc.get_price = AsyncMock(return_value=150.0)
     return svc
 
 

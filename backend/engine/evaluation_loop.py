@@ -479,7 +479,13 @@ class EvaluationLoop:
         if signal.signal_type == SignalType.HOLD:
             return
 
-        price = float(df.iloc[-1]["close"])
+        # Use real-time price from KIS API for order placement;
+        # fall back to OHLCV close if unavailable (e.g. paper mode)
+        try:
+            exchange = "KRX" if self._market == "KR" else self._exchange_resolver.resolve(symbol)
+            price = await self._market_data.get_price(symbol, exchange)
+        except Exception:
+            price = float(df.iloc[-1]["close"])
 
         if signal.signal_type == SignalType.BUY:
             # Daily buy budget with dynamic confidence escalation
