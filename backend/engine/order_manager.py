@@ -48,12 +48,14 @@ class OrderManager:
         notification=None,
         market_data=None,
         market: str = "US",
+        is_paper: bool = False,
     ):
         self._adapter = adapter
         self._risk = risk_manager
         self._notification = notification
         self._market_data = market_data
         self._market = market
+        self._is_paper = is_paper
         self._active_orders: dict[str, ManagedOrder] = {}
 
     def has_pending_order(self, symbol: str, side: str | None = None) -> bool:
@@ -134,11 +136,15 @@ class OrderManager:
             if result.status == "failed":
                 logger.warning(
                     "Buy order FAILED for %s %d shares @ $%.2f (%s)",
-                    symbol, sizing.quantity, price, strategy_name,
+                    symbol,
+                    sizing.quantity,
+                    price,
+                    strategy_name,
                 )
                 if self._notification:
                     await self._notification.notify_order_rejected(
-                        symbol, "Order failed at exchange",
+                        symbol,
+                        "Order failed at exchange",
                     )
                 return None
 
@@ -166,19 +172,30 @@ class OrderManager:
                 logger.info(
                     "Buy order placed: %s %d shares @ $%.2f (filled=%d @ $%.2f, "
                     "slippage=$%.4f) (%s)",
-                    symbol, sizing.quantity, price,
-                    filled_qty, result.filled_price or 0, slippage,
+                    symbol,
+                    sizing.quantity,
+                    price,
+                    filled_qty,
+                    result.filled_price or 0,
+                    slippage,
                     strategy_name,
                 )
             else:
                 logger.info(
                     "Buy order placed: %s %d shares @ $%.2f (%s)",
-                    symbol, sizing.quantity, price, strategy_name,
+                    symbol,
+                    sizing.quantity,
+                    price,
+                    strategy_name,
                 )
 
             if self._notification:
                 await self._notification.notify_trade_executed(
-                    symbol, "BUY", sizing.quantity, price, strategy_name,
+                    symbol,
+                    "BUY",
+                    sizing.quantity,
+                    price,
+                    strategy_name,
                     market=self._market,
                     stop_loss_pct=self._risk.params.default_stop_loss_pct,
                     take_profit_pct=self._risk.params.default_take_profit_pct,
@@ -187,17 +204,24 @@ class OrderManager:
                     session=session,
                 )
             if _trade_recorder:
-                _trade_recorder({
-                    "order_id": result.order_id,
-                    "symbol": symbol, "side": "BUY", "quantity": sizing.quantity,
-                    "price": price, "filled_price": result.filled_price,
-                    "filled_quantity": filled_qty,
-                    "slippage": slippage,
-                    "strategy": strategy_name, "status": result.status,
-                    "created_at": order.created_at,
-                    "market": self._market,
-                    "session": session,
-                })
+                _trade_recorder(
+                    {
+                        "order_id": result.order_id,
+                        "symbol": symbol,
+                        "side": "BUY",
+                        "quantity": sizing.quantity,
+                        "price": price,
+                        "filled_price": result.filled_price,
+                        "filled_quantity": filled_qty,
+                        "slippage": slippage,
+                        "strategy": strategy_name,
+                        "status": result.status,
+                        "created_at": order.created_at,
+                        "market": self._market,
+                        "session": session,
+                        "is_paper": self._is_paper,
+                    }
+                )
             return order
 
         except Exception as e:
@@ -241,7 +265,9 @@ class OrderManager:
             if result.status == "failed":
                 logger.warning(
                     "Sell order FAILED for %s %d shares @ %s (%s)",
-                    symbol, quantity, f"${price:.2f}" if price else "market",
+                    symbol,
+                    quantity,
+                    f"${price:.2f}" if price else "market",
                     strategy_name,
                 )
                 return None
@@ -268,11 +294,18 @@ class OrderManager:
 
             logger.info(
                 "Sell order placed: %s %d shares @ %s (%s)",
-                symbol, quantity, f"${price:.2f}" if price else "market", strategy_name,
+                symbol,
+                quantity,
+                f"${price:.2f}" if price else "market",
+                strategy_name,
             )
             if self._notification:
                 await self._notification.notify_trade_executed(
-                    symbol, "SELL", quantity, price or 0, strategy_name,
+                    symbol,
+                    "SELL",
+                    quantity,
+                    price or 0,
+                    strategy_name,
                     market=self._market,
                     filled_qty=filled_qty,
                     filled_price=result.filled_price or 0.0,
@@ -286,19 +319,26 @@ class OrderManager:
                 pnl = round((sell_price - entry_price) * sell_qty, 2)
 
             if _trade_recorder:
-                _trade_recorder({
-                    "order_id": result.order_id,
-                    "symbol": symbol, "side": "SELL", "quantity": quantity,
-                    "price": price, "filled_price": result.filled_price,
-                    "filled_quantity": filled_qty,
-                    "slippage": slippage,
-                    "strategy": strategy_name, "status": result.status,
-                    "buy_strategy": buy_strategy,
-                    "pnl": pnl,
-                    "created_at": order.created_at,
-                    "market": self._market,
-                    "session": session,
-                })
+                _trade_recorder(
+                    {
+                        "order_id": result.order_id,
+                        "symbol": symbol,
+                        "side": "SELL",
+                        "quantity": quantity,
+                        "price": price,
+                        "filled_price": result.filled_price,
+                        "filled_quantity": filled_qty,
+                        "slippage": slippage,
+                        "strategy": strategy_name,
+                        "status": result.status,
+                        "buy_strategy": buy_strategy,
+                        "pnl": pnl,
+                        "created_at": order.created_at,
+                        "market": self._market,
+                        "session": session,
+                        "is_paper": self._is_paper,
+                    }
+                )
             return order
 
         except Exception as e:
@@ -342,7 +382,8 @@ class OrderManager:
 
         # Fetch all pending orders in parallel
         pending = [
-            (oid, order) for oid, order in self._active_orders.items()
+            (oid, order)
+            for oid, order in self._active_orders.items()
             if order.status not in ("filled", "cancelled")
         ]
         if not pending:
@@ -370,24 +411,30 @@ class OrderManager:
                 order.slippage = result.filled_price - order.price
 
             if old_status != result.status:
-                changes.append({
-                    "order_id": order_id,
-                    "symbol": order.symbol,
-                    "side": order.side,
-                    "old_status": old_status,
-                    "new_status": result.status,
-                    "filled_quantity": order.filled_quantity,
-                    "filled_price": order.filled_price,
-                    "quantity": order.quantity,
-                    "price": order.price,
-                    "strategy": order.strategy_name,
-                    "market": getattr(order, "exchange", "NASD"),
-                })
+                changes.append(
+                    {
+                        "order_id": order_id,
+                        "symbol": order.symbol,
+                        "side": order.side,
+                        "old_status": old_status,
+                        "new_status": result.status,
+                        "filled_quantity": order.filled_quantity,
+                        "filled_price": order.filled_price,
+                        "quantity": order.quantity,
+                        "price": order.price,
+                        "strategy": order.strategy_name,
+                        "market": getattr(order, "exchange", "NASD"),
+                    }
+                )
                 logger.info(
                     "Order %s (%s %s): %s -> %s (filled=%d/%d)",
-                    order_id, order.side, order.symbol,
-                    old_status, result.status,
-                    order.filled_quantity, order.quantity,
+                    order_id,
+                    order.side,
+                    order.symbol,
+                    old_status,
+                    result.status,
+                    order.filled_quantity,
+                    order.quantity,
                 )
                 if result.status == "filled":
                     has_new_fill = True
@@ -430,24 +477,32 @@ class OrderManager:
             success = await self.cancel(oid, order.symbol)
             if success:
                 logger.info(
-                    "Stale order cancelled: %s %s %s %d shares @ %.0f "
-                    "(age=%.0fmin, ttl=%dmin)",
-                    oid, order.side, order.symbol, order.quantity,
-                    order.price or 0, age_min, ttl_minutes,
+                    "Stale order cancelled: %s %s %s %d shares @ %.0f (age=%.0fmin, ttl=%dmin)",
+                    oid,
+                    order.side,
+                    order.symbol,
+                    order.quantity,
+                    order.price or 0,
+                    age_min,
+                    ttl_minutes,
                 )
-                cancelled.append({
-                    "order_id": oid,
-                    "symbol": order.symbol,
-                    "side": order.side,
-                    "quantity": order.quantity,
-                    "price": order.price,
-                    "strategy": order.strategy_name,
-                    "age_min": round(age_min, 1),
-                })
+                cancelled.append(
+                    {
+                        "order_id": oid,
+                        "symbol": order.symbol,
+                        "side": order.side,
+                        "quantity": order.quantity,
+                        "price": order.price,
+                        "strategy": order.strategy_name,
+                        "age_min": round(age_min, 1),
+                    }
+                )
             else:
                 logger.warning(
                     "Failed to cancel stale order %s (%s %s)",
-                    oid, order.side, order.symbol,
+                    oid,
+                    order.side,
+                    order.symbol,
                 )
 
         return cancelled
@@ -459,8 +514,7 @@ class OrderManager:
     def clear_completed(self) -> None:
         """Remove completed/cancelled orders from tracking."""
         to_remove = [
-            oid for oid, o in self._active_orders.items()
-            if o.status in ("filled", "cancelled")
+            oid for oid, o in self._active_orders.items() if o.status in ("filled", "cancelled")
         ]
         for oid in to_remove:
             del self._active_orders[oid]

@@ -36,6 +36,7 @@ class TradeRepository:
         exchange: str = "NASD",
         market: str = "US",
         session: str = "regular",
+        is_paper: bool = False,
     ) -> Order:
         order = Order(
             symbol=symbol,
@@ -51,6 +52,7 @@ class TradeRepository:
             buy_strategy=buy_strategy or None,
             kis_order_id=kis_order_id,
             pnl=pnl,
+            is_paper=is_paper,
             market=market,
             session=session,
         )
@@ -83,18 +85,23 @@ class TradeRepository:
         return result
 
     async def get_trade_history(
-        self, limit: int = 50, symbol: str | None = None
+        self,
+        limit: int = 50,
+        symbol: str | None = None,
+        exclude_paper: bool = False,
     ) -> list[Order]:
         stmt = select(Order).order_by(desc(Order.created_at)).limit(limit)
         if symbol:
             stmt = stmt.where(Order.symbol == symbol)
+        if exclude_paper:
+            stmt = stmt.where(Order.is_paper == False)  # noqa: E712
         result = await self._session.execute(stmt)
         return list(result.scalars().all())
 
-    async def get_open_orders(self) -> list[Order]:
-        stmt = select(Order).where(
-            Order.status.in_(["pending", "open", "submitted", "not_found"])
-        )
+    async def get_open_orders(self, exclude_paper: bool = False) -> list[Order]:
+        stmt = select(Order).where(Order.status.in_(["pending", "open", "submitted", "not_found"]))
+        if exclude_paper:
+            stmt = stmt.where(Order.is_paper == False)  # noqa: E712
         result = await self._session.execute(stmt)
         return list(result.scalars().all())
 
@@ -106,7 +113,11 @@ class TradeRepository:
         result = await self._session.execute(stmt)
         return result.scalar_one_or_none()
 
-    async def get_recent_trades(self, hours: int = 24) -> list[Order]:
+    async def get_recent_trades(
+        self,
+        hours: int = 24,
+        exclude_paper: bool = False,
+    ) -> list[Order]:
         """Get filled trades from the last N hours."""
         cutoff = datetime.utcnow() - timedelta(hours=hours)
         stmt = (
@@ -114,13 +125,17 @@ class TradeRepository:
             .where(Order.status == "filled", Order.filled_at >= cutoff)
             .order_by(desc(Order.filled_at))
         )
+        if exclude_paper:
+            stmt = stmt.where(Order.is_paper == False)  # noqa: E712
         result = await self._session.execute(stmt)
         return list(result.scalars().all())
 
     # --- Watchlist ---
 
     async def get_watchlist(
-        self, active_only: bool = True, market: str | None = None,
+        self,
+        active_only: bool = True,
+        market: str | None = None,
     ) -> list[Watchlist]:
         stmt = select(Watchlist).order_by(Watchlist.added_at)
         if active_only:
@@ -141,7 +156,8 @@ class TradeRepository:
     ) -> Watchlist:
         # Check if already exists (within same market)
         stmt = select(Watchlist).where(
-            Watchlist.symbol == symbol, Watchlist.market == market,
+            Watchlist.symbol == symbol,
+            Watchlist.market == market,
         )
         result = await self._session.execute(stmt)
         existing = result.scalar_one_or_none()
@@ -167,11 +183,15 @@ class TradeRepository:
         return item
 
     async def update_watchlist_name(
-        self, symbol: str, name: str, market: str = "US",
+        self,
+        symbol: str,
+        name: str,
+        market: str = "US",
     ) -> bool:
         """Update the cached name for a watchlist symbol."""
         stmt = select(Watchlist).where(
-            Watchlist.symbol == symbol, Watchlist.market == market,
+            Watchlist.symbol == symbol,
+            Watchlist.market == market,
         )
         result = await self._session.execute(stmt)
         item = result.scalar_one_or_none()
@@ -183,7 +203,8 @@ class TradeRepository:
 
     async def remove_from_watchlist(self, symbol: str, market: str = "US") -> bool:
         stmt = select(Watchlist).where(
-            Watchlist.symbol == symbol, Watchlist.market == market,
+            Watchlist.symbol == symbol,
+            Watchlist.market == market,
         )
         result = await self._session.execute(stmt)
         item = result.scalar_one_or_none()

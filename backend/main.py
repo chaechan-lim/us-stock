@@ -152,7 +152,7 @@ async def lifespan(app: FastAPI):
         default_take_profit_pct=0.25,   # 25% (allow larger moves)
     )
     kr_risk_manager = RiskManager(params=kr_risk_params)
-    order_manager = OrderManager(adapter=adapter, risk_manager=risk_manager, notification=notification, market_data=market_data)
+    order_manager = OrderManager(adapter=adapter, risk_manager=risk_manager, notification=notification, market_data=market_data, is_paper=config.is_paper)
     app.state.risk_manager = risk_manager
     app.state.order_manager = order_manager
     consensus_cfg = registry._config_loader.get_consensus_config()
@@ -380,7 +380,7 @@ async def lifespan(app: FastAPI):
     )
     kr_order_manager = OrderManager(
         adapter=kr_adapter, risk_manager=kr_risk_manager, notification=notification,
-        market_data=kr_market_data, market="KR",
+        market_data=kr_market_data, market="KR", is_paper=config.is_paper,
     )
     kr_position_tracker = PositionTracker(
         adapter=kr_adapter,

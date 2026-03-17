@@ -37,10 +37,13 @@ class Order(Base):
     filled_price = Column(Float)
     status = Column(String(20), nullable=False, default="pending")
     strategy_name = Column(String(50))
-    buy_strategy = Column(String(50))   # original buy strategy (for SELL attribution)
+    buy_strategy = Column(String(50))  # original buy strategy (for SELL attribution)
     kis_order_id = Column(String(50))
     pnl = Column(Float)
-    session = Column(String(20), nullable=True, default="regular")  # regular/pre_market/after_hours/extended_nxt
+    is_paper = Column(Boolean, nullable=False, default=False)  # paper vs live order
+    session = Column(
+        String(20), nullable=True, default="regular"
+    )  # regular/pre_market/after_hours/extended_nxt
     created_at = Column(DateTime, default=datetime.utcnow)
     filled_at = Column(DateTime)
 
@@ -48,6 +51,7 @@ class Order(Base):
         Index("idx_orders_symbol", "symbol"),
         Index("idx_orders_created", "created_at"),
         Index("idx_orders_status", "status"),
+        Index("idx_orders_is_paper", "is_paper"),
     )
 
 
@@ -147,17 +151,18 @@ class AgentLog(Base):
 
 class AgentMemory(Base):
     """Persistent memory for AI agents — stores insights for future context."""
+
     __tablename__ = "agent_memory"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    agent_type = Column(String(30), nullable=False)    # market_analyst, risk, trade_review
-    category = Column(String(30), nullable=False)      # symbol, sector, market, lesson
-    symbol = Column(String(20))                        # null for market/lesson
-    content = Column(Text, nullable=False)             # insight text
+    agent_type = Column(String(30), nullable=False)  # market_analyst, risk, trade_review
+    category = Column(String(30), nullable=False)  # symbol, sector, market, lesson
+    symbol = Column(String(20))  # null for market/lesson
+    content = Column(Text, nullable=False)  # insight text
     token_count = Column(Integer, nullable=False, default=0)
     importance = Column(Integer, nullable=False, default=5)  # 1-10 priority
     created_at = Column(DateTime, default=datetime.utcnow)
-    expires_at = Column(DateTime, nullable=False)      # auto-cleanup
+    expires_at = Column(DateTime, nullable=False)  # auto-cleanup
 
     __table_args__ = (
         Index("idx_agent_memory_lookup", "agent_type", "category", "symbol"),

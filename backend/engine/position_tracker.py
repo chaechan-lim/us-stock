@@ -38,7 +38,7 @@ class TrackedPosition:
     strategy: str = ""
     stop_loss_pct: float | None = None
     take_profit_pct: float | None = None
-    trailing_activation_pct: float = 0.0   # disabled: cuts winners short
+    trailing_activation_pct: float = 0.0  # disabled: cuts winners short
     trailing_stop_pct: float = 0.0
     tracked_at: float = field(default_factory=time.monotonic)
 
@@ -125,7 +125,8 @@ class PositionTracker:
                 if age < 300:  # 5 minutes
                     logger.debug(
                         "Position %s not in exchange yet (%.0fs since tracked), keeping",
-                        symbol, age,
+                        symbol,
+                        age,
                     )
                     continue
                 logger.info("Position %s no longer held, removing tracker", symbol)
@@ -136,7 +137,8 @@ class PositionTracker:
             if current_price <= 0:
                 logger.warning(
                     "Position %s has invalid price (%.2f), skipping",
-                    symbol, current_price,
+                    symbol,
+                    current_price,
                 )
                 continue
 
@@ -147,8 +149,7 @@ class PositionTracker:
             action = self._evaluate(tracked, current_price)
             if action:
                 triggered.append(action)
-                await self._execute_sell(tracked, current_price, action["reason"],
-                                         session=session)
+                await self._execute_sell(tracked, current_price, action["reason"], session=session)
 
         return triggered
 
@@ -162,9 +163,7 @@ class PositionTracker:
                 sl_pct = sl_pct * sl_mult
 
         # Stop-loss
-        if self._risk.check_stop_loss(
-            tracked.entry_price, current_price, sl_pct
-        ):
+        if self._risk.check_stop_loss(tracked.entry_price, current_price, sl_pct):
             pnl = (current_price - tracked.entry_price) * tracked.quantity
             return {
                 "symbol": tracked.symbol,
@@ -208,15 +207,21 @@ class PositionTracker:
         return None
 
     async def _execute_sell(
-        self, tracked: TrackedPosition, price: float, reason: str,
+        self,
+        tracked: TrackedPosition,
+        price: float,
+        reason: str,
         session: str = "regular",
     ) -> None:
         """Execute a sell order and notify."""
         session_tag = f" [{session}]" if session != "regular" else ""
         logger.warning(
             "%s triggered for %s%s: entry=$%.2f current=$%.2f",
-            reason.upper(), tracked.symbol, session_tag,
-            tracked.entry_price, price,
+            reason.upper(),
+            tracked.symbol,
+            session_tag,
+            tracked.entry_price,
+            price,
         )
 
         # Extended hours: force limit order (market orders not supported)
@@ -245,24 +250,35 @@ class PositionTracker:
                 try:
                     if reason == "stop_loss":
                         await self._notification.notify_stop_loss(
-                            tracked.symbol, tracked.quantity,
-                            tracked.entry_price, price, pnl,
+                            tracked.symbol,
+                            tracked.quantity,
+                            tracked.entry_price,
+                            price,
+                            pnl,
                         )
                     elif reason == "take_profit":
                         await self._notification.notify_take_profit(
-                            tracked.symbol, tracked.quantity,
-                            tracked.entry_price, price, pnl,
+                            tracked.symbol,
+                            tracked.quantity,
+                            tracked.entry_price,
+                            price,
+                            pnl,
                         )
                     elif reason == "trailing_stop":
                         await self._notification.notify_trailing_stop(
-                            tracked.symbol, tracked.quantity,
-                            tracked.entry_price, price,
-                            tracked.highest_price, pnl,
+                            tracked.symbol,
+                            tracked.quantity,
+                            tracked.entry_price,
+                            price,
+                            tracked.highest_price,
+                            pnl,
                         )
                 except Exception as e:
                     logger.error(
                         "Failed to send %s notification for %s: %s",
-                        reason, tracked.symbol, e,
+                        reason,
+                        tracked.symbol,
+                        e,
                     )
 
     async def restore_from_exchange(self, session_factory=None) -> list[dict]:
@@ -292,7 +308,8 @@ class PositionTracker:
                 await self._clear_all_positions_db(sf)
             return []
 
-        # Look up latest BUY order per symbol from DB to get entry info
+        # Look up latest live BUY order per symbol from DB to get entry info
+        # (paper orders excluded to prevent position quantity distortion)
         entry_info: dict[str, dict] = {}
         if sf:
             try:
@@ -308,6 +325,7 @@ class PositionTracker:
                                 Order.symbol == pos.symbol,
                                 Order.side == "BUY",
                                 Order.status.in_(["filled", "submitted"]),
+                                Order.is_paper == False,  # noqa: E712
                             )
                             .order_by(desc(Order.created_at))
                             .limit(1)
@@ -344,13 +362,16 @@ class PositionTracker:
                     ohlcv = await self._market_data.get_ohlcv(pos.symbol, limit=30)
                     if not ohlcv.empty and len(ohlcv) >= 14:
                         import pandas_ta as ta
+
                         atr_series = ta.atr(ohlcv["high"], ohlcv["low"], ohlcv["close"], length=14)
                         if atr_series is not None and not atr_series.empty:
                             atr_val = float(atr_series.iloc[-1])
                             if atr_val > 0:
                                 market = "KR" if pos.symbol.isdigit() else "US"
                                 stop_loss_pct, take_profit_pct = self._risk.calculate_dynamic_sl_tp(
-                                    entry_price, atr_val, market=market,
+                                    entry_price,
+                                    atr_val,
+                                    market=market,
                                 )
                 except Exception as e:
                     logger.debug("ATR fetch failed for %s, using defaults: %s", pos.symbol, e)
@@ -365,14 +386,16 @@ class PositionTracker:
             )
 
             pnl_pct = ((pos.current_price / entry_price) - 1) * 100 if entry_price > 0 else 0
-            restored.append({
-                "symbol": pos.symbol,
-                "quantity": int(pos.quantity),
-                "entry_price": entry_price,
-                "current_price": pos.current_price,
-                "pnl_pct": round(pnl_pct, 2),
-                "strategy": strategy,
-            })
+            restored.append(
+                {
+                    "symbol": pos.symbol,
+                    "quantity": int(pos.quantity),
+                    "entry_price": entry_price,
+                    "current_price": pos.current_price,
+                    "pnl_pct": round(pnl_pct, 2),
+                    "strategy": strategy,
+                }
+            )
 
         if restored:
             logger.info(
@@ -419,14 +442,18 @@ class PositionTracker:
                 # Upsert all currently tracked positions
                 for symbol, tracked in self._tracked.items():
                     await self._upsert_position_record(
-                        session, symbol, tracked,
+                        session,
+                        symbol,
+                        tracked,
                     )
 
                 await session.commit()
 
             synced = len(self._tracked)
             logger.info(
-                "Synced %d %s positions to DB", synced, self._market,
+                "Synced %d %s positions to DB",
+                synced,
+                self._market,
             )
             return synced
 
@@ -485,13 +512,14 @@ class PositionTracker:
             pass
 
     async def _upsert_position_db(
-        self, symbol: str, tracked: TrackedPosition,
+        self,
+        symbol: str,
+        tracked: TrackedPosition,
     ) -> None:
         """Upsert a single position into the positions DB table."""
         if not self._session_factory:
             return
         try:
-
             async with self._session_factory() as session:
                 await self._upsert_position_record(session, symbol, tracked)
                 await session.commit()
@@ -560,7 +588,8 @@ class PositionTracker:
             session.add(record)
 
     async def _clear_all_positions_db(
-        self, session_factory: "async_sessionmaker[AsyncSession]",
+        self,
+        session_factory: "async_sessionmaker[AsyncSession]",
     ) -> None:
         """Remove all positions for this market from DB."""
         try:

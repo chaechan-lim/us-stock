@@ -46,6 +46,7 @@ async def get_trades(
         missing = [t for t in result if not t.get("name")]
         if missing:
             from data.stock_name_service import resolve_names as _resolve
+
             syms_by_market: dict[str, list[str]] = {}
             for t in missing:
                 mkt = t.get("market", "US")
@@ -62,15 +63,19 @@ async def get_trades(
     if _session_factory:
         try:
             from db.trade_repository import TradeRepository
+
             async with _session_factory() as session:
                 repo = TradeRepository(session)
                 orders = await repo.get_trade_history(limit=limit, symbol=symbol)
                 return [
                     {
-                        "symbol": o.symbol, "side": o.side,
-                        "quantity": o.quantity, "price": o.price,
+                        "symbol": o.symbol,
+                        "side": o.side,
+                        "quantity": o.quantity,
+                        "price": o.price,
                         "filled_price": o.filled_price,
-                        "status": o.status, "strategy": o.strategy_name,
+                        "status": o.status,
+                        "strategy": o.strategy_name,
                         "pnl": o.pnl,
                         "market": getattr(o, "market", "US"),
                         "session": getattr(o, "session", "regular") or "regular",
@@ -87,8 +92,9 @@ async def get_trades(
 
 @router.get("/summary")
 async def trade_summary(market: str | None = None):
-    """Get aggregated trade stats."""
-    trades = _trade_log
+    """Get aggregated trade stats (excludes paper orders)."""
+    # Exclude paper orders from summary to avoid PnL distortion
+    trades = [t for t in _trade_log if not t.get("is_paper", False)]
     if market:
         trades = [t for t in trades if t.get("market", "US") == market]
 
@@ -122,6 +128,7 @@ def record_trade(trade: dict) -> None:
     # Async DB persist (fire-and-forget via session factory)
     if _session_factory:
         import asyncio
+
         try:
             loop = asyncio.get_running_loop()
             loop.create_task(_persist_trade(trade))
@@ -133,6 +140,7 @@ async def _persist_trade(trade: dict) -> None:
     """Persist trade to orders table."""
     try:
         from db.trade_repository import TradeRepository
+
         async with _session_factory() as session:
             repo = TradeRepository(session)
             await repo.save_order(
@@ -150,6 +158,7 @@ async def _persist_trade(trade: dict) -> None:
                 pnl=trade.get("pnl"),
                 market=trade.get("market", "US"),
                 session=trade.get("session", "regular"),
+                is_paper=trade.get("is_paper", False),
             )
     except Exception as e:
         logger.warning("Failed to persist trade to DB: %s", e)
@@ -169,6 +178,7 @@ def _order_to_dict(o) -> dict:
         "strategy": o.strategy_name or "",
         "buy_strategy": getattr(o, "buy_strategy", "") or "",
         "pnl": o.pnl,
+        "is_paper": getattr(o, "is_paper", False),
         "market": getattr(o, "market", "US"),
         "session": getattr(o, "session", "regular") or "regular",
         "created_at": str(o.created_at) if o.created_at else "",
@@ -176,8 +186,12 @@ def _order_to_dict(o) -> dict:
     }
 
 
-async def restore_trade_log() -> int:
+async def restore_trade_log(exclude_paper: bool = True) -> int:
     """Restore in-memory trade log from DB on startup.
+
+    Args:
+        exclude_paper: If True (default), paper orders are excluded from the
+            restored trade log to prevent position/PnL distortion.
 
     Returns count of restored trades.
     """
@@ -185,9 +199,13 @@ async def restore_trade_log() -> int:
         return 0
     try:
         from db.trade_repository import TradeRepository
+
         async with _session_factory() as session:
             repo = TradeRepository(session)
-            orders = await repo.get_trade_history(limit=200)
+            orders = await repo.get_trade_history(
+                limit=200,
+                exclude_paper=exclude_paper,
+            )
             _trade_log.clear()
             for o in reversed(orders):  # oldest first
                 _trade_log.append(_order_to_dict(o))
@@ -201,6 +219,8 @@ async def restore_trade_log() -> int:
 async def reconcile_pending_orders(held_symbols: set[str]) -> int:
     """Reconcile pending DB orders using current exchange positions.
 
+    Only reconciles live (non-paper) orders to avoid position distortion.
+
     Heuristic for orders without kis_order_id:
     - BUY + symbol in held_symbols → filled
     - SELL + symbol NOT in held_symbols → filled
@@ -213,9 +233,10 @@ async def reconcile_pending_orders(held_symbols: set[str]) -> int:
     updated = 0
     try:
         from db.trade_repository import TradeRepository
+
         async with _session_factory() as session:
             repo = TradeRepository(session)
-            pending = await repo.get_open_orders()
+            pending = await repo.get_open_orders(exclude_paper=True)
             if not pending:
                 return 0
 
@@ -223,7 +244,8 @@ async def reconcile_pending_orders(held_symbols: set[str]) -> int:
                 if o.side == "BUY" and o.symbol in held_symbols:
                     # We hold this stock → BUY was filled
                     await repo.update_order_status(
-                        o.id, "filled",
+                        o.id,
+                        "filled",
                         filled_price=o.price,
                         filled_quantity=o.quantity,
                     )
@@ -231,7 +253,8 @@ async def reconcile_pending_orders(held_symbols: set[str]) -> int:
                 elif o.side == "SELL" and o.symbol not in held_symbols:
                     # We don't hold this stock → SELL was filled
                     await repo.update_order_status(
-                        o.id, "filled",
+                        o.id,
+                        "filled",
                         filled_price=o.price,
                         filled_quantity=o.quantity,
                     )
@@ -244,7 +267,8 @@ async def reconcile_pending_orders(held_symbols: set[str]) -> int:
             if updated:
                 logger.info(
                     "Reconciled %d pending DB orders (held=%s)",
-                    updated, ", ".join(sorted(held_symbols)) or "none",
+                    updated,
+                    ", ".join(sorted(held_symbols)) or "none",
                 )
     except Exception as e:
         logger.warning("Failed to reconcile pending DB orders: %s", e)
@@ -266,12 +290,14 @@ async def update_order_in_db(
         return False
     try:
         from db.trade_repository import TradeRepository
+
         async with _session_factory() as session:
             repo = TradeRepository(session)
             order = await repo.find_by_kis_order_id(kis_order_id)
             if order:
                 await repo.update_order_status(
-                    order.id, status,
+                    order.id,
+                    status,
                     filled_price=filled_price,
                     filled_quantity=filled_quantity,
                 )
