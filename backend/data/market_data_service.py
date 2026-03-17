@@ -26,6 +26,7 @@ TICKER_CACHE_TTL = 10       # seconds
 OHLCV_CACHE_TTL = 300       # 5 min (daily data doesn't change fast)
 BALANCE_CACHE_TTL = 30      # seconds
 POSITIONS_CACHE_TTL = 30    # seconds
+EXCHANGE_RATE_CACHE_TTL = 300  # 5 min — rate doesn't change fast
 API_CALL_TIMEOUT = 30       # seconds — max wait for a single adapter call
 MAX_CACHE_ENTRIES = 150     # max entries per cache dict (prevent unbounded growth)
 
@@ -44,6 +45,7 @@ class MarketDataService:
         self._ohlcv_cache: dict[str, tuple[pd.DataFrame, float]] = {}
         self._balance_cache: tuple[Balance, float] | None = None
         self._positions_cache: tuple[list[Position], float] | None = None
+        self._exchange_rate_cache: tuple[float, float] | None = None  # (rate, timestamp)
 
     # -- Market Data --
 
@@ -193,6 +195,38 @@ class MarketDataService:
         self._positions_cache = (positions, now)
         return positions
 
+    async def get_exchange_rate(self) -> float:
+        """Get USD/KRW exchange rate with caching (5-min TTL).
+
+        Uses adapter's cached rate from CTRP6504R or dedicated rate API.
+        Falls back to adapter._last_exchange_rate, then to 1450.
+        """
+        now = time.time()
+        if (
+            self._exchange_rate_cache
+            and (now - self._exchange_rate_cache[1]) < EXCHANGE_RATE_CACHE_TTL
+            and self._exchange_rate_cache[0] > 0
+        ):
+            return self._exchange_rate_cache[0]
+
+        rate = 0.0
+        # Try dedicated exchange rate fetch
+        if hasattr(self._adapter, "_fetch_exchange_rate"):
+            try:
+                rate = await self._adapter._fetch_exchange_rate()
+            except Exception:
+                pass
+
+        # Fallback to cached rate from balance fetch
+        if rate <= 0 and hasattr(self._adapter, "_last_exchange_rate"):
+            rate = getattr(self._adapter, "_last_exchange_rate", 0.0)
+
+        if rate <= 0:
+            rate = 1450.0  # hard fallback
+
+        self._exchange_rate_cache = (rate, now)
+        return rate
+
     # -- Convenience --
 
     async def get_price(self, symbol: str, exchange: str = "NASD") -> float:
@@ -234,5 +268,14 @@ class MarketDataService:
         else:
             self._ticker_cache.clear()
             self._ohlcv_cache.clear()
+        self._balance_cache = None
+        self._positions_cache = None
+
+    def invalidate_balance_cache(self) -> None:
+        """Clear only balance and positions cache.
+
+        More targeted than invalidate_cache() — preserves ticker/OHLCV caches.
+        Use after order fills when only account state changed.
+        """
         self._balance_cache = None
         self._positions_cache = None

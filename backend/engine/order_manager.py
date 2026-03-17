@@ -358,6 +358,7 @@ class OrderManager:
         results = await asyncio.gather(*[_fetch(oid, o) for oid, o in pending])
 
         changes = []
+        has_new_fill = False
         for order_id, order, result in results:
             if result is None:
                 continue
@@ -388,6 +389,13 @@ class OrderManager:
                     old_status, result.status,
                     order.filled_quantity, order.quantity,
                 )
+                if result.status == "filled":
+                    has_new_fill = True
+
+        # Invalidate balance/positions cache when fills detected so next
+        # dashboard fetch returns fresh data instead of stale cached values
+        if has_new_fill and self._market_data:
+            self._market_data.invalidate_balance_cache()
 
         # Clean up completed orders
         self.clear_completed()

@@ -85,33 +85,42 @@ async def _combined_summary(request: Request) -> dict:
     usd_total = us_balance.total if us_balance else 0
     usd_available = us_balance.available if us_balance else 0
 
-    # Fetch exchange rate from KIS adapter
+    # Fetch exchange rate — prefer MarketDataService cache (5-min TTL),
+    # fall back to adapter's cached rate from last balance fetch.
     adapter = getattr(request.app.state, "adapter", None)
-    if adapter:
-        # Try live exchange rate first, fall back to cached rate from balance fetch
+    if us_md:
         try:
-            rate = await adapter._fetch_exchange_rate()
+            rate = await us_md.get_exchange_rate()
             if rate > 0:
                 _cached_usd_krw = rate
         except Exception:
             pass
-        if _cached_usd_krw <= 0:
-            _cached_usd_krw = getattr(adapter, "_last_exchange_rate", 1450.0)
+    elif adapter:
+        _cached_usd_krw = getattr(adapter, "_last_exchange_rate", _cached_usd_krw)
+    if _cached_usd_krw <= 0:
+        _cached_usd_krw = 1450.0
 
     # Total equity: use CTRP6504R tot_asst_amt directly (통합증거금 전체 자산).
     # This is the single source of truth from KIS — includes KR stocks, US stocks,
     # KRW cash, USD cash, all in KRW. Avoids double-counting across KR/US APIs.
     tot_asst_krw = getattr(adapter, "_tot_asst_krw", None) if adapter else None
-    if isinstance(tot_asst_krw, (int, float)) and tot_asst_krw > 0:
+    use_integrated = isinstance(tot_asst_krw, (int, float)) and tot_asst_krw > 0
+    if use_integrated:
         total_equity = tot_asst_krw
     else:
-        # Fallback: sum up components (may double-count in 통합증거금)
-        us_positions_krw = sum(p.current_price * p.quantity for p in us_positions) * _cached_usd_krw
-        total_equity = krw_total + us_positions_krw
+        # Fallback: KR total (KR stocks + KR cash) + US total (USD cash + USD positions) * rate.
+        # usd_total already includes both cash and positions from the US adapter's
+        # own fallback (available + position_value), so no double-counting.
+        total_equity = krw_total + usd_total * _cached_usd_krw
 
-    # Available cash: in 통합증거금, KR orderable already reflects total buying power
-    # (KRW + convertible USD). Don't add USD separately — it double-counts.
-    available_cash = krw_available
+    # Available cash:
+    # - When 통합증거금 active: KR orderable already reflects total buying power
+    #   (KRW + convertible USD). Don't add USD separately to avoid double-counting.
+    # - When fallback: KR orderable is KR-only, so add USD available separately.
+    if use_integrated:
+        available_cash = krw_available
+    else:
+        available_cash = krw_available + usd_available * _cached_usd_krw
 
     all_positions = kr_positions + us_positions
     total_unrealized_pnl_krw = sum(p.unrealized_pnl for p in kr_positions)

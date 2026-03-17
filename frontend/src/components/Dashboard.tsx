@@ -63,11 +63,10 @@ export default function Dashboard() {
 
   const hasUsd = summary.usd_balance && summary.usd_balance.total > 0
   const rate = summary.exchange_rate ?? 1450
-  // Fallback: use available cash + positions invested (avoid double-counting deposits)
+  // Fallback: KR total + USD total * rate (backend always provides total_equity,
+  // but keep fallback for robustness). USD total already includes cash + positions.
   const totalEquity = summary.total_equity ??
-    (summary.available_cash ?? summary.balance.available) +
-    Math.max(0, (summary.usd_balance?.total ?? 0) - (summary.usd_balance?.available ?? 0)) * rate +
-    Math.max(0, summary.balance.total - summary.balance.available)
+    (summary.balance.total + (summary.usd_balance?.total ?? 0) * rate)
 
   return (
     <div className="space-y-6">
