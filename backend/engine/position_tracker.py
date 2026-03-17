@@ -46,6 +46,9 @@ class TrackedPosition:
 class PositionTracker:
     """Monitor positions and trigger SL/TP/trailing stop sells."""
 
+    # Minimum interval between auto-recovery attempts (seconds)
+    _AUTO_RECOVER_COOLDOWN = 600  # 10 minutes
+
     def __init__(
         self,
         adapter: ExchangeAdapter,
@@ -66,6 +69,7 @@ class PositionTracker:
         self._session_factory = session_factory
         self._market = market
         self._tracked: dict[str, TrackedPosition] = {}
+        self._last_auto_recover: float = 0.0
 
     def track(
         self,
@@ -97,13 +101,15 @@ class PositionTracker:
     async def check_all(self, session: str = "regular") -> list[dict]:
         """Check all tracked positions. Returns list of triggered actions.
 
+        Defense-in-depth: if the in-memory tracker is empty but the exchange
+        reports open positions, auto-recover them so SL/TP monitoring is not
+        silently disabled.  Recovery is rate-limited to avoid hammering the
+        exchange/DB on every 60-second check cycle.
+
         Args:
             session: Trading session for sell execution (regular/pre_market/after_hours).
                      Extended hours sells use limit orders only.
         """
-        if not self._tracked:
-            return []
-
         try:
             if self._market_data:
                 positions = await self._market_data.get_positions()
@@ -111,6 +117,13 @@ class PositionTracker:
                 positions = await self._adapter.fetch_positions()
         except Exception as e:
             logger.error("Failed to fetch positions: %s", e)
+            return []
+
+        # Defense-in-depth: auto-recover untracked exchange positions
+        if positions:
+            await self._auto_recover_untracked(positions)
+
+        if not self._tracked:
             return []
 
         position_map = {p.symbol: p for p in positions}
@@ -410,6 +423,151 @@ class PositionTracker:
             await self.sync_to_db(sf)
 
         return restored
+
+    async def restore_from_db(self, session_factory=None) -> int:
+        """Restore tracked positions from the positions DB table.
+
+        Fallback for when ``restore_from_exchange()`` fails or is incomplete.
+        Only restores positions not already tracked in memory.
+        Returns the number of positions restored.
+        """
+        sf = session_factory or self._session_factory
+        if not sf:
+            return 0
+
+        try:
+            from sqlalchemy import select
+
+            from core.models import PositionRecord
+
+            async with sf() as session:
+                stmt = select(PositionRecord).where(
+                    PositionRecord.market == self._market,
+                )
+                result = await session.execute(stmt)
+                records = result.scalars().all()
+
+            if not records:
+                return 0
+
+            restored = 0
+            for record in records:
+                if record.symbol in self._tracked:
+                    continue
+                if record.quantity is not None and record.quantity <= 0:
+                    continue
+
+                self.track(
+                    symbol=record.symbol,
+                    entry_price=record.avg_price or 0.0,
+                    quantity=int(record.quantity or 0),
+                    strategy=record.strategy_name or "db_restored",
+                    stop_loss_pct=record.stop_loss,
+                    take_profit_pct=record.take_profit,
+                )
+                restored += 1
+
+            if restored:
+                logger.info(
+                    "Restored %d %s positions from DB: %s",
+                    restored,
+                    self._market,
+                    ", ".join(r.symbol for r in records),
+                )
+            return restored
+
+        except Exception as e:
+            logger.error("Failed to restore positions from DB: %s", e)
+            return 0
+
+    async def _auto_recover_untracked(self, exchange_positions: list) -> None:
+        """Auto-track exchange positions missing from the in-memory tracker.
+
+        Defense-in-depth: ensures SL/TP monitoring is not silently disabled
+        when the tracker is empty (e.g. after a failed restore or restart).
+
+        Recovery is rate-limited to ``_AUTO_RECOVER_COOLDOWN`` seconds to
+        avoid hammering the DB/exchange every check cycle.
+        """
+        untracked = [
+            p for p in exchange_positions if p.quantity > 0 and p.symbol not in self._tracked
+        ]
+        if not untracked:
+            return
+
+        # Rate-limit recovery attempts
+        now = time.monotonic()
+        if now - self._last_auto_recover < self._AUTO_RECOVER_COOLDOWN:
+            return
+        self._last_auto_recover = now
+
+        logger.warning(
+            "Auto-recovering %d untracked %s exchange positions: %s",
+            len(untracked),
+            self._market,
+            ", ".join(p.symbol for p in untracked),
+        )
+
+        # Try loading entry info from positions DB table first
+        db_info = await self._load_positions_from_db()
+
+        for pos in untracked:
+            db_record = db_info.get(pos.symbol)
+            if db_record:
+                # Use DB info (preserves SL/TP, strategy from previous session)
+                self.track(
+                    symbol=pos.symbol,
+                    entry_price=db_record.get("avg_price", pos.avg_price),
+                    quantity=int(pos.quantity),
+                    strategy=db_record.get("strategy", "auto_recovered"),
+                    stop_loss_pct=db_record.get("stop_loss"),
+                    take_profit_pct=db_record.get("take_profit"),
+                )
+            else:
+                # Fall back to exchange info with default SL/TP
+                self.track(
+                    symbol=pos.symbol,
+                    entry_price=pos.avg_price,
+                    quantity=int(pos.quantity),
+                    strategy="auto_recovered",
+                    stop_loss_pct=self._risk.params.default_stop_loss_pct,
+                    take_profit_pct=self._risk.params.default_take_profit_pct,
+                )
+
+    async def _load_positions_from_db(self) -> dict[str, dict]:
+        """Load position records from DB for this market.
+
+        Returns a dict mapping symbol -> {avg_price, stop_loss, take_profit, strategy}.
+        """
+        sf = self._session_factory
+        if not sf:
+            return {}
+
+        try:
+            from sqlalchemy import select
+
+            from core.models import PositionRecord
+
+            async with sf() as session:
+                stmt = select(PositionRecord).where(
+                    PositionRecord.market == self._market,
+                )
+                result = await session.execute(stmt)
+                records = result.scalars().all()
+
+            return {
+                r.symbol: {
+                    "avg_price": r.avg_price,
+                    "stop_loss": r.stop_loss,
+                    "take_profit": r.take_profit,
+                    "strategy": r.strategy_name or "",
+                }
+                for r in records
+            }
+
+        except Exception as e:
+            logger.debug("Failed to load positions from DB: %s", e)
+            return {}
 
     async def sync_to_db(self, session_factory=None) -> int:
         """Synchronize all in-memory tracked positions to the positions DB table.
