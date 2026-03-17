@@ -52,3 +52,9 @@ nohup.out
 
 # MCP (local paths per machine)
 .mcp.json
+
+# Symphony orchestrator (runtime files)
+.symphony-workpad.md
+.symphony-followup.json
+.symphony-subtasks.json
+.symphony-result.json
