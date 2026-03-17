@@ -44,6 +44,10 @@ structlog>=24.0.0
 # Utilities
 websockets>=12.0
 python-dotenv>=1.0.0
+psutil>=5.9.0
+
+# MCP server
+mcp>=1.0.0
 
 # Testing
 pytest>=8.0.0
