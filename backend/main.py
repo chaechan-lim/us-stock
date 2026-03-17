@@ -173,13 +173,15 @@ async def lifespan(app: FastAPI):
     health.set_notification(notification)
     app.state.health = health
 
-    # Position tracker
+    # Position tracker (with DB persistence)
     position_tracker = PositionTracker(
         adapter=adapter,
         risk_manager=risk_manager,
         order_manager=order_manager,
         notification=notification,
         market_data=market_data,
+        session_factory=session_factory,
+        market="US",
     )
     app.state.position_tracker = position_tracker
 
@@ -384,6 +386,8 @@ async def lifespan(app: FastAPI):
         order_manager=kr_order_manager,
         notification=notification,
         market_data=kr_market_data,
+        session_factory=session_factory,
+        market="KR",
     )
     app.state.kr_market_data = kr_market_data
     app.state.kr_order_manager = kr_order_manager
@@ -461,6 +465,7 @@ async def lifespan(app: FastAPI):
 
     async def task_position_check():
         await position_tracker.check_all()
+        await position_tracker.sync_to_db()
 
     async def task_daily_reset():
         risk_manager.reset_daily()
@@ -1279,6 +1284,7 @@ async def lifespan(app: FastAPI):
 
     async def task_kr_position_check():
         await kr_position_tracker.check_all()
+        await kr_position_tracker.sync_to_db()
 
     async def task_kr_order_reconciliation():
         changes = await kr_order_manager.reconcile_all()
@@ -1528,9 +1534,18 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("Failed to load watchlist: %s", e)
 
-    # Startup position reconciliation — restore tracking from exchange
+    # Startup position reconciliation — restore from DB first, then exchange
     import asyncio
     try:
+        # Phase 1: Restore from DB (fast, recovers SL/TP tracking state)
+        us_db_restored = await position_tracker.restore_from_db()
+        kr_db_restored = await kr_position_tracker.restore_from_db()
+        logger.info(
+            "DB restore: US=%d, KR=%d positions",
+            len(us_db_restored), len(kr_db_restored),
+        )
+
+        # Phase 2: Reconcile with exchange (adds missing, updates prices)
         us_restored = await position_tracker.restore_from_exchange(session_factory)
         kr_restored = await kr_position_tracker.restore_from_exchange(session_factory)
 
@@ -1552,7 +1567,10 @@ async def lifespan(app: FastAPI):
                     f"  • {p['symbol']}: {p['quantity']}주 @ ₩{p['entry_price']:,.0f} "
                     f"→ ₩{p['current_price']:,.0f} ({sign}{p['pnl_pct']:.1f}%)"
                 )
-        if not us_restored and not kr_restored:
+        if us_db_restored or kr_db_restored:
+            db_count = len(us_db_restored) + len(kr_db_restored)
+            startup_lines.append(f"\n*({db_count} positions pre-loaded from DB)*")
+        if not us_restored and not kr_restored and not us_db_restored and not kr_db_restored:
             startup_lines.append("No open positions found.")
 
         await notification.notify_system_event(

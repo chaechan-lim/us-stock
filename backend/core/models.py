@@ -56,7 +56,7 @@ class PositionRecord(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     market = Column(String(2), nullable=False, default="US")
-    symbol = Column(String(20), nullable=False, unique=True)
+    symbol = Column(String(20), nullable=False)
     exchange = Column(String(10), nullable=False, default="NASD")
     quantity = Column(Float, nullable=False)
     avg_price = Column(Float, nullable=False)
@@ -69,7 +69,10 @@ class PositionRecord(Base):
     opened_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
-    __table_args__ = (Index("idx_positions_symbol", "symbol"),)
+    __table_args__ = (
+        UniqueConstraint("market", "symbol", name="uq_positions_market_symbol"),
+        Index("idx_positions_symbol", "symbol"),
+    )
 
 
 class PortfolioSnapshot(Base):
