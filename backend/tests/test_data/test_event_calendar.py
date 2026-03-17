@@ -27,6 +27,8 @@ class TestShouldSkipBuy:
         assert "FOMC" in reason
 
     def test_skip_on_earnings(self, event_calendar):
+        # Mock macro to not block — isolate earnings logic from real calendar
+        event_calendar.macro.should_block_buys = lambda t=None: (False, "")
         tomorrow = (date.today() + timedelta(days=1)).isoformat()
         event_calendar.earnings._cache = {
             "AAPL": [EarningsEvent(symbol="AAPL", date=tomorrow, hour="amc")],
