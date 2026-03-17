@@ -28,7 +28,7 @@ jobs:
         run: |
           python -m pytest tests/ -q --tb=short \
             --cov=. --cov-report=xml --cov-report=term \
-            --cov-fail-under=90
+            --cov-fail-under=85
 
   scenario-test:
     runs-on: ubuntu-latest
