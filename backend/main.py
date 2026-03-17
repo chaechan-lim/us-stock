@@ -10,6 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from config import AppConfig
 from core.models import Base
 from db.session import get_engine
+from db.schema import ensure_schema
 from api.router import api_router
 from api.ws import install_log_handler
 from services.log_manager import LogConfig, setup_logging
@@ -56,10 +57,11 @@ async def lifespan(app: FastAPI):
     await cache.initialize()
     app.state.cache = cache
 
-    # Create database tables
+    # Create database tables + apply any pending column migrations
     engine = get_engine(config.database)
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+    await ensure_schema(engine)
     logger.info("Database tables created")
 
     # Initialize exchange adapter
