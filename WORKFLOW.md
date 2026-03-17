@@ -70,7 +70,16 @@ project:
     frontend-build: "cd frontend && npm run build"
   skills_dir: ".symphony/skills"
   hooks:
-    post_success: "venv/bin/python -m pytest backend/tests/ -x -q"
+    pre_run: ".symphony/hooks/pre-run.sh"
+    post_success: ".symphony/hooks/post-success.sh"
+    hook_must_pass: true
+  ci_gate:
+    enabled: true
+    checks:
+      - "backend-test"
+      - "scenario-test"
+      - "frontend-build"
+    timeout_minutes: 15
 ---
 
 # {{ issue.key }}: {{ issue.title }}
