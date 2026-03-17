@@ -1597,6 +1597,19 @@ async def lifespan(app: FastAPI):
         us_restored = await position_tracker.restore_from_exchange(session_factory)
         kr_restored = await kr_position_tracker.restore_from_exchange(session_factory)
 
+        # Fallback: if exchange restore missed positions, try DB (STOCK-7)
+        us_db_restored = 0
+        kr_db_restored = 0
+        if not us_restored:
+            us_db_restored = await position_tracker.restore_from_db(session_factory)
+        if not kr_restored:
+            kr_db_restored = await kr_position_tracker.restore_from_db(session_factory)
+        if us_db_restored or kr_db_restored:
+            logger.info(
+                "DB fallback restore: US=%d, KR=%d positions",
+                us_db_restored, kr_db_restored,
+            )
+
         # Notify via Discord on startup
         startup_lines = ["System restarted — position reconciliation complete."]
         if us_restored:
@@ -1616,7 +1629,12 @@ async def lifespan(app: FastAPI):
                     f"→ ₩{p['current_price']:,.0f} ({sign}{p['pnl_pct']:.1f}%)"
                 )
         if not us_restored and not kr_restored:
-            startup_lines.append("No open positions found.")
+            if us_db_restored or kr_db_restored:
+                startup_lines.append(
+                    f"Restored from DB fallback: US={us_db_restored}, KR={kr_db_restored}"
+                )
+            else:
+                startup_lines.append("No open positions found.")
 
         await notification.notify_system_event(
             "startup_reconciliation", "\n".join(startup_lines),
