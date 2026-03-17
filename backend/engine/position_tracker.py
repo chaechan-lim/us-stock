@@ -41,6 +41,7 @@ class TrackedPosition:
     trailing_activation_pct: float = 0.0  # disabled: cuts winners short
     trailing_stop_pct: float = 0.0
     tracked_at: float = field(default_factory=time.monotonic)
+    opened_at: datetime | None = None  # actual first-buy timestamp (from orders DB)
 
 
 class PositionTracker:
@@ -75,6 +76,7 @@ class PositionTracker:
         strategy: str = "",
         stop_loss_pct: float | None = None,
         take_profit_pct: float | None = None,
+        opened_at: datetime | None = None,
     ) -> None:
         """Start tracking a position."""
         self._tracked[symbol] = TrackedPosition(
@@ -85,6 +87,7 @@ class PositionTracker:
             strategy=strategy,
             stop_loss_pct=stop_loss_pct,
             take_profit_pct=take_profit_pct,
+            opened_at=opened_at,
         )
         logger.info("Tracking position: %s %d @ $%.2f", symbol, quantity, entry_price)
         self._schedule_db_upsert(symbol)
@@ -309,16 +312,18 @@ class PositionTracker:
             return []
 
         # Look up latest live BUY order per symbol from DB to get entry info
+        # + earliest live BUY order per symbol for accurate opened_at timestamp
         # (paper orders excluded to prevent position quantity distortion)
         entry_info: dict[str, dict] = {}
         if sf:
             try:
-                from sqlalchemy import desc, select
+                from sqlalchemy import asc, desc, select
 
                 from core.models import Order
 
                 async with sf() as session:
                     for pos in positions:
+                        # Latest BUY order → strategy name
                         stmt = (
                             select(Order)
                             .where(
@@ -332,10 +337,29 @@ class PositionTracker:
                         )
                         result = await session.execute(stmt)
                         order = result.scalar_one_or_none()
+
+                        # Earliest BUY order → opened_at timestamp
+                        stmt_first = (
+                            select(Order.created_at)
+                            .where(
+                                Order.symbol == pos.symbol,
+                                Order.side == "BUY",
+                                Order.status.in_(["filled", "submitted"]),
+                                Order.is_paper == False,  # noqa: E712
+                            )
+                            .order_by(asc(Order.created_at))
+                            .limit(1)
+                        )
+                        result_first = await session.execute(stmt_first)
+                        first_buy_at = result_first.scalar_one_or_none()
+
+                        info: dict = {}
                         if order:
-                            entry_info[pos.symbol] = {
-                                "strategy": order.strategy_name or "",
-                            }
+                            info["strategy"] = order.strategy_name or ""
+                        if first_buy_at:
+                            info["opened_at"] = first_buy_at
+                        if info:
+                            entry_info[pos.symbol] = info
             except Exception as e:
                 logger.warning("Failed to look up entry info from DB: %s", e)
 
@@ -376,6 +400,9 @@ class PositionTracker:
                 except Exception as e:
                     logger.debug("ATR fetch failed for %s, using defaults: %s", pos.symbol, e)
 
+            # Use earliest BUY order timestamp as opened_at (if available)
+            opened_at = info.get("opened_at")
+
             self.track(
                 symbol=pos.symbol,
                 entry_price=entry_price,
@@ -383,6 +410,7 @@ class PositionTracker:
                 strategy=strategy,
                 stop_loss_pct=stop_loss_pct,
                 take_profit_pct=take_profit_pct,
+                opened_at=opened_at,
             )
 
             pnl_pct = ((pos.current_price / entry_price) - 1) * 100 if entry_price > 0 else 0
@@ -582,7 +610,7 @@ class PositionTracker:
                 take_profit=tracked.take_profit_pct,
                 trailing_stop=tracked.trailing_stop_pct,
                 strategy_name=tracked.strategy,
-                opened_at=datetime.utcnow(),
+                opened_at=tracked.opened_at or datetime.utcnow(),
                 updated_at=datetime.utcnow(),
             )
             session.add(record)

@@ -8,6 +8,7 @@ don't fire background tasks), then pass session_factory explicitly to
 sync_to_db() / _upsert_position_db / _remove_position_db.
 """
 
+from datetime import datetime
 from unittest.mock import AsyncMock
 
 import pytest
@@ -16,7 +17,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
-from core.models import Base, PositionRecord
+from core.models import Base, Order, PositionRecord
 from engine.order_manager import OrderManager
 from engine.position_tracker import PositionTracker
 from engine.risk_manager import RiskManager, RiskParams
@@ -51,10 +52,12 @@ def adapter():
 
 @pytest.fixture
 def risk():
-    return RiskManager(RiskParams(
-        default_stop_loss_pct=0.08,
-        default_take_profit_pct=0.20,
-    ))
+    return RiskManager(
+        RiskParams(
+            default_stop_loss_pct=0.08,
+            default_take_profit_pct=0.20,
+        )
+    )
 
 
 @pytest.fixture
@@ -65,7 +68,9 @@ def order_mgr(adapter, risk):
 def _make_tracker(adapter, risk, order_mgr, market: str = "US") -> PositionTracker:
     """Create a tracker WITHOUT session_factory to avoid background DB tasks."""
     return PositionTracker(
-        adapter, risk, order_mgr,
+        adapter,
+        risk,
+        order_mgr,
         market=market,
     )
 
@@ -113,7 +118,9 @@ class TestSyncToDb:
         """sync_to_db should persist all tracked position fields."""
         tracker = _make_tracker(adapter, risk, order_mgr)
         tracker.track(
-            "AAPL", 150.0, 10,
+            "AAPL",
+            150.0,
+            10,
             strategy="trend_following",
             stop_loss_pct=0.10,
             take_profit_pct=0.25,
@@ -374,12 +381,20 @@ class TestRestoreWithDbSync:
     @pytest.mark.asyncio
     async def test_restore_persists_to_db(self, adapter, risk, order_mgr, db_factory):
         """Restored positions should be saved to DB after restore."""
-        adapter.fetch_positions = AsyncMock(return_value=[
-            Position(symbol="AAPL", exchange="NASD", quantity=10,
-                     avg_price=150.0, current_price=155.0),
-            Position(symbol="MSFT", exchange="NASD", quantity=5,
-                     avg_price=300.0, current_price=310.0),
-        ])
+        adapter.fetch_positions = AsyncMock(
+            return_value=[
+                Position(
+                    symbol="AAPL",
+                    exchange="NASD",
+                    quantity=10,
+                    avg_price=150.0,
+                    current_price=155.0,
+                ),
+                Position(
+                    symbol="MSFT", exchange="NASD", quantity=5, avg_price=300.0, current_price=310.0
+                ),
+            ]
+        )
         tracker = _make_tracker(adapter, risk, order_mgr)
 
         restored = await tracker.restore_from_exchange(db_factory)
@@ -415,10 +430,17 @@ class TestRestoreWithDbSync:
     @pytest.mark.asyncio
     async def test_restore_without_session_factory(self, adapter, risk, order_mgr):
         """Restore without session_factory still works (in-memory only)."""
-        adapter.fetch_positions = AsyncMock(return_value=[
-            Position(symbol="AAPL", exchange="NASD", quantity=10,
-                     avg_price=150.0, current_price=155.0),
-        ])
+        adapter.fetch_positions = AsyncMock(
+            return_value=[
+                Position(
+                    symbol="AAPL",
+                    exchange="NASD",
+                    quantity=10,
+                    avg_price=150.0,
+                    current_price=155.0,
+                ),
+            ]
+        )
         tracker = _make_tracker(adapter, risk, order_mgr)
 
         restored = await tracker.restore_from_exchange()
@@ -437,7 +459,9 @@ class TestDbEdgeCases:
         """Verify all TrackedPosition fields are mapped to PositionRecord."""
         tracker = _make_tracker(adapter, risk, order_mgr)
         tracker.track(
-            "TSLA", 250.0, 20,
+            "TSLA",
+            250.0,
+            20,
             strategy="bollinger_squeeze",
             stop_loss_pct=0.15,
             take_profit_pct=0.35,
@@ -494,3 +518,363 @@ class TestDbEdgeCases:
         """Market can be set to 'KR'."""
         tracker = PositionTracker(adapter, risk, order_mgr, market="KR")
         assert tracker._market == "KR"
+
+
+# ── STOCK-9: opened_at from earliest BUY order ──────────────────────
+
+
+class TestOpenedAtFromOrders:
+    """Verify opened_at is set to earliest BUY order timestamp, not utcnow().
+
+    STOCK-9: All positions had opened_at reset to sync time because
+    _upsert_position_record always used datetime.utcnow() for new records.
+    """
+
+    @pytest.mark.asyncio
+    async def test_restore_sets_opened_at_from_earliest_buy(self, adapter, risk, order_mgr):
+        """restore_from_exchange should set opened_at from the earliest BUY order."""
+        engine = create_async_engine(
+            "sqlite+aiosqlite://",
+            poolclass=StaticPool,
+            connect_args={"check_same_thread": False},
+        )
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+
+        # Create two BUY orders at different times
+        first_buy_time = datetime(2026, 1, 15, 10, 30, 0)
+        second_buy_time = datetime(2026, 2, 20, 14, 0, 0)
+        async with factory() as session:
+            session.add(
+                Order(
+                    symbol="AAPL",
+                    exchange="NASD",
+                    side="BUY",
+                    order_type="limit",
+                    quantity=10,
+                    price=150.0,
+                    filled_quantity=10,
+                    filled_price=150.0,
+                    status="filled",
+                    strategy_name="trend_following",
+                    is_paper=False,
+                    market="US",
+                    created_at=first_buy_time,
+                )
+            )
+            session.add(
+                Order(
+                    symbol="AAPL",
+                    exchange="NASD",
+                    side="BUY",
+                    order_type="limit",
+                    quantity=5,
+                    price=155.0,
+                    filled_quantity=5,
+                    filled_price=155.0,
+                    status="filled",
+                    strategy_name="macd_histogram",
+                    is_paper=False,
+                    market="US",
+                    created_at=second_buy_time,
+                )
+            )
+            await session.commit()
+
+        # Exchange shows position
+        adapter.fetch_positions = AsyncMock(
+            return_value=[
+                Position(
+                    symbol="AAPL",
+                    exchange="NASD",
+                    quantity=15,
+                    avg_price=152.0,
+                    current_price=160.0,
+                ),
+            ]
+        )
+
+        tracker = _make_tracker(adapter, risk, order_mgr)
+        restored = await tracker.restore_from_exchange(factory)
+
+        assert len(restored) == 1
+
+        # Verify in-memory tracked position has correct opened_at
+        assert tracker._tracked["AAPL"].opened_at == first_buy_time
+
+        # Verify DB record has correct opened_at (from earliest buy)
+        record = await _get_position(factory, "AAPL")
+        assert record is not None
+        assert record.opened_at == first_buy_time
+
+        await engine.dispose()
+
+    @pytest.mark.asyncio
+    async def test_restore_opened_at_per_symbol(self, adapter, risk, order_mgr):
+        """Each position should get its own earliest BUY timestamp."""
+        engine = create_async_engine(
+            "sqlite+aiosqlite://",
+            poolclass=StaticPool,
+            connect_args={"check_same_thread": False},
+        )
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+
+        aapl_first = datetime(2026, 1, 10, 9, 0, 0)
+        msft_first = datetime(2026, 2, 5, 11, 0, 0)
+        async with factory() as session:
+            session.add(
+                Order(
+                    symbol="AAPL",
+                    exchange="NASD",
+                    side="BUY",
+                    order_type="market",
+                    quantity=10,
+                    price=150.0,
+                    filled_quantity=10,
+                    filled_price=150.0,
+                    status="filled",
+                    strategy_name="trend",
+                    is_paper=False,
+                    market="US",
+                    created_at=aapl_first,
+                )
+            )
+            session.add(
+                Order(
+                    symbol="MSFT",
+                    exchange="NASD",
+                    side="BUY",
+                    order_type="market",
+                    quantity=5,
+                    price=300.0,
+                    filled_quantity=5,
+                    filled_price=300.0,
+                    status="filled",
+                    strategy_name="macd",
+                    is_paper=False,
+                    market="US",
+                    created_at=msft_first,
+                )
+            )
+            await session.commit()
+
+        adapter.fetch_positions = AsyncMock(
+            return_value=[
+                Position(
+                    symbol="AAPL",
+                    exchange="NASD",
+                    quantity=10,
+                    avg_price=150.0,
+                    current_price=160.0,
+                ),
+                Position(
+                    symbol="MSFT", exchange="NASD", quantity=5, avg_price=300.0, current_price=310.0
+                ),
+            ]
+        )
+
+        tracker = _make_tracker(adapter, risk, order_mgr)
+        restored = await tracker.restore_from_exchange(factory)
+
+        assert len(restored) == 2
+        assert tracker._tracked["AAPL"].opened_at == aapl_first
+        assert tracker._tracked["MSFT"].opened_at == msft_first
+
+        # DB records should reflect per-symbol opened_at
+        aapl_rec = await _get_position(factory, "AAPL")
+        msft_rec = await _get_position(factory, "MSFT")
+        assert aapl_rec.opened_at == aapl_first
+        assert msft_rec.opened_at == msft_first
+
+        await engine.dispose()
+
+    @pytest.mark.asyncio
+    async def test_restore_no_orders_uses_utcnow(self, adapter, risk, order_mgr):
+        """When no BUY orders exist, opened_at should fall back to utcnow()."""
+        engine = create_async_engine(
+            "sqlite+aiosqlite://",
+            poolclass=StaticPool,
+            connect_args={"check_same_thread": False},
+        )
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+
+        # No orders in DB at all
+        adapter.fetch_positions = AsyncMock(
+            return_value=[
+                Position(
+                    symbol="AAPL",
+                    exchange="NASD",
+                    quantity=10,
+                    avg_price=150.0,
+                    current_price=155.0,
+                ),
+            ]
+        )
+
+        before = datetime.utcnow()
+        tracker = _make_tracker(adapter, risk, order_mgr)
+        await tracker.restore_from_exchange(factory)
+        after = datetime.utcnow()
+
+        # opened_at should be None in memory (no order found)
+        assert tracker._tracked["AAPL"].opened_at is None
+
+        # DB record should use utcnow() fallback
+        record = await _get_position(factory, "AAPL")
+        assert record.opened_at is not None
+        assert before <= record.opened_at <= after
+
+        await engine.dispose()
+
+    @pytest.mark.asyncio
+    async def test_restore_ignores_paper_orders_for_opened_at(self, adapter, risk, order_mgr):
+        """Paper BUY orders should NOT be used for opened_at calculation."""
+        engine = create_async_engine(
+            "sqlite+aiosqlite://",
+            poolclass=StaticPool,
+            connect_args={"check_same_thread": False},
+        )
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+
+        paper_time = datetime(2025, 12, 1, 8, 0, 0)  # earlier but paper
+        live_time = datetime(2026, 1, 15, 10, 0, 0)  # later but live
+        async with factory() as session:
+            session.add(
+                Order(
+                    symbol="AAPL",
+                    exchange="NASD",
+                    side="BUY",
+                    order_type="market",
+                    quantity=38,
+                    price=145.0,
+                    filled_quantity=38,
+                    filled_price=145.0,
+                    status="filled",
+                    strategy_name="paper_strategy",
+                    is_paper=True,
+                    market="US",
+                    created_at=paper_time,
+                )
+            )
+            session.add(
+                Order(
+                    symbol="AAPL",
+                    exchange="NASD",
+                    side="BUY",
+                    order_type="limit",
+                    quantity=42,
+                    price=150.0,
+                    filled_quantity=42,
+                    filled_price=150.0,
+                    status="filled",
+                    strategy_name="trend_following",
+                    is_paper=False,
+                    market="US",
+                    created_at=live_time,
+                )
+            )
+            await session.commit()
+
+        adapter.fetch_positions = AsyncMock(
+            return_value=[
+                Position(
+                    symbol="AAPL",
+                    exchange="NASD",
+                    quantity=42,
+                    avg_price=150.0,
+                    current_price=155.0,
+                ),
+            ]
+        )
+
+        tracker = _make_tracker(adapter, risk, order_mgr)
+        await tracker.restore_from_exchange(factory)
+
+        # Should use live order time, not paper order time
+        assert tracker._tracked["AAPL"].opened_at == live_time
+
+        record = await _get_position(factory, "AAPL")
+        assert record.opened_at == live_time
+
+        await engine.dispose()
+
+    @pytest.mark.asyncio
+    async def test_upsert_preserves_existing_opened_at(self, adapter, risk, order_mgr, db_factory):
+        """Upserting an existing position should NOT change opened_at."""
+        original_time = datetime(2026, 1, 10, 9, 0, 0)
+
+        # Create tracker and manually set opened_at
+        tracker = _make_tracker(adapter, risk, order_mgr)
+        tracker.track("AAPL", 150.0, 10, strategy="trend", opened_at=original_time)
+        await tracker.sync_to_db(db_factory)
+
+        # Verify original opened_at was stored
+        record = await _get_position(db_factory, "AAPL")
+        assert record.opened_at == original_time
+
+        # Update the position (simulate re-sync)
+        tracker._tracked["AAPL"].quantity = 20
+        tracker._tracked["AAPL"].strategy = "new_strategy"
+        await tracker.sync_to_db(db_factory)
+
+        # opened_at should be unchanged
+        record = await _get_position(db_factory, "AAPL")
+        assert record.quantity == 20
+        assert record.strategy_name == "new_strategy"
+        assert record.opened_at == original_time
+
+    @pytest.mark.asyncio
+    async def test_track_with_opened_at_persists_to_db(self, adapter, risk, order_mgr, db_factory):
+        """track() with opened_at should persist the timestamp to DB."""
+        buy_time = datetime(2026, 2, 1, 14, 30, 0)
+
+        tracker = _make_tracker(adapter, risk, order_mgr)
+        tracker.track("TSLA", 250.0, 20, strategy="momentum", opened_at=buy_time)
+        await tracker.sync_to_db(db_factory)
+
+        record = await _get_position(db_factory, "TSLA")
+        assert record is not None
+        assert record.opened_at == buy_time
+
+    @pytest.mark.asyncio
+    async def test_restore_existing_db_record_preserves_opened_at(
+        self, adapter, risk, order_mgr, db_factory
+    ):
+        """When DB record already exists, restore should preserve its opened_at."""
+        original_time = datetime(2026, 1, 5, 12, 0, 0)
+
+        # Pre-populate DB with a position having a correct opened_at
+        tracker1 = _make_tracker(adapter, risk, order_mgr)
+        tracker1.track("AAPL", 150.0, 10, strategy="trend", opened_at=original_time)
+        await tracker1.sync_to_db(db_factory)
+
+        record_before = await _get_position(db_factory, "AAPL")
+        assert record_before.opened_at == original_time
+
+        # Now restore from exchange (simulating restart)
+        adapter.fetch_positions = AsyncMock(
+            return_value=[
+                Position(
+                    symbol="AAPL",
+                    exchange="NASD",
+                    quantity=10,
+                    avg_price=150.0,
+                    current_price=155.0,
+                ),
+            ]
+        )
+
+        tracker2 = _make_tracker(adapter, risk, order_mgr)
+        await tracker2.restore_from_exchange(db_factory)
+
+        # DB record's opened_at should still be the original time
+        # (upsert update path does not touch opened_at)
+        record_after = await _get_position(db_factory, "AAPL")
+        assert record_after.opened_at == original_time
