@@ -26,6 +26,10 @@ fredapi>=0.5.0
 # AI / LLM
 anthropic>=0.40.0
 google-genai>=1.0.0
+mcp[cli]>=1.0.0
+
+# MCP / HTTP
+httpx>=0.27.0
 
 # Scheduling
 apscheduler>=3.10.0
@@ -40,6 +44,9 @@ orjson>=3.10.0
 
 # Logging
 structlog>=24.0.0
+
+# System monitoring
+psutil>=5.9.0
 
 # Utilities
 websockets>=12.0
