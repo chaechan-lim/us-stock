@@ -1,4 +1,5 @@
 """Multi-provider LLM client with fallback chain, retry logic, and daily budget."""
+
 from __future__ import annotations
 
 import asyncio
@@ -8,17 +9,40 @@ from typing import Any
 import structlog
 
 from services.llm.providers import (
-    LLMResponse,
-    ToolCall,
     AnthropicProvider,
     GeminiProvider,
     LLMProvider,
+    LLMResponse,
+    ToolCall,
 )
 
 logger = structlog.get_logger(__name__)
 
 # Re-export for convenience
 __all__ = ["LLMClient", "LLMResponse", "ToolCall"]
+
+# Rate-limit / quota-exceeded error patterns
+_RATE_LIMIT_PATTERNS = (
+    "429",
+    "resource_exhausted",
+    "rate_limit",
+    "rate limit",
+    "quota",
+    "too many requests",
+)
+
+# Default cooldown for quota-exceeded providers (1 hour in seconds)
+_DEFAULT_COOLDOWN_SECONDS = 3600
+
+
+def _is_rate_limit_error(error: Exception) -> bool:
+    """Check if an exception indicates a rate-limit or quota-exceeded error.
+
+    Detects HTTP 429, gRPC RESOURCE_EXHAUSTED, and common quota error messages
+    from both Anthropic and Google Gemini APIs.
+    """
+    error_str = str(error).lower()
+    return any(pattern in error_str for pattern in _RATE_LIMIT_PATTERNS)
 
 
 class LLMClient:
@@ -27,9 +51,12 @@ class LLMClient:
     Fallback chain: primary model -> fallback model -> gemini model.
     Each model gets multiple retry attempts before moving to the next.
     Includes daily call budget to prevent runaway costs.
+
+    Rate-limit aware: quota-exceeded errors skip retries and trigger
+    provider cooldown to avoid wasting time on known-failed providers.
     """
 
-    def __init__(self, config):
+    def __init__(self, config: Any) -> None:
         """Initialize from LLMConfig.
 
         Parameters
@@ -46,6 +73,9 @@ class LLMClient:
         self._daily_calls = 0
         self._daily_reset_date = ""
         self._max_daily_calls = getattr(config, "max_daily_calls", 0)
+
+        # Per-provider cooldown tracking: model -> expiry timestamp
+        self._provider_cooldowns: dict[str, float] = {}
 
         # Lazy-init providers
         if config.api_key:
@@ -91,34 +121,72 @@ class LLMClient:
             return self._max_daily_calls
         return max(0, self._max_daily_calls - self._daily_calls)
 
+    def _is_provider_cooled_down(self, model: str) -> bool:
+        """Check if a provider is in cooldown (quota-exceeded recently)."""
+        expiry = self._provider_cooldowns.get(model)
+        if expiry is None:
+            return False
+        if time.monotonic() >= expiry:
+            # Cooldown expired, remove it
+            del self._provider_cooldowns[model]
+            return False
+        return True
+
+    def _set_provider_cooldown(
+        self,
+        model: str,
+        seconds: float = _DEFAULT_COOLDOWN_SECONDS,
+    ) -> None:
+        """Set cooldown for a provider after quota-exceeded error."""
+        self._provider_cooldowns[model] = time.monotonic() + seconds
+        logger.warning(
+            "llm_provider_cooldown_set",
+            model=model,
+            cooldown_seconds=seconds,
+        )
+
     def _resolve_provider(self, model: str) -> LLMProvider | None:
         if model.startswith("gemini"):
             return self._gemini
         return self._anthropic
 
-    def _build_fallback_chain(self, model_override: str | None = None) -> list[tuple[str, LLMProvider]]:
+    def _build_fallback_chain(
+        self,
+        model_override: str | None = None,
+    ) -> list[tuple[str, LLMProvider]]:
         """Build [(model_name, provider), ...] in fallback order.
 
-        Cost-aware: Haiku -> Gemini (free) -> Sonnet (expensive, last resort).
-        When model_override is set, only use that model + Gemini fallback.
+        Cost-aware ordering with deduplication:
+        - Default: Haiku -> Gemini (free) -> Sonnet (expensive, last resort)
+        - With model_override: override -> Haiku -> Gemini -> Sonnet
+          (override is primary, others are fallbacks; duplicates removed)
         """
-        chain = []
+        chain: list[tuple[str, LLMProvider]] = []
+        seen_models: set[str] = set()
 
+        def _add(model: str, provider: LLMProvider | None) -> None:
+            if provider and model not in seen_models:
+                chain.append((model, provider))
+                seen_models.add(model)
+
+        # Primary model
         primary = model_override or self._config.model
-        provider = self._resolve_provider(primary)
-        if provider:
-            chain.append((primary, provider))
+        _add(primary, self._resolve_provider(primary))
 
-        # Gemini before Sonnet (free tier vs expensive)
+        # When model_override is set, add primary Anthropic model (Haiku) as fallback
+        if model_override and self._config.model:
+            _add(self._config.model, self._resolve_provider(self._config.model))
+
+        # Gemini fallback (free tier)
         gemini_model = getattr(self._config, "gemini_fallback_model", "")
         if gemini_model and self._gemini:
-            chain.append((gemini_model, self._gemini))
+            _add(gemini_model, self._gemini)
 
-        # Sonnet as last resort only (13x more expensive than Haiku)
-        if not model_override and self._config.fallback_model:
+        # Sonnet as last resort (13x more expensive than Haiku)
+        if self._config.fallback_model:
             p = self._resolve_provider(self._config.fallback_model)
             if p:
-                chain.append((self._config.fallback_model, p))
+                _add(self._config.fallback_model, p)
 
         return chain
 
@@ -208,6 +276,14 @@ class LLMClient:
         last_error: Exception | None = None
 
         for model, provider in chain:
+            # Skip providers in cooldown (quota-exceeded recently)
+            if self._is_provider_cooled_down(model):
+                logger.debug(
+                    "llm_provider_in_cooldown",
+                    model=model,
+                )
+                continue
+
             for attempt in range(retries):
                 try:
                     response = await provider.create(
@@ -228,7 +304,18 @@ class LLMClient:
                     return response
                 except Exception as e:
                     last_error = e
-                    wait = 2 ** attempt * 2  # 2s, 4s, 8s
+
+                    # Rate-limit / quota errors: skip retries, set cooldown
+                    if _is_rate_limit_error(e):
+                        logger.warning(
+                            "llm_rate_limit_hit",
+                            model=model,
+                            error=str(e)[:200],
+                        )
+                        self._set_provider_cooldown(model)
+                        break  # Skip remaining retries, move to next provider
+
+                    wait = 2**attempt * 2  # 2s, 4s, 8s
                     logger.warning(
                         "llm_call_failed",
                         model=model,
