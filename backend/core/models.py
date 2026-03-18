@@ -40,6 +40,7 @@ class Order(Base):
     buy_strategy = Column(String(50))  # original buy strategy (for SELL attribution)
     kis_order_id = Column(String(50))
     pnl = Column(Float)
+    pnl_pct = Column(Float)  # PnL as percentage (e.g. 5.2 = 5.2%)
     is_paper = Column(Boolean, nullable=False, default=False)  # paper vs live order
     session = Column(
         String(20), nullable=True, default="regular"

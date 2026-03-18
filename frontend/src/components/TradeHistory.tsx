@@ -41,7 +41,7 @@ export default function TradeHistory() {
         <div className="text-gray-500 text-sm">No trades recorded yet.</div>
       ) : (
         <div className="bg-gray-900 rounded-lg p-4 overflow-x-auto">
-          <table className="w-full text-sm min-w-[650px]">
+          <table className="w-full text-sm min-w-[750px]">
             <thead className="text-gray-400 border-b border-gray-700">
               <tr>
                 <th className="text-left py-2 px-3">Time</th>
@@ -52,6 +52,7 @@ export default function TradeHistory() {
                 <th className="text-left py-2 px-3">Strategy</th>
                 <th className="text-center py-2 px-3">Status</th>
                 <th className="text-right py-2 px-3">P&L</th>
+                <th className="text-right py-2 px-3">P&L %</th>
               </tr>
             </thead>
             <tbody>
@@ -103,6 +104,13 @@ export default function TradeHistory() {
                   })}>
                     {t.pnl != null ? formatCurrency(t.pnl, t.market === 'KR' ? 'KRW' : 'USD') : '-'}
                   </td>
+                  <td className={clsx('py-2 px-3 text-right text-xs', {
+                    'text-green-400': t.pnl_pct != null && t.pnl_pct > 0,
+                    'text-red-400': t.pnl_pct != null && t.pnl_pct < 0,
+                    'text-gray-500': t.pnl_pct == null,
+                  })}>
+                    {t.pnl_pct != null ? `${t.pnl_pct >= 0 ? '+' : ''}${t.pnl_pct.toFixed(2)}%` : '-'}
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -123,9 +131,16 @@ function PeriodCard({ label, data }: { label: string; data: PeriodSummary }) {
         {data.trades === 0 ? '-' : `${pnlSign}${formatCurrency(data.pnl, 'KRW')}`}
       </div>
       {data.trades > 0 && (
-        <div className="text-xs text-gray-500 mt-0.5">
-          {data.wins}W {data.losses}L ({data.win_rate.toFixed(0)}%) / {data.trades} trades
-        </div>
+        <>
+          {data.pnl_pct != null && (
+            <div className={clsx('text-xs mt-0.5', data.pnl_pct >= 0 ? 'text-green-400/70' : 'text-red-400/70')}>
+              avg {data.pnl_pct >= 0 ? '+' : ''}{data.pnl_pct.toFixed(2)}%
+            </div>
+          )}
+          <div className="text-xs text-gray-500 mt-0.5">
+            {data.wins}W {data.losses}L ({data.win_rate.toFixed(0)}%) / {data.trades} trades
+          </div>
+        </>
       )}
     </div>
   )

@@ -329,10 +329,13 @@ class OrderManager:
                 )
             # Calculate PnL if entry_price is known
             pnl = None
+            pnl_pct = None
             if entry_price:
                 sell_price = result.filled_price or price or 0
                 sell_qty = filled_qty or quantity
                 pnl = round((sell_price - entry_price) * sell_qty, 2)
+                if entry_price > 0:
+                    pnl_pct = round((sell_price - entry_price) / entry_price * 100, 2)
 
             if _trade_recorder:
                 _trade_recorder(
@@ -349,6 +352,7 @@ class OrderManager:
                         "status": result.status,
                         "buy_strategy": buy_strategy,
                         "pnl": pnl,
+                        "pnl_pct": pnl_pct,
                         "created_at": order.created_at,
                         "market": self._market,
                         "exchange": exchange,

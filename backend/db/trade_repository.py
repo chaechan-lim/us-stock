@@ -33,6 +33,7 @@ class TradeRepository:
         buy_strategy: str = "",
         kis_order_id: str = "",
         pnl: float | None = None,
+        pnl_pct: float | None = None,
         exchange: str = "NASD",
         market: str = "US",
         session: str = "regular",
@@ -58,6 +59,8 @@ class TradeRepository:
                     existing.status = status
                 if pnl is not None:
                     existing.pnl = pnl
+                if pnl_pct is not None:
+                    existing.pnl_pct = pnl_pct
                 if buy_strategy:
                     existing.buy_strategy = buy_strategy
                 await self._session.commit()
@@ -83,6 +86,7 @@ class TradeRepository:
             buy_strategy=buy_strategy or None,
             kis_order_id=kis_order_id,
             pnl=pnl,
+            pnl_pct=pnl_pct,
             is_paper=is_paper,
             market=market,
             session=session,
