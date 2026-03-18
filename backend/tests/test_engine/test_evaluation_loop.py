@@ -1469,3 +1469,375 @@ class TestExchangePositionHeldEvaluation:
 
         assert "TSLA" in evaluated
         assert "AAPL" in evaluated
+
+
+class TestHeldPositionBuyToHoldRemap:
+    """Test that held positions remap BUY→HOLD so SELL signals can flow through.
+
+    This is the fix for STOCK-18: strategy-based SELL signals were being drowned
+    out by BUY signals for held positions, preventing any position exits.
+    """
+
+    @pytest.fixture
+    def multi_strategy_loop(self, mock_adapter, mock_market_data):
+        """Create eval loop with multiple strategies that return different signals."""
+        from data.indicator_service import IndicatorService
+        from strategies.combiner import SignalCombiner
+        from engine.position_tracker import PositionTracker
+
+        registry = MagicMock()
+        risk = RiskManager()
+        order_mgr = OrderManager(adapter=mock_adapter, risk_manager=risk)
+        position_tracker = MagicMock(spec=PositionTracker)
+        position_tracker.tracked_symbols = ["HELD_STOCK"]
+        position_tracker.get_buy_strategy.return_value = "trend_following"
+
+        loop = EvaluationLoop(
+            adapter=mock_adapter,
+            market_data=mock_market_data,
+            indicator_svc=IndicatorService(),
+            registry=registry,
+            combiner=SignalCombiner(),
+            order_manager=order_mgr,
+            risk_manager=risk,
+            watchlist=["NEW_STOCK"],
+            position_tracker=position_tracker,
+        )
+        return loop, registry, position_tracker
+
+    async def test_held_position_sell_when_strategies_detect_exit(
+        self,
+        multi_strategy_loop,
+        mock_adapter,
+        mock_market_data,
+    ):
+        """Held position gets SELL when enough strategies detect exit conditions.
+
+        Without BUY→HOLD remap, the 5 BUY signals would drown out 3 SELL signals.
+        With the remap, only SELL signals are active → SELL wins.
+        """
+        loop, registry, tracker = multi_strategy_loop
+
+        # Setup position data
+        mock_market_data.get_positions.return_value = [
+            Position(symbol="HELD_STOCK", exchange="NASD", quantity=10, avg_price=100.0),
+        ]
+        mock_adapter.create_sell_order = AsyncMock(
+            return_value=OrderResult(
+                order_id="O2",
+                symbol="HELD_STOCK",
+                side="SELL",
+                order_type="limit",
+                quantity=10,
+                price=105.0,
+                status="filled",
+                filled_price=105.0,
+            )
+        )
+
+        # Create strategies: 5 BUY + 3 SELL (for held stock)
+        strategies = []
+        signal_configs = [
+            ("trend_following", SignalType.BUY, 0.8),
+            ("dual_momentum", SignalType.BUY, 0.7),
+            ("donchian_breakout", SignalType.BUY, 0.7),
+            ("cis_momentum", SignalType.BUY, 0.6),
+            ("larry_williams", SignalType.BUY, 0.6),
+            ("supertrend", SignalType.SELL, 0.7),
+            ("rsi_divergence", SignalType.SELL, 0.65),
+            ("bnf_deviation", SignalType.SELL, 0.6),
+        ]
+        for name, sig_type, conf in signal_configs:
+            s = AsyncMock()
+            s.name = name
+            s.analyze = AsyncMock(
+                return_value=Signal(
+                    signal_type=sig_type,
+                    confidence=conf,
+                    strategy_name=name,
+                    reason="test",
+                )
+            )
+            strategies.append(s)
+
+        registry.get_enabled.return_value = strategies
+        registry.get_profile_weights.return_value = {
+            "trend_following": 0.15,
+            "dual_momentum": 0.10,
+            "donchian_breakout": 0.10,
+            "cis_momentum": 0.10,
+            "larry_williams": 0.10,
+            "supertrend": 0.10,
+            "rsi_divergence": 0.15,
+            "bnf_deviation": 0.10,
+        }
+
+        await loop._evaluate_all()
+
+        # The held stock should receive a SELL order
+        mock_adapter.create_sell_order.assert_called_once()
+
+    async def test_non_held_position_not_remapped(
+        self,
+        multi_strategy_loop,
+        mock_adapter,
+        mock_market_data,
+    ):
+        """Non-held positions (watchlist) should NOT have BUY remapped to HOLD."""
+        loop, registry, tracker = multi_strategy_loop
+
+        # Only non-held stock in watchlist
+        mock_market_data.get_positions.return_value = []
+
+        strategy = AsyncMock()
+        strategy.name = "trend_following"
+        strategy.analyze = AsyncMock(
+            return_value=Signal(
+                signal_type=SignalType.BUY,
+                confidence=0.8,
+                strategy_name="trend_following",
+                reason="strong buy",
+            )
+        )
+        registry.get_enabled.return_value = [strategy]
+        registry.get_profile_weights.return_value = {"trend_following": 1.0}
+
+        await loop._evaluate_all()
+
+        # NEW_STOCK should get a BUY order (not remapped to HOLD)
+        mock_adapter.create_buy_order.assert_called_once()
+
+    async def test_held_single_sell_blocked_by_active_ratio(
+        self,
+        multi_strategy_loop,
+        mock_adapter,
+        mock_market_data,
+    ):
+        """Single weak SELL should be blocked by exit_min_active_ratio=0.15."""
+        loop, registry, tracker = multi_strategy_loop
+
+        mock_market_data.get_positions.return_value = [
+            Position(symbol="HELD_STOCK", exchange="NASD", quantity=10, avg_price=100.0),
+        ]
+
+        # 1 SELL + 9 BUY (which become HOLD) → active_ratio ≈ 10% < 15%
+        strategies = []
+        names = [
+            "trend_following", "dual_momentum", "donchian_breakout",
+            "cis_momentum", "larry_williams", "supertrend",
+            "rsi_divergence", "bnf_deviation", "bollinger_squeeze",
+            "macd_histogram",
+        ]
+        for i, name in enumerate(names):
+            s = AsyncMock()
+            s.name = name
+            # Only the first one is SELL, rest are BUY (→ remapped to HOLD)
+            sig_type = SignalType.SELL if i == 0 else SignalType.BUY
+            s.analyze = AsyncMock(
+                return_value=Signal(
+                    signal_type=sig_type,
+                    confidence=0.7,
+                    strategy_name=name,
+                    reason="test",
+                )
+            )
+            strategies.append(s)
+
+        registry.get_enabled.return_value = strategies
+        registry.get_profile_weights.return_value = {n: 0.10 for n in names}
+
+        await loop._evaluate_all()
+
+        # Single sell should NOT trigger because active_ratio is too low
+        mock_adapter.create_sell_order = AsyncMock()
+        assert not mock_adapter.create_sell_order.called
+
+    async def test_evaluate_symbol_with_is_held_true_sells(
+        self,
+        mock_adapter,
+        mock_market_data,
+    ):
+        """evaluate_symbol(is_held=True) remaps BUY→HOLD so SELL wins."""
+        from data.indicator_service import IndicatorService
+        from strategies.combiner import SignalCombiner
+
+        registry = MagicMock()
+        risk = RiskManager()
+        order_mgr = OrderManager(adapter=mock_adapter, risk_manager=risk)
+
+        loop = EvaluationLoop(
+            adapter=mock_adapter,
+            market_data=mock_market_data,
+            indicator_svc=IndicatorService(),
+            registry=registry,
+            combiner=SignalCombiner(),
+            order_manager=order_mgr,
+            risk_manager=risk,
+            watchlist=["AAPL"],
+        )
+
+        # 2 strategies: 1 SELL, 1 BUY
+        sell_strategy = AsyncMock()
+        sell_strategy.name = "supertrend"
+        sell_strategy.analyze = AsyncMock(
+            return_value=Signal(
+                signal_type=SignalType.SELL,
+                confidence=0.7,
+                strategy_name="supertrend",
+                reason="sell",
+            )
+        )
+        buy_strategy = AsyncMock()
+        buy_strategy.name = "trend_following"
+        buy_strategy.analyze = AsyncMock(
+            return_value=Signal(
+                signal_type=SignalType.BUY,
+                confidence=0.8,
+                strategy_name="trend_following",
+                reason="buy",
+            )
+        )
+        registry.get_enabled.return_value = [sell_strategy, buy_strategy]
+        registry.get_profile_weights.return_value = {
+            "supertrend": 0.50,
+            "trend_following": 0.50,
+        }
+
+        mock_market_data.get_positions.return_value = [
+            Position(symbol="AAPL", exchange="NASD", quantity=10, avg_price=140.0),
+        ]
+        mock_adapter.create_sell_order = AsyncMock(
+            return_value=OrderResult(
+                order_id="O2",
+                symbol="AAPL",
+                side="SELL",
+                order_type="limit",
+                quantity=10,
+                price=150.0,
+                status="filled",
+                filled_price=150.0,
+            )
+        )
+
+        # With is_held=True: BUY remapped to HOLD → SELL wins
+        await loop.evaluate_symbol("AAPL", is_held=True)
+        mock_adapter.create_sell_order.assert_called_once()
+        mock_adapter.create_buy_order.assert_not_called()
+
+    async def test_evaluate_symbol_with_is_held_false_buys(
+        self,
+        mock_adapter,
+        mock_market_data,
+    ):
+        """evaluate_symbol(is_held=False) does NOT remap, so BUY wins."""
+        from data.indicator_service import IndicatorService
+        from strategies.combiner import SignalCombiner
+
+        registry = MagicMock()
+        risk = RiskManager()
+        order_mgr = OrderManager(adapter=mock_adapter, risk_manager=risk)
+
+        loop = EvaluationLoop(
+            adapter=mock_adapter,
+            market_data=mock_market_data,
+            indicator_svc=IndicatorService(),
+            registry=registry,
+            combiner=SignalCombiner(),
+            order_manager=order_mgr,
+            risk_manager=risk,
+            watchlist=["AAPL"],
+        )
+
+        # 2 strategies: 1 SELL, 1 BUY — BUY has higher confidence
+        sell_strategy = AsyncMock()
+        sell_strategy.name = "supertrend"
+        sell_strategy.analyze = AsyncMock(
+            return_value=Signal(
+                signal_type=SignalType.SELL,
+                confidence=0.7,
+                strategy_name="supertrend",
+                reason="sell",
+            )
+        )
+        buy_strategy = AsyncMock()
+        buy_strategy.name = "trend_following"
+        buy_strategy.analyze = AsyncMock(
+            return_value=Signal(
+                signal_type=SignalType.BUY,
+                confidence=0.8,
+                strategy_name="trend_following",
+                reason="buy",
+            )
+        )
+        registry.get_enabled.return_value = [sell_strategy, buy_strategy]
+        registry.get_profile_weights.return_value = {
+            "supertrend": 0.50,
+            "trend_following": 0.50,
+        }
+
+        # No positions held → BUY won't be blocked
+        mock_market_data.get_positions.return_value = []
+
+        # Without is_held: BUY wins (equal weight, higher confidence)
+        await loop.evaluate_symbol("AAPL", is_held=False)
+        mock_adapter.create_buy_order.assert_called_once()
+
+    async def test_mixed_held_and_non_held_in_same_cycle(
+        self,
+        multi_strategy_loop,
+        mock_adapter,
+        mock_market_data,
+    ):
+        """In same evaluation cycle, held positions get remap but watchlist doesn't."""
+        loop, registry, tracker = multi_strategy_loop
+
+        # HELD_STOCK is held, NEW_STOCK is watchlist only
+        mock_market_data.get_positions.return_value = [
+            Position(symbol="HELD_STOCK", exchange="NASD", quantity=10, avg_price=100.0),
+        ]
+        mock_adapter.create_sell_order = AsyncMock(
+            return_value=OrderResult(
+                order_id="O2",
+                symbol="HELD_STOCK",
+                side="SELL",
+                order_type="limit",
+                quantity=10,
+                price=105.0,
+                status="filled",
+                filled_price=105.0,
+            )
+        )
+
+        # Both stocks get: 1 BUY + 1 SELL from strategies
+        strategy_sell = AsyncMock()
+        strategy_sell.name = "supertrend"
+        strategy_sell.analyze = AsyncMock(
+            return_value=Signal(
+                signal_type=SignalType.SELL,
+                confidence=0.7,
+                strategy_name="supertrend",
+                reason="sell",
+            )
+        )
+        strategy_buy = AsyncMock()
+        strategy_buy.name = "trend_following"
+        strategy_buy.analyze = AsyncMock(
+            return_value=Signal(
+                signal_type=SignalType.BUY,
+                confidence=0.8,
+                strategy_name="trend_following",
+                reason="buy",
+            )
+        )
+        registry.get_enabled.return_value = [strategy_sell, strategy_buy]
+        registry.get_profile_weights.return_value = {
+            "supertrend": 0.50,
+            "trend_following": 0.50,
+        }
+
+        await loop._evaluate_all()
+
+        # HELD_STOCK: BUY→HOLD remap → only SELL active → SELL executes
+        mock_adapter.create_sell_order.assert_called_once()
+        # NEW_STOCK: no remap → BUY wins (higher conf) → BUY executes
+        mock_adapter.create_buy_order.assert_called_once()

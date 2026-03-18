@@ -21,8 +21,9 @@ import pandas as pd
 from exchange.base import ExchangeAdapter
 from data.market_data_service import MarketDataService
 from data.indicator_service import IndicatorService
-from strategies.registry import StrategyRegistry
+from strategies.base import Signal
 from strategies.combiner import SignalCombiner
+from strategies.registry import StrategyRegistry
 from engine.order_manager import OrderManager
 from engine.risk_manager import RiskManager
 from engine.stock_classifier import StockClassifier
@@ -186,8 +187,14 @@ class EvaluationLoop:
         self._running = False
         logger.info("Evaluation loop stopped")
 
-    async def evaluate_symbol(self, symbol: str) -> None:
-        """Evaluate a single symbol through all strategies with per-stock weights."""
+    async def evaluate_symbol(self, symbol: str, is_held: bool = False) -> None:
+        """Evaluate a single symbol through all strategies with per-stock weights.
+
+        Args:
+            symbol: Stock ticker symbol.
+            is_held: If True, remap BUY signals to HOLD before combining
+                so that the combiner evaluates SELL vs HOLD (exit decision).
+        """
         try:
             # Fetch OHLCV data
             df = await self._market_data.get_ohlcv(symbol, limit=250)
@@ -202,7 +209,7 @@ class EvaluationLoop:
 
             # Run all enabled strategies
             strategies = self._registry.get_enabled()
-            signals = []
+            signals: list[Signal] = []
             for strategy in strategies:
                 try:
                     signal = await strategy.analyze(df, symbol)
@@ -214,18 +221,38 @@ class EvaluationLoop:
             market_weights = self._registry.get_profile_weights(self._market_state)
             weights = self._adaptive.get_weights(symbol, market_weights)
 
+            # For held positions, remap BUY→HOLD for exit evaluation
+            if is_held:
+                signals = [
+                    Signal(
+                        signal_type=SignalType.HOLD,
+                        confidence=s.confidence,
+                        strategy_name=s.strategy_name,
+                        reason=s.reason,
+                        indicators=s.indicators,
+                    )
+                    if s.signal_type == SignalType.BUY
+                    else s
+                    for s in signals
+                ]
+
             # Combine signals with per-stock weights
-            combined = self._combiner.combine(signals, weights)
+            combined = self._combiner.combine(
+                signals,
+                weights,
+                min_active_ratio=0.15 if is_held else None,
+            )
 
             # Log weight selection
             category = self._adaptive.get_category(symbol)
             if category:
                 logger.debug(
-                    "%s [%s] signal=%s conf=%.2f",
+                    "%s [%s] signal=%s conf=%.2f (held=%s)",
                     symbol,
                     category.value,
                     combined.signal_type.value,
                     combined.confidence,
+                    is_held,
                 )
 
             # Execute
@@ -319,16 +346,52 @@ class EvaluationLoop:
 
                 market_weights = self._registry.get_profile_weights(self._market_state)
                 weights = self._adaptive.get_weights(symbol, market_weights)
-                combined = self._combiner.combine(signals, weights)
+
+                # For held positions, remap BUY signals to HOLD before combining.
+                # Rationale: we already own the stock, so BUY signals (meaning
+                # "this stock looks good") are not actionable — the relevant
+                # question is SELL vs HOLD (exit or keep).  Without remapping,
+                # BUY votes from trend-following strategies drown out SELL votes,
+                # making strategy-based exits nearly impossible.
+                is_held = symbol in held
+                if is_held:
+                    n_remapped = sum(
+                        1 for s in signals if s.signal_type == SignalType.BUY
+                    )
+                    if n_remapped:
+                        signals = [
+                            Signal(
+                                signal_type=SignalType.HOLD,
+                                confidence=s.confidence,
+                                strategy_name=s.strategy_name,
+                                reason=s.reason,
+                                indicators=s.indicators,
+                            )
+                            if s.signal_type == SignalType.BUY
+                            else s
+                            for s in signals
+                        ]
+                        logger.debug(
+                            "Held %s: remapped %d BUY→HOLD for exit evaluation",
+                            symbol,
+                            n_remapped,
+                        )
+
+                combined = self._combiner.combine(
+                    signals,
+                    weights,
+                    min_active_ratio=0.15 if is_held else None,
+                )
 
                 category = self._adaptive.get_category(symbol)
                 if category:
                     logger.debug(
-                        "%s [%s] signal=%s conf=%.2f",
+                        "%s [%s] signal=%s conf=%.2f (held=%s)",
                         symbol,
                         category.value,
                         combined.signal_type.value,
                         combined.confidence,
+                        is_held,
                     )
 
                 # Log signal for frontend visibility

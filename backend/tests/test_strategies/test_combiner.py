@@ -363,3 +363,211 @@ class TestConsensusSignalCombiner:
         result = combiner.combine(signals, weights)
         assert result.signal_type == SignalType.BUY
         assert result.confidence > 0.5
+
+
+class TestMinActiveRatioOverride:
+    """Tests for per-call min_active_ratio override (used for exit evaluation)."""
+
+    def test_override_raises_active_ratio_threshold(self):
+        """Override min_active_ratio blocks signal when too few strategies are active."""
+        combiner = SignalCombiner(min_active_ratio=0.05)
+        # 1 SELL out of 5 total → active_ratio = 0.20 / 1.0 = 20%
+        signals = [
+            _signal("a", SignalType.SELL, 0.7),
+            _signal("b", SignalType.HOLD, 0.5),
+            _signal("c", SignalType.HOLD, 0.5),
+            _signal("d", SignalType.HOLD, 0.5),
+            _signal("e", SignalType.HOLD, 0.5),
+        ]
+        weights = {"a": 0.20, "b": 0.20, "c": 0.20, "d": 0.20, "e": 0.20}
+
+        # With default min_active_ratio=0.05: 20% > 5% → SELL
+        result = combiner.combine(signals, weights)
+        assert result.signal_type == SignalType.SELL
+
+        # With override min_active_ratio=0.25: 20% < 25% → HOLD
+        result = combiner.combine(signals, weights, min_active_ratio=0.25)
+        assert result.signal_type == SignalType.HOLD
+        assert "Active ratio too low" in result.reason
+
+    def test_override_none_uses_instance_default(self):
+        """Passing None for override uses the instance-level default."""
+        combiner = SignalCombiner(min_active_ratio=0.50)
+        signals = [
+            _signal("a", SignalType.SELL, 0.7),
+            _signal("b", SignalType.HOLD, 0.5),
+            _signal("c", SignalType.HOLD, 0.5),
+        ]
+        weights = {"a": 0.33, "b": 0.33, "c": 0.34}
+
+        # active_ratio = 0.33 / 1.0 = 33%, below instance default 50%
+        result = combiner.combine(signals, weights, min_active_ratio=None)
+        assert result.signal_type == SignalType.HOLD
+
+    def test_override_allows_signal_with_lower_threshold(self):
+        """Override with lower threshold allows signal through."""
+        combiner = SignalCombiner(min_active_ratio=0.50)
+        signals = [
+            _signal("a", SignalType.SELL, 0.7),
+            _signal("b", SignalType.HOLD, 0.5),
+            _signal("c", SignalType.HOLD, 0.5),
+        ]
+        weights = {"a": 0.33, "b": 0.33, "c": 0.34}
+
+        # Instance default blocks (33% < 50%), but override 0.10 allows it
+        result = combiner.combine(signals, weights, min_active_ratio=0.10)
+        assert result.signal_type == SignalType.SELL
+
+    def test_exit_mode_sell_only_signals(self):
+        """Simulates held-position exit: only SELL and HOLD signals (BUY remapped).
+
+        This models the evaluation_loop behavior where BUY signals are
+        remapped to HOLD for held positions before combining.
+        """
+        combiner = SignalCombiner(consensus_config=_CONSENSUS_CFG)
+        # Scenario: 3 strategies vote SELL, rest are HOLD (originally BUY, remapped)
+        signals = [
+            # Original BUY signals, remapped to HOLD
+            _signal("trend_following", SignalType.HOLD, 0.8),
+            _signal("dual_momentum", SignalType.HOLD, 0.7),
+            _signal("donchian_breakout", SignalType.HOLD, 0.7),
+            _signal("cis_momentum", SignalType.HOLD, 0.6),
+            _signal("larry_williams", SignalType.HOLD, 0.6),
+            # Actual SELL signals
+            _signal("supertrend", SignalType.SELL, 0.7),
+            _signal("rsi_divergence", SignalType.SELL, 0.65),
+            _signal("bnf_deviation", SignalType.SELL, 0.6),
+            # More HOLD
+            _signal("bollinger_squeeze", SignalType.HOLD, 0.5),
+            _signal("macd_histogram", SignalType.HOLD, 0.5),
+        ]
+        weights = {
+            "trend_following": 0.15,
+            "dual_momentum": 0.10,
+            "donchian_breakout": 0.10,
+            "cis_momentum": 0.10,
+            "larry_williams": 0.10,
+            "supertrend": 0.10,
+            "rsi_divergence": 0.15,
+            "bnf_deviation": 0.10,
+            "bollinger_squeeze": 0.05,
+            "macd_histogram": 0.05,
+        }
+
+        # With min_active_ratio=0.15: active = SELL weight 0.35, total 1.0
+        # active_ratio = 0.35 > 0.15 ✓
+        # sell_norm = sell_score / 0.35, buy_norm = 0 → SELL wins
+        result = combiner.combine(signals, weights, min_active_ratio=0.15)
+        assert result.signal_type == SignalType.SELL
+        assert result.confidence > 0.5
+
+    def test_exit_mode_single_sell_blocked_by_active_ratio(self):
+        """Single SELL signal should be blocked by exit min_active_ratio.
+
+        Prevents noise-based exits when only 1 strategy detects exit.
+        """
+        combiner = SignalCombiner()
+        signals = [
+            _signal("supertrend", SignalType.SELL, 0.7),
+            # All others are HOLD (remapped from BUY)
+            _signal("trend_following", SignalType.HOLD, 0.8),
+            _signal("dual_momentum", SignalType.HOLD, 0.7),
+            _signal("donchian_breakout", SignalType.HOLD, 0.7),
+            _signal("rsi_divergence", SignalType.HOLD, 0.6),
+            _signal("bnf_deviation", SignalType.HOLD, 0.6),
+            _signal("bollinger_squeeze", SignalType.HOLD, 0.5),
+            _signal("macd_histogram", SignalType.HOLD, 0.5),
+            _signal("cis_momentum", SignalType.HOLD, 0.6),
+            _signal("larry_williams", SignalType.HOLD, 0.6),
+        ]
+        weights = {
+            "supertrend": 0.10,
+            "trend_following": 0.15,
+            "dual_momentum": 0.10,
+            "donchian_breakout": 0.10,
+            "rsi_divergence": 0.10,
+            "bnf_deviation": 0.10,
+            "bollinger_squeeze": 0.10,
+            "macd_histogram": 0.05,
+            "cis_momentum": 0.10,
+            "larry_williams": 0.10,
+        }
+
+        # active_ratio = 0.10 / 1.0 = 10% < 15% → HOLD
+        result = combiner.combine(signals, weights, min_active_ratio=0.15)
+        assert result.signal_type == SignalType.HOLD
+        assert "Active ratio too low" in result.reason
+
+    def test_exit_mode_two_sells_pass_active_ratio(self):
+        """Two SELL signals should pass 15% exit threshold with typical weights."""
+        combiner = SignalCombiner()
+        signals = [
+            _signal("supertrend", SignalType.SELL, 0.7),
+            _signal("trend_following", SignalType.SELL, 0.65),
+            # Rest are HOLD (remapped from BUY)
+            _signal("dual_momentum", SignalType.HOLD, 0.7),
+            _signal("donchian_breakout", SignalType.HOLD, 0.7),
+            _signal("rsi_divergence", SignalType.HOLD, 0.6),
+            _signal("bnf_deviation", SignalType.HOLD, 0.6),
+        ]
+        weights = {
+            "supertrend": 0.10,
+            "trend_following": 0.15,
+            "dual_momentum": 0.15,
+            "donchian_breakout": 0.10,
+            "rsi_divergence": 0.15,
+            "bnf_deviation": 0.10,
+        }
+
+        # active_ratio = 0.25 / 0.75 = 33% > 15% → SELL
+        result = combiner.combine(signals, weights, min_active_ratio=0.15)
+        assert result.signal_type == SignalType.SELL
+
+    def test_without_remap_buy_drowns_sell(self):
+        """Demonstrates the original bug: BUY signals drown out SELL for held positions.
+
+        Before the fix, trend strategies emitting BUY for a held position
+        would overpower SELL signals from exit-detecting strategies.
+        """
+        combiner = SignalCombiner()
+        # Realistic scenario: 5 BUY (trend up) vs 3 SELL (exit detected)
+        signals = [
+            _signal("trend_following", SignalType.BUY, 0.8),
+            _signal("dual_momentum", SignalType.BUY, 0.7),
+            _signal("donchian_breakout", SignalType.BUY, 0.7),
+            _signal("cis_momentum", SignalType.BUY, 0.6),
+            _signal("larry_williams", SignalType.BUY, 0.6),
+            _signal("supertrend", SignalType.SELL, 0.7),
+            _signal("rsi_divergence", SignalType.SELL, 0.65),
+            _signal("bnf_deviation", SignalType.SELL, 0.6),
+        ]
+        weights = {
+            "trend_following": 0.15,
+            "dual_momentum": 0.10,
+            "donchian_breakout": 0.10,
+            "cis_momentum": 0.10,
+            "larry_williams": 0.10,
+            "supertrend": 0.10,
+            "rsi_divergence": 0.15,
+            "bnf_deviation": 0.10,
+        }
+
+        # Without remap: BUY wins because more weight on BUY side
+        result_no_remap = combiner.combine(signals, weights)
+        assert result_no_remap.signal_type == SignalType.BUY
+
+        # With remap (BUY→HOLD): only SELL signals are active → SELL wins
+        remapped = [
+            Signal(
+                signal_type=SignalType.HOLD,
+                confidence=s.confidence,
+                strategy_name=s.strategy_name,
+                reason=s.reason,
+                indicators=s.indicators,
+            )
+            if s.signal_type == SignalType.BUY
+            else s
+            for s in signals
+        ]
+        result_remapped = combiner.combine(remapped, weights, min_active_ratio=0.15)
+        assert result_remapped.signal_type == SignalType.SELL

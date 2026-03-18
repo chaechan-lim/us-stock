@@ -85,6 +85,7 @@ class SignalCombiner:
         signals: list[Signal],
         weights: dict[str, float],
         min_confidence: float = 0.35,
+        min_active_ratio: float | None = None,
     ) -> Signal:
         """Combine signals using weighted voting.
 
@@ -92,6 +93,8 @@ class SignalCombiner:
             signals: List of signals from individual strategies
             weights: Strategy name -> weight mapping from profile
             min_confidence: Minimum combined confidence to act
+            min_active_ratio: Override for minimum active signal ratio
+                (default: use instance-level ``_min_active_ratio``)
 
         Returns:
             Combined signal
@@ -156,13 +159,16 @@ class SignalCombiner:
             )
 
         # Min active ratio: at least N% of strategies must be active (BUY/SELL)
+        effective_min_active = (
+            min_active_ratio if min_active_ratio is not None else self._min_active_ratio
+        )
         active_ratio = active_weight / total_weight
-        if active_ratio < self._min_active_ratio:
+        if active_ratio < effective_min_active:
             return Signal(
                 signal_type=SignalType.HOLD,
                 confidence=max(buy_score, sell_score) / active_weight,
                 strategy_name="combiner",
-                reason=f"Active ratio too low ({active_ratio:.0%} < {self._min_active_ratio:.0%})",
+                reason=f"Active ratio too low ({active_ratio:.0%} < {effective_min_active:.0%})",
             )
 
         # Normalize by active weight only (HOLD signals excluded from denominator)
