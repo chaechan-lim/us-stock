@@ -870,6 +870,36 @@ class PositionTracker:
         except Exception as e:
             logger.debug("DB remove failed for %s: %s", symbol, e)
 
+    async def _lookup_first_buy_time(
+        self,
+        session: "AsyncSession",
+        symbol: str,
+    ) -> datetime | None:
+        """Look up the earliest live BUY order time for a symbol.
+
+        Queries the orders table for the earliest filled/submitted live
+        (is_paper=False) BUY order's created_at. Returns None if no
+        matching order is found.
+        """
+        from sqlalchemy import asc, select
+
+        from core.models import Order
+
+        stmt = (
+            select(Order.created_at)
+            .where(
+                Order.symbol == symbol,
+                Order.side == "BUY",
+                Order.status.in_(["filled", "submitted"]),
+                Order.is_paper == False,  # noqa: E712
+            )
+            .order_by(asc(Order.created_at))
+            .limit(1)
+        )
+        result = await session.execute(stmt)
+        row = result.scalar_one_or_none()
+        return row
+
     async def _upsert_position_record(
         self,
         session: "AsyncSession",
@@ -912,6 +942,10 @@ class PositionTracker:
                 record.unrealized_pnl = unrealized_pnl
             record.updated_at = datetime.utcnow()
         else:
+            # Look up actual first buy time from orders table
+            first_buy_time = await self._lookup_first_buy_time(session, symbol)
+            opened_at = first_buy_time if first_buy_time else datetime.utcnow()
+
             record = PositionRecord(
                 market=self._market,
                 symbol=symbol,
@@ -924,7 +958,7 @@ class PositionTracker:
                 take_profit=tracked.take_profit_pct,
                 trailing_stop=tracked.trailing_stop_pct,
                 strategy_name=tracked.strategy,
-                opened_at=datetime.utcnow(),
+                opened_at=opened_at,
                 updated_at=datetime.utcnow(),
             )
             session.add(record)

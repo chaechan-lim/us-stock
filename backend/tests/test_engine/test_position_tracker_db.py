@@ -1141,3 +1141,447 @@ class TestStrategyResolution:
         assert tracker._tracked["AAPL"].strategy == "my_strategy"
         record = await _get_position(db_factory, "AAPL")
         assert record.strategy_name == "my_strategy"
+
+
+# ── opened_at from Orders ──────────────────────────────────────────
+
+
+class TestOpenedAtFromOrders:
+    """Test that opened_at is set from the earliest BUY order, not utcnow().
+
+    STOCK-9: When positions are recreated (e.g., during restore_from_exchange
+    or sync_to_db), opened_at should reflect the actual first buy time from
+    the orders table, not the moment the PositionRecord is created.
+    """
+
+    @pytest.mark.asyncio
+    async def test_new_position_uses_first_buy_order_time(
+        self, adapter, risk, order_mgr, db_factory
+    ):
+        """New PositionRecord should get opened_at from earliest BUY order."""
+        from datetime import datetime
+
+        from core.models import Order
+
+        buy_time = datetime(2025, 6, 15, 14, 30, 0)
+        async with db_factory() as session:
+            session.add(
+                Order(
+                    symbol="AAPL",
+                    side="BUY",
+                    order_type="market",
+                    quantity=10,
+                    price=150.0,
+                    status="filled",
+                    strategy_name="trend_following",
+                    is_paper=False,
+                    created_at=buy_time,
+                )
+            )
+            await session.commit()
+
+        tracker = _make_tracker(adapter, risk, order_mgr)
+        tracker.track("AAPL", 150.0, 10, strategy="trend_following")
+
+        async with db_factory() as session:
+            await tracker._upsert_position_record(
+                session, "AAPL", tracker._tracked["AAPL"]
+            )
+            await session.commit()
+
+        record = await _get_position(db_factory, "AAPL")
+        assert record is not None
+        assert record.opened_at == buy_time
+
+    @pytest.mark.asyncio
+    async def test_opened_at_picks_earliest_buy(
+        self, adapter, risk, order_mgr, db_factory
+    ):
+        """When multiple BUY orders exist, opened_at uses the earliest one."""
+        from datetime import datetime
+
+        from core.models import Order
+
+        early_time = datetime(2025, 3, 1, 10, 0, 0)
+        late_time = datetime(2025, 6, 15, 14, 30, 0)
+
+        async with db_factory() as session:
+            session.add(
+                Order(
+                    symbol="AAPL",
+                    side="BUY",
+                    order_type="market",
+                    quantity=5,
+                    price=140.0,
+                    status="filled",
+                    strategy_name="trend_following",
+                    is_paper=False,
+                    created_at=early_time,
+                )
+            )
+            session.add(
+                Order(
+                    symbol="AAPL",
+                    side="BUY",
+                    order_type="market",
+                    quantity=5,
+                    price=150.0,
+                    status="filled",
+                    strategy_name="macd_cross",
+                    is_paper=False,
+                    created_at=late_time,
+                )
+            )
+            await session.commit()
+
+        tracker = _make_tracker(adapter, risk, order_mgr)
+        tracker.track("AAPL", 145.0, 10)
+
+        async with db_factory() as session:
+            await tracker._upsert_position_record(
+                session, "AAPL", tracker._tracked["AAPL"]
+            )
+            await session.commit()
+
+        record = await _get_position(db_factory, "AAPL")
+        assert record.opened_at == early_time
+
+    @pytest.mark.asyncio
+    async def test_opened_at_falls_back_without_orders(
+        self, adapter, risk, order_mgr, db_factory
+    ):
+        """When no BUY orders exist, opened_at falls back to ~utcnow()."""
+        from datetime import datetime, timedelta
+
+        tracker = _make_tracker(adapter, risk, order_mgr)
+        tracker.track("NEWSTOCK", 100.0, 5)
+
+        before = datetime.utcnow()
+        async with db_factory() as session:
+            await tracker._upsert_position_record(
+                session, "NEWSTOCK", tracker._tracked["NEWSTOCK"]
+            )
+            await session.commit()
+        after = datetime.utcnow()
+
+        record = await _get_position(db_factory, "NEWSTOCK")
+        assert record is not None
+        # opened_at should be approximately now (within a few seconds)
+        assert before - timedelta(seconds=2) <= record.opened_at <= after + timedelta(seconds=2)
+
+    @pytest.mark.asyncio
+    async def test_opened_at_ignores_paper_orders(
+        self, adapter, risk, order_mgr, db_factory
+    ):
+        """Paper orders (is_paper=True) should NOT be used for opened_at."""
+        from datetime import datetime, timedelta
+
+        from core.models import Order
+
+        paper_time = datetime(2024, 1, 1, 10, 0, 0)
+
+        async with db_factory() as session:
+            session.add(
+                Order(
+                    symbol="AAPL",
+                    side="BUY",
+                    order_type="market",
+                    quantity=10,
+                    price=150.0,
+                    status="filled",
+                    strategy_name="trend",
+                    is_paper=True,
+                    created_at=paper_time,
+                )
+            )
+            await session.commit()
+
+        tracker = _make_tracker(adapter, risk, order_mgr)
+        tracker.track("AAPL", 150.0, 10)
+
+        async with db_factory() as session:
+            await tracker._upsert_position_record(
+                session, "AAPL", tracker._tracked["AAPL"]
+            )
+            await session.commit()
+
+        record = await _get_position(db_factory, "AAPL")
+        # Should NOT use paper_time (2024-01-01), should be ~now
+        assert record.opened_at > paper_time + timedelta(days=1)
+
+    @pytest.mark.asyncio
+    async def test_opened_at_ignores_sell_orders(
+        self, adapter, risk, order_mgr, db_factory
+    ):
+        """SELL orders should NOT be used for opened_at."""
+        from datetime import datetime, timedelta
+
+        from core.models import Order
+
+        sell_time = datetime(2024, 6, 1, 10, 0, 0)
+
+        async with db_factory() as session:
+            session.add(
+                Order(
+                    symbol="AAPL",
+                    side="SELL",
+                    order_type="market",
+                    quantity=10,
+                    price=170.0,
+                    status="filled",
+                    strategy_name="trend:take_profit",
+                    is_paper=False,
+                    created_at=sell_time,
+                )
+            )
+            await session.commit()
+
+        tracker = _make_tracker(adapter, risk, order_mgr)
+        tracker.track("AAPL", 150.0, 10)
+
+        async with db_factory() as session:
+            await tracker._upsert_position_record(
+                session, "AAPL", tracker._tracked["AAPL"]
+            )
+            await session.commit()
+
+        record = await _get_position(db_factory, "AAPL")
+        # Should NOT use sell_time, should be ~now
+        assert record.opened_at > sell_time + timedelta(days=1)
+
+    @pytest.mark.asyncio
+    async def test_opened_at_preserved_on_update(
+        self, adapter, risk, order_mgr, db_factory
+    ):
+        """Updating an existing PositionRecord should NOT reset opened_at."""
+        from datetime import datetime
+
+        from core.models import Order
+
+        buy_time = datetime(2025, 1, 10, 9, 30, 0)
+
+        async with db_factory() as session:
+            session.add(
+                Order(
+                    symbol="AAPL",
+                    side="BUY",
+                    order_type="market",
+                    quantity=10,
+                    price=150.0,
+                    status="filled",
+                    strategy_name="trend",
+                    is_paper=False,
+                    created_at=buy_time,
+                )
+            )
+            await session.commit()
+
+        tracker = _make_tracker(adapter, risk, order_mgr)
+        tracker.track("AAPL", 150.0, 10, strategy="trend")
+
+        # First upsert creates the record
+        async with db_factory() as session:
+            await tracker._upsert_position_record(
+                session, "AAPL", tracker._tracked["AAPL"]
+            )
+            await session.commit()
+
+        record = await _get_position(db_factory, "AAPL")
+        assert record.opened_at == buy_time
+
+        # Second upsert updates the record (should NOT reset opened_at)
+        tracker._tracked["AAPL"].quantity = 20
+        async with db_factory() as session:
+            await tracker._upsert_position_record(
+                session, "AAPL", tracker._tracked["AAPL"]
+            )
+            await session.commit()
+
+        record = await _get_position(db_factory, "AAPL")
+        assert record.opened_at == buy_time
+        assert record.quantity == 20
+
+    @pytest.mark.asyncio
+    async def test_opened_at_survives_resync(
+        self, adapter, risk, order_mgr, db_factory
+    ):
+        """Delete and recreate position should recover correct opened_at."""
+        from datetime import datetime
+
+        from sqlalchemy import delete
+
+        from core.models import Order, PositionRecord
+
+        buy_time = datetime(2025, 2, 20, 11, 0, 0)
+
+        async with db_factory() as session:
+            session.add(
+                Order(
+                    symbol="TSLA",
+                    side="BUY",
+                    order_type="market",
+                    quantity=5,
+                    price=200.0,
+                    status="filled",
+                    strategy_name="momentum",
+                    is_paper=False,
+                    created_at=buy_time,
+                )
+            )
+            await session.commit()
+
+        tracker = _make_tracker(adapter, risk, order_mgr)
+        tracker.track("TSLA", 200.0, 5, strategy="momentum")
+
+        # Create initial record
+        async with db_factory() as session:
+            await tracker._upsert_position_record(
+                session, "TSLA", tracker._tracked["TSLA"]
+            )
+            await session.commit()
+
+        record = await _get_position(db_factory, "TSLA")
+        assert record.opened_at == buy_time
+
+        # Delete the position record (simulates DB clear / STOCK-2 scenario)
+        async with db_factory() as session:
+            await session.execute(
+                delete(PositionRecord).where(PositionRecord.symbol == "TSLA")
+            )
+            await session.commit()
+
+        # Recreate — should recover opened_at from orders
+        async with db_factory() as session:
+            await tracker._upsert_position_record(
+                session, "TSLA", tracker._tracked["TSLA"]
+            )
+            await session.commit()
+
+        record = await _get_position(db_factory, "TSLA")
+        assert record.opened_at == buy_time
+
+    @pytest.mark.asyncio
+    async def test_restore_from_exchange_preserves_opened_at(
+        self, adapter, risk, order_mgr, db_factory
+    ):
+        """Full restore_from_exchange path should set correct opened_at."""
+        from datetime import datetime
+
+        from core.models import Order
+
+        buy_time = datetime(2025, 5, 10, 15, 0, 0)
+
+        async with db_factory() as session:
+            session.add(
+                Order(
+                    symbol="MSFT",
+                    side="BUY",
+                    order_type="market",
+                    quantity=8,
+                    price=400.0,
+                    status="filled",
+                    strategy_name="rsi_divergence",
+                    is_paper=False,
+                    created_at=buy_time,
+                )
+            )
+            await session.commit()
+
+        adapter.fetch_positions = AsyncMock(
+            return_value=[
+                Position(
+                    symbol="MSFT",
+                    exchange="NASD",
+                    quantity=8,
+                    avg_price=400.0,
+                    current_price=420.0,
+                ),
+            ]
+        )
+        tracker = _make_tracker(adapter, risk, order_mgr)
+        restored = await tracker.restore_from_exchange(db_factory)
+
+        assert len(restored) == 1
+        record = await _get_position(db_factory, "MSFT")
+        assert record is not None
+        assert record.opened_at == buy_time
+
+    @pytest.mark.asyncio
+    async def test_kr_position_opened_at_from_orders(
+        self, adapter, risk, order_mgr, db_factory
+    ):
+        """KR market positions should also get opened_at from orders."""
+        from datetime import datetime
+
+        from core.models import Order
+
+        buy_time = datetime(2025, 4, 1, 9, 0, 0)
+
+        async with db_factory() as session:
+            session.add(
+                Order(
+                    symbol="005930",
+                    side="BUY",
+                    order_type="market",
+                    quantity=10,
+                    price=72000.0,
+                    status="filled",
+                    strategy_name="kr_trend",
+                    is_paper=False,
+                    created_at=buy_time,
+                )
+            )
+            await session.commit()
+
+        tracker = _make_tracker(adapter, risk, order_mgr, market="KR")
+        tracker.track("005930", 72000.0, 10, strategy="kr_trend")
+
+        async with db_factory() as session:
+            await tracker._upsert_position_record(
+                session, "005930", tracker._tracked["005930"]
+            )
+            await session.commit()
+
+        record = await _get_position(db_factory, "005930", market="KR")
+        assert record is not None
+        assert record.opened_at == buy_time
+
+    @pytest.mark.asyncio
+    async def test_opened_at_ignores_cancelled_orders(
+        self, adapter, risk, order_mgr, db_factory
+    ):
+        """Cancelled orders should NOT be used for opened_at."""
+        from datetime import datetime, timedelta
+
+        from core.models import Order
+
+        cancelled_time = datetime(2024, 12, 1, 10, 0, 0)
+
+        async with db_factory() as session:
+            session.add(
+                Order(
+                    symbol="AAPL",
+                    side="BUY",
+                    order_type="limit",
+                    quantity=10,
+                    price=150.0,
+                    status="cancelled",
+                    strategy_name="trend",
+                    is_paper=False,
+                    created_at=cancelled_time,
+                )
+            )
+            await session.commit()
+
+        tracker = _make_tracker(adapter, risk, order_mgr)
+        tracker.track("AAPL", 150.0, 10)
+
+        async with db_factory() as session:
+            await tracker._upsert_position_record(
+                session, "AAPL", tracker._tracked["AAPL"]
+            )
+            await session.commit()
+
+        record = await _get_position(db_factory, "AAPL")
+        # Should NOT use cancelled order time, should be ~now
+        assert record.opened_at > cancelled_time + timedelta(days=1)
