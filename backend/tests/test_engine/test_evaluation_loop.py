@@ -1,5 +1,6 @@
 """Tests for Evaluation Loop."""
 
+import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pandas as pd
@@ -1469,3 +1470,358 @@ class TestExchangePositionHeldEvaluation:
 
         assert "TSLA" in evaluated
         assert "AAPL" in evaluated
+
+
+class TestSellCooldown:
+    """STOCK-20: 매도 후 즉시 재매수 방지 (sell cooldown).
+
+    When a position is sold, the same symbol should not be re-bought for
+    _sell_cooldown_secs (default 24h). This prevents the pattern:
+    sell 54 shares → 1 min later → buy 1 share → 4 min later → buy 1 share...
+    """
+
+    @pytest.fixture
+    def loop_with_tracker(self, mock_adapter, mock_market_data, mock_registry):
+        """Evaluation loop with position tracker for sell cooldown tests."""
+        from data.indicator_service import IndicatorService
+        from strategies.combiner import SignalCombiner
+        from engine.position_tracker import PositionTracker
+
+        risk = RiskManager()
+        order_mgr = OrderManager(adapter=mock_adapter, risk_manager=risk)
+        tracker = MagicMock(spec=PositionTracker)
+        tracker.tracked_symbols = []
+        tracker.get_buy_strategy = MagicMock(return_value="dual_momentum")
+
+        loop = EvaluationLoop(
+            adapter=mock_adapter,
+            market_data=mock_market_data,
+            indicator_svc=IndicatorService(),
+            registry=mock_registry,
+            combiner=SignalCombiner(),
+            order_manager=order_mgr,
+            risk_manager=risk,
+            watchlist=["AAPL", "TSLA"],
+            position_tracker=tracker,
+        )
+        return loop
+
+    async def test_sell_cooldown_blocks_immediate_rebuy(
+        self,
+        loop_with_tracker,
+        mock_adapter,
+        mock_market_data,
+    ):
+        """BUY should be blocked within sell cooldown period (24h default)."""
+        loop = loop_with_tracker
+        # Simulate that AAPL was sold 1 hour ago
+        loop._recovery_watch["AAPL"] = time.time() - 3600  # 1h ago
+
+        mock_market_data.get_positions.return_value = []
+        await loop.evaluate_symbol("AAPL")
+        mock_adapter.create_buy_order.assert_not_called()
+
+    async def test_sell_cooldown_allows_buy_after_expiry(
+        self,
+        loop_with_tracker,
+        mock_adapter,
+        mock_market_data,
+    ):
+        """BUY should be allowed after sell cooldown expires."""
+        loop = loop_with_tracker
+        # Simulate that AAPL was sold 25 hours ago (cooldown expired)
+        loop._recovery_watch["AAPL"] = time.time() - (25 * 3600)
+
+        mock_market_data.get_positions.return_value = []
+        await loop.evaluate_symbol("AAPL")
+        mock_adapter.create_buy_order.assert_called_once()
+
+    async def test_sell_cooldown_does_not_block_different_symbol(
+        self,
+        loop_with_tracker,
+        mock_adapter,
+        mock_market_data,
+    ):
+        """Sell cooldown on AAPL should not block buying TSLA."""
+        loop = loop_with_tracker
+        # AAPL sold recently, but we want to buy TSLA
+        loop._recovery_watch["AAPL"] = time.time() - 3600
+
+        mock_market_data.get_positions.return_value = []
+        await loop.evaluate_symbol("TSLA")
+        mock_adapter.create_buy_order.assert_called_once()
+
+    async def test_sell_sets_recovery_watch(
+        self,
+        loop_with_tracker,
+        mock_adapter,
+        mock_market_data,
+        mock_registry,
+    ):
+        """When a position is sold, it should be added to recovery_watch."""
+        loop = loop_with_tracker
+
+        # Set up SELL signal (strategy_name must match weight key)
+        strategy = mock_registry.get_enabled.return_value[0]
+        strategy.analyze.return_value = Signal(
+            signal_type=SignalType.SELL,
+            confidence=0.8,
+            strategy_name="trend_following",
+            reason="stop_loss",
+        )
+        mock_market_data.get_positions.return_value = [
+            Position(symbol="AAPL", exchange="NASD", quantity=54, avg_price=140.0),
+        ]
+        mock_adapter.create_sell_order = AsyncMock(
+            return_value=OrderResult(
+                order_id="S1",
+                symbol="AAPL",
+                side="SELL",
+                order_type="limit",
+                quantity=54,
+                price=137.0,
+                status="filled",
+                filled_price=137.0,
+            )
+        )
+
+        await loop.evaluate_symbol("AAPL")
+        mock_adapter.create_sell_order.assert_called_once()
+        # Verify recovery_watch is set
+        assert "AAPL" in loop._recovery_watch
+
+    async def test_sell_then_rebuy_blocked_within_cooldown(
+        self,
+        mock_adapter,
+        mock_market_data,
+        mock_registry,
+    ):
+        """Full scenario: sell stock, then BUY signal arrives — should be blocked.
+
+        Simulates the STOCK-20 case: sell 54 shares, 1 minute later BUY signal.
+        """
+        from data.indicator_service import IndicatorService
+        from strategies.combiner import SignalCombiner
+        from engine.position_tracker import PositionTracker
+
+        risk = RiskManager()
+        order_mgr = OrderManager(adapter=mock_adapter, risk_manager=risk)
+        tracker = MagicMock(spec=PositionTracker)
+        tracker.tracked_symbols = ["AAPL"]
+        tracker.get_buy_strategy = MagicMock(return_value="dual_momentum")
+
+        loop = EvaluationLoop(
+            adapter=mock_adapter,
+            market_data=mock_market_data,
+            indicator_svc=IndicatorService(),
+            registry=mock_registry,
+            combiner=SignalCombiner(),
+            order_manager=order_mgr,
+            risk_manager=risk,
+            watchlist=["AAPL"],
+            position_tracker=tracker,
+        )
+
+        # Phase 1: SELL signal → sell 54 shares
+        strategy = mock_registry.get_enabled.return_value[0]
+        strategy.analyze.return_value = Signal(
+            signal_type=SignalType.SELL,
+            confidence=0.8,
+            strategy_name="trend_following",
+            reason="stop_loss",
+        )
+        mock_market_data.get_positions.return_value = [
+            Position(symbol="AAPL", exchange="NASD", quantity=54, avg_price=140.0),
+        ]
+        mock_adapter.create_sell_order = AsyncMock(
+            return_value=OrderResult(
+                order_id="S1",
+                symbol="AAPL",
+                side="SELL",
+                order_type="limit",
+                quantity=54,
+                price=137.0,
+                status="filled",
+                filled_price=137.0,
+            )
+        )
+
+        await loop.evaluate_symbol("AAPL")
+        assert mock_adapter.create_sell_order.call_count == 1
+        assert "AAPL" in loop._recovery_watch
+
+        # Phase 2: BUY signal arrives 1 minute later
+        tracker.tracked_symbols = []  # Position untracked after sell
+        strategy.analyze.return_value = Signal(
+            signal_type=SignalType.BUY,
+            confidence=0.85,
+            strategy_name="dual_momentum",
+            reason="buy_signal",
+        )
+        mock_market_data.get_positions.return_value = []  # No positions
+        loop._last_signal.clear()  # Simulate stale dedup
+
+        await loop.evaluate_symbol("AAPL")
+        # BUY should be blocked by sell cooldown
+        mock_adapter.create_buy_order.assert_not_called()
+
+    async def test_sell_cooldown_kr_market(
+        self,
+        mock_adapter,
+        mock_market_data,
+        mock_registry,
+    ):
+        """Sell cooldown should work for KR market symbols too."""
+        from data.indicator_service import IndicatorService
+        from strategies.combiner import SignalCombiner
+
+        risk = RiskManager()
+        order_mgr = OrderManager(adapter=mock_adapter, risk_manager=risk, market="KR")
+
+        loop = EvaluationLoop(
+            adapter=mock_adapter,
+            market_data=mock_market_data,
+            indicator_svc=IndicatorService(),
+            registry=mock_registry,
+            combiner=SignalCombiner(),
+            order_manager=order_mgr,
+            risk_manager=risk,
+            watchlist=["017670"],
+            market="KR",
+            position_tracker=None,
+        )
+
+        # 017670 (SK하이닉스) was sold 2 hours ago
+        loop._recovery_watch["017670"] = time.time() - 7200
+
+        mock_market_data.get_positions.return_value = []
+        await loop.evaluate_symbol("017670")
+        mock_adapter.create_buy_order.assert_not_called()
+
+    async def test_sell_cooldown_custom_duration(
+        self,
+        loop_with_tracker,
+        mock_adapter,
+        mock_market_data,
+    ):
+        """Sell cooldown duration should be configurable."""
+        loop = loop_with_tracker
+        # Set a shorter cooldown for testing (1 hour)
+        loop._sell_cooldown_secs = 3600  # 1h
+
+        # Sold 30 minutes ago — within 1h cooldown
+        loop._recovery_watch["AAPL"] = time.time() - 1800
+        mock_market_data.get_positions.return_value = []
+        await loop.evaluate_symbol("AAPL")
+        mock_adapter.create_buy_order.assert_not_called()
+
+        # Sold 2 hours ago — beyond 1h cooldown
+        loop._recovery_watch["AAPL"] = time.time() - 7200
+        loop._last_signal.clear()  # Reset dedup for second attempt
+        await loop.evaluate_symbol("AAPL")
+        mock_adapter.create_buy_order.assert_called_once()
+
+    async def test_sell_cooldown_in_evaluate_all(
+        self,
+        mock_adapter,
+        mock_market_data,
+        mock_registry,
+    ):
+        """Sell cooldown should work in _evaluate_all() buy ranking too."""
+        from data.indicator_service import IndicatorService
+        from strategies.combiner import SignalCombiner
+        from engine.position_tracker import PositionTracker
+
+        risk = RiskManager()
+        order_mgr = OrderManager(adapter=mock_adapter, risk_manager=risk)
+        tracker = MagicMock(spec=PositionTracker)
+        tracker.tracked_symbols = []
+        tracker.get_buy_strategy = MagicMock(return_value="")
+
+        loop = EvaluationLoop(
+            adapter=mock_adapter,
+            market_data=mock_market_data,
+            indicator_svc=IndicatorService(),
+            registry=mock_registry,
+            combiner=SignalCombiner(),
+            order_manager=order_mgr,
+            risk_manager=risk,
+            watchlist=["AAPL", "TSLA"],
+            position_tracker=tracker,
+        )
+
+        # AAPL in sell cooldown, TSLA is not
+        loop._recovery_watch["AAPL"] = time.time() - 3600  # 1h ago
+
+        mock_market_data.get_positions.return_value = []
+
+        await loop._evaluate_all()
+
+        # Only TSLA should have triggered a buy, not AAPL
+        calls = mock_adapter.create_buy_order.call_args_list
+        bought_symbols = [c.kwargs.get("symbol", c.args[0] if c.args else None)
+                          for c in calls]
+        # AAPL should NOT be in the bought symbols
+        assert "AAPL" not in bought_symbols
+        # TSLA should have been bought (assuming BUY signal)
+        assert "TSLA" in bought_symbols
+
+    async def test_sell_cooldown_does_not_affect_sell_signals(
+        self,
+        mock_adapter,
+        mock_market_data,
+        mock_registry,
+    ):
+        """Sell cooldown should NOT block SELL signals (only BUY)."""
+        from data.indicator_service import IndicatorService
+        from strategies.combiner import SignalCombiner
+        from engine.position_tracker import PositionTracker
+
+        risk = RiskManager()
+        order_mgr = OrderManager(adapter=mock_adapter, risk_manager=risk)
+        tracker = MagicMock(spec=PositionTracker)
+        tracker.tracked_symbols = []
+        tracker.get_buy_strategy = MagicMock(return_value="dual_momentum")
+
+        loop = EvaluationLoop(
+            adapter=mock_adapter,
+            market_data=mock_market_data,
+            indicator_svc=IndicatorService(),
+            registry=mock_registry,
+            combiner=SignalCombiner(),
+            order_manager=order_mgr,
+            risk_manager=risk,
+            watchlist=["AAPL"],
+            position_tracker=tracker,
+        )
+
+        # AAPL in sell cooldown
+        loop._recovery_watch["AAPL"] = time.time() - 3600
+
+        # Strategy signals SELL (unlikely scenario but should work)
+        strategy = mock_registry.get_enabled.return_value[0]
+        strategy.analyze.return_value = Signal(
+            signal_type=SignalType.SELL,
+            confidence=0.8,
+            strategy_name="trend_following",
+            reason="stop_loss",
+        )
+        mock_market_data.get_positions.return_value = [
+            Position(symbol="AAPL", exchange="NASD", quantity=10, avg_price=140.0),
+        ]
+        mock_adapter.create_sell_order = AsyncMock(
+            return_value=OrderResult(
+                order_id="S2",
+                symbol="AAPL",
+                side="SELL",
+                order_type="limit",
+                quantity=10,
+                price=135.0,
+                status="filled",
+                filled_price=135.0,
+            )
+        )
+
+        await loop.evaluate_symbol("AAPL")
+        # SELL should still go through despite cooldown
+        mock_adapter.create_sell_order.assert_called_once()

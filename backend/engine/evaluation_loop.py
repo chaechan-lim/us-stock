@@ -96,6 +96,8 @@ class EvaluationLoop:
         # Recovery watch: recently sold symbols get re-evaluated for re-entry
         self._recovery_watch: dict[str, float] = {}  # {symbol: timestamp_when_sold}
         self._recovery_watch_secs = 7 * 86400  # 7 days
+        # Sell cooldown: hard block BUY for recently sold symbols (STOCK-20)
+        self._sell_cooldown_secs = 24 * 3600  # 24 hours
         # Daily buy counter (resets at midnight)
         self._daily_buy_count: int = 0
         self._daily_buy_date: str = ""
@@ -585,6 +587,21 @@ class EvaluationLoop:
             if self._position_tracker and symbol in self._position_tracker.tracked_symbols:
                 logger.debug("Skipping BUY for %s: already held", symbol)
                 return
+
+            # STOCK-20: Hard block BUY for recently sold symbols (sell cooldown).
+            # Prevents immediate re-buy after stop-loss or strategy-based sell.
+            # Without this, a sell followed by the next eval cycle can re-buy
+            # the same stock within minutes (017670 case: 27 BUY in 4 days).
+            if symbol in self._recovery_watch:
+                cooldown_elapsed = time.time() - self._recovery_watch[symbol]
+                if cooldown_elapsed < self._sell_cooldown_secs:
+                    remaining_h = (self._sell_cooldown_secs - cooldown_elapsed) / 3600
+                    logger.info(
+                        "Skipping BUY for %s: sell cooldown (%.1fh remaining)",
+                        symbol,
+                        remaining_h,
+                    )
+                    return
 
             # Skip if signal hasn't changed since last evaluation (daily strategies
             # produce the same signal all day — no point re-buying)
