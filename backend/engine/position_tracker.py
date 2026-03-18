@@ -70,7 +70,10 @@ class PositionTracker:
         self._session_factory = session_factory
         self._market = market
         self._tracked: dict[str, TrackedPosition] = {}
-        self._last_auto_recover: float = 0.0
+        # Initialize to negative cooldown so the first call always passes,
+        # regardless of system uptime (time.monotonic() can be < cooldown
+        # on fresh VMs or right after reboot).
+        self._last_auto_recover: float = -self._AUTO_RECOVER_COOLDOWN
 
     def track(
         self,
