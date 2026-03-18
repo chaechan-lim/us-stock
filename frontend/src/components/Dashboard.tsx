@@ -101,6 +101,10 @@ export default function Dashboard() {
               )}
             </>
           }
+          sub={summary.total_unrealized_pnl_pct != null
+            ? `${summary.total_unrealized_pnl_pct >= 0 ? '+' : ''}${summary.total_unrealized_pnl_pct.toFixed(2)}%`
+            : undefined
+          }
         />
       </div>
 

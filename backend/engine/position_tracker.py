@@ -440,6 +440,11 @@ class PositionTracker:
 
             if self._notification:
                 try:
+                    pnl_pct = (
+                        round((fill_price - tracked.entry_price) / tracked.entry_price * 100, 2)
+                        if tracked.entry_price > 0
+                        else None
+                    )
                     if reason == "stop_loss":
                         await self._notification.notify_stop_loss(
                             tracked.symbol,
@@ -447,6 +452,7 @@ class PositionTracker:
                             tracked.entry_price,
                             price,
                             pnl,
+                            pnl_pct=pnl_pct,
                         )
                     elif reason == "take_profit":
                         await self._notification.notify_take_profit(
@@ -455,6 +461,7 @@ class PositionTracker:
                             tracked.entry_price,
                             price,
                             pnl,
+                            pnl_pct=pnl_pct,
                         )
                     elif reason == "trailing_stop":
                         await self._notification.notify_trailing_stop(
@@ -464,6 +471,7 @@ class PositionTracker:
                             price,
                             tracked.highest_price,
                             pnl,
+                            pnl_pct=pnl_pct,
                         )
                 except Exception as e:
                     logger.error(

@@ -547,34 +547,52 @@ class NotificationService:
 
     async def notify_stop_loss(
         self, symbol: str, qty: int, entry: float, exit_price: float, pnl: float,
-        market: str = "",
+        market: str = "", pnl_pct: float | None = None,
     ) -> bool:
         mkt = market or self._detect_market(symbol)
         label = self._symbol_label(symbol)
         pnl_str = self._pnl_sign(pnl, mkt)
+        pct_str = f" ({pnl_pct:+.2f}%)" if pnl_pct is not None else ""
+        fields: dict = {
+            "Symbol": label, "Entry": self._fmt_price(entry, mkt),
+            "Exit": self._fmt_price(exit_price, mkt), "P&L": f"{pnl_str}{pct_str}",
+        }
+        if pnl_pct is not None:
+            fields["P&L %"] = f"{pnl_pct:+.2f}%"
+        fp = self._fmt_price
         return await self._dispatch(
             AlertCategory.POSITION, AlertLevel.WARNING, symbol,
             "Stop-Loss Triggered",
-            f"SELL {label} x{qty} | {self._fmt_price(entry, mkt)} -> {self._fmt_price(exit_price, mkt)} | P&L: {pnl_str}",
-            {"qty": qty, "entry": entry, "exit": exit_price, "pnl": pnl},
-            {"Symbol": label, "Entry": self._fmt_price(entry, mkt),
-             "Exit": self._fmt_price(exit_price, mkt), "P&L": pnl_str},
+            f"SELL {label} x{qty} | {fp(entry, mkt)} -> "
+            f"{fp(exit_price, mkt)} | P&L: {pnl_str}{pct_str}",
+            {"qty": qty, "entry": entry, "exit": exit_price,
+             "pnl": pnl, "pnl_pct": pnl_pct},
+            fields,
         )
 
     async def notify_take_profit(
         self, symbol: str, qty: int, entry: float, exit_price: float, pnl: float,
-        market: str = "",
+        market: str = "", pnl_pct: float | None = None,
     ) -> bool:
         mkt = market or self._detect_market(symbol)
         label = self._symbol_label(symbol)
         pnl_str = self._pnl_sign(pnl, mkt)
+        pct_str = f" ({pnl_pct:+.2f}%)" if pnl_pct is not None else ""
+        fields: dict = {
+            "Symbol": label, "Entry": self._fmt_price(entry, mkt),
+            "Exit": self._fmt_price(exit_price, mkt), "P&L": f"{pnl_str}{pct_str}",
+        }
+        if pnl_pct is not None:
+            fields["P&L %"] = f"{pnl_pct:+.2f}%"
+        fp = self._fmt_price
         return await self._dispatch(
             AlertCategory.POSITION, AlertLevel.INFO, symbol,
             "Take-Profit Hit",
-            f"SELL {label} x{qty} | {self._fmt_price(entry, mkt)} -> {self._fmt_price(exit_price, mkt)} | P&L: {pnl_str}",
-            {"qty": qty, "entry": entry, "exit": exit_price, "pnl": pnl},
-            {"Symbol": label, "Entry": self._fmt_price(entry, mkt),
-             "Exit": self._fmt_price(exit_price, mkt), "P&L": pnl_str},
+            f"SELL {label} x{qty} | {fp(entry, mkt)} -> "
+            f"{fp(exit_price, mkt)} | P&L: {pnl_str}{pct_str}",
+            {"qty": qty, "entry": entry, "exit": exit_price,
+             "pnl": pnl, "pnl_pct": pnl_pct},
+            fields,
         )
 
     async def notify_profit_taking(
@@ -602,20 +620,27 @@ class NotificationService:
 
     async def notify_trailing_stop(
         self, symbol: str, qty: int, entry: float, exit_price: float,
-        highest: float, pnl: float, market: str = "",
+        highest: float, pnl: float, market: str = "", pnl_pct: float | None = None,
     ) -> bool:
         mkt = market or self._detect_market(symbol)
         label = self._symbol_label(symbol)
         pnl_str = self._pnl_sign(pnl, mkt)
+        pct_str = f" ({pnl_pct:+.2f}%)" if pnl_pct is not None else ""
         fp = self._fmt_price
+        fields: dict = {
+            "Symbol": label, "Entry": fp(entry, mkt), "Highest": fp(highest, mkt),
+            "Exit": fp(exit_price, mkt), "P&L": f"{pnl_str}{pct_str}",
+        }
+        if pnl_pct is not None:
+            fields["P&L %"] = f"{pnl_pct:+.2f}%"
         return await self._dispatch(
             AlertCategory.POSITION, AlertLevel.WARNING, symbol,
             "Trailing-Stop Triggered",
             f"SELL {label} x{qty} | Entry {fp(entry, mkt)} | High {fp(highest, mkt)} | "
-            f"Exit {fp(exit_price, mkt)} | P&L: {pnl_str}",
-            {"qty": qty, "entry": entry, "exit": exit_price, "highest": highest, "pnl": pnl},
-            {"Symbol": label, "Entry": fp(entry, mkt), "Highest": fp(highest, mkt),
-             "Exit": fp(exit_price, mkt), "P&L": pnl_str},
+            f"Exit {fp(exit_price, mkt)} | P&L: {pnl_str}{pct_str}",
+            {"qty": qty, "entry": entry, "exit": exit_price,
+             "highest": highest, "pnl": pnl, "pnl_pct": pnl_pct},
+            fields,
         )
 
     async def notify_risk_breach(

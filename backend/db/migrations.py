@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 _EXPECTED_COLUMNS: Sequence[tuple[str, str, str, str | None, bool]] = [
     ("orders", "is_paper", "BOOLEAN", "FALSE", True),
     ("orders", "buy_strategy", "VARCHAR(50)", None, False),
+    ("orders", "pnl_pct", "FLOAT", None, False),
 ]
 
 # Indexes that may be missing from existing deployments.

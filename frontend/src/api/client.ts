@@ -159,6 +159,7 @@ export interface PeriodSummary {
   wins: number
   losses: number
   pnl: number
+  pnl_pct: number | null
   win_rate: number
 }
 export interface TradeSummaryPeriods {

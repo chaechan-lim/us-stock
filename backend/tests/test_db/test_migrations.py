@@ -121,13 +121,14 @@ async def test_adds_missing_buy_strategy_column(old_engine):
 
 
 @pytest.mark.asyncio
-async def test_adds_both_missing_columns(old_engine):
+async def test_adds_all_missing_columns(old_engine):
     """ensure_columns adds all missing columns in one call."""
     added = await ensure_columns(old_engine)
 
-    assert len(added) == 2
+    assert len(added) == 3
     assert "orders.is_paper" in added
     assert "orders.buy_strategy" in added
+    assert "orders.pnl_pct" in added
 
 
 @pytest.mark.asyncio
@@ -142,7 +143,7 @@ async def test_idempotent_no_change_when_columns_present(full_engine):
 async def test_idempotent_second_run(old_engine):
     """Running ensure_columns twice does not fail or re-add columns."""
     first = await ensure_columns(old_engine)
-    assert len(first) == 2
+    assert len(first) == 3
 
     second = await ensure_columns(old_engine)
     assert second == []
@@ -359,6 +360,7 @@ async def test_full_migration_sequence(old_engine):
 
     assert "orders.is_paper" in added_cols
     assert "orders.buy_strategy" in added_cols
+    assert "orders.pnl_pct" in added_cols
     assert "idx_orders_is_paper" in created_idxs
 
     # Verify everything is in place
@@ -372,6 +374,7 @@ async def test_full_migration_sequence(old_engine):
 
     assert "is_paper" in cols
     assert "buy_strategy" in cols
+    assert "pnl_pct" in cols
     assert "idx_orders_is_paper" in indexes
 
     # Second run is a complete no-op

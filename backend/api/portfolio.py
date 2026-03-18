@@ -40,6 +40,10 @@ async def portfolio_summary(request: Request, market: str = "ALL"):
     positions = await md.get_positions()
 
     total_unrealized_pnl = sum(p.unrealized_pnl for p in positions)
+    total_cost = sum(p.avg_price * p.quantity for p in positions if p.avg_price > 0)
+    total_unrealized_pnl_pct = (
+        round(total_unrealized_pnl / total_cost * 100, 2) if total_cost > 0 else 0.0
+    )
 
     return {
         "market": market,
@@ -51,6 +55,7 @@ async def portfolio_summary(request: Request, market: str = "ALL"):
         },
         "positions_count": len(positions),
         "total_unrealized_pnl": total_unrealized_pnl,
+        "total_unrealized_pnl_pct": total_unrealized_pnl_pct,
         "total_equity": balance.total,
     }
 
@@ -111,6 +116,19 @@ async def _combined_summary(request: Request) -> dict:
     total_unrealized_pnl_krw = sum(p.unrealized_pnl for p in kr_positions)
     total_unrealized_pnl_usd = sum(p.unrealized_pnl for p in us_positions)
 
+    # Calculate weighted-average unrealized PnL % (by cost basis, in KRW)
+    total_cost_krw = sum(p.avg_price * p.quantity for p in kr_positions if p.avg_price > 0)
+    total_cost_usd = sum(p.avg_price * p.quantity for p in us_positions if p.avg_price > 0)
+    total_cost_combined = total_cost_krw + total_cost_usd * _cached_usd_krw
+    total_unrealized_pnl_combined = (
+        total_unrealized_pnl_krw + total_unrealized_pnl_usd * _cached_usd_krw
+    )
+    total_unrealized_pnl_pct = (
+        round(total_unrealized_pnl_combined / total_cost_combined * 100, 2)
+        if total_cost_combined > 0
+        else 0.0
+    )
+
     return {
         "market": "ALL",
         "balance": {
@@ -126,6 +144,7 @@ async def _combined_summary(request: Request) -> dict:
         "positions_count": len(all_positions),
         "total_unrealized_pnl": total_unrealized_pnl_krw,
         "total_unrealized_pnl_usd": total_unrealized_pnl_usd,
+        "total_unrealized_pnl_pct": total_unrealized_pnl_pct,
         "total_equity": total_equity,
         "available_cash": available_cash,
     }
@@ -320,11 +339,19 @@ async def trade_summary_periods(request: Request, market: str | None = None):
                 wins = [t for t in trades if t.pnl > 0]
                 losses = [t for t in trades if t.pnl <= 0]
                 total_pnl = sum(t.pnl for t in trades)
+                pnl_pcts = [
+                    getattr(t, "pnl_pct", None) for t in trades
+                    if getattr(t, "pnl_pct", None) is not None
+                ]
+                avg_pnl_pct = (
+                    round(sum(pnl_pcts) / len(pnl_pcts), 2) if pnl_pcts else None
+                )
                 return {
                     "trades": len(trades),
                     "wins": len(wins),
                     "losses": len(losses),
                     "pnl": round(total_pnl, 2),
+                    "pnl_pct": avg_pnl_pct,
                     "win_rate": round(len(wins) / len(trades) * 100, 1) if trades else 0,
                 }
 
@@ -346,7 +373,7 @@ async def trade_summary_periods(request: Request, market: str | None = None):
 
 
 def _empty_summary():
-    empty = {"trades": 0, "wins": 0, "losses": 0, "pnl": 0, "win_rate": 0}
+    empty = {"trades": 0, "wins": 0, "losses": 0, "pnl": 0, "pnl_pct": None, "win_rate": 0}
     return {
         "today": empty,
         "week": empty,

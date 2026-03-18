@@ -14,6 +14,7 @@ export interface PortfolioSummary {
   positions_count: number
   total_position_value?: number
   total_unrealized_pnl: number
+  total_unrealized_pnl_pct?: number
   total_unrealized_pnl_usd?: number
   total_equity: number
   available_cash?: number
@@ -117,6 +118,7 @@ export interface Trade {
   buy_strategy?: string
   status: string
   pnl: number | null
+  pnl_pct: number | null
   created_at: string
   market?: string
   session?: string
