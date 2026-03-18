@@ -1469,3 +1469,371 @@ class TestExchangePositionHeldEvaluation:
 
         assert "TSLA" in evaluated
         assert "AAPL" in evaluated
+
+
+class TestHeldPositionSellBias:
+    """Tests for held-position SELL bias and sell-on-indifference."""
+
+    async def test_held_position_uses_lower_min_confidence(
+        self,
+        mock_adapter,
+        mock_market_data,
+    ):
+        """Held positions should use lower min_confidence for SELL threshold."""
+        from data.indicator_service import IndicatorService
+        from strategies.combiner import SignalCombiner
+
+        registry = MagicMock()
+        risk = RiskManager()
+        order_mgr = OrderManager(adapter=mock_adapter, risk_manager=risk)
+        tracker = MagicMock()
+        tracker.tracked_symbols = ["AAPL"]
+        tracker.get_buy_strategy = MagicMock(return_value="trend_following")
+
+        combiner = SignalCombiner()
+        loop = EvaluationLoop(
+            adapter=mock_adapter,
+            market_data=mock_market_data,
+            indicator_svc=IndicatorService(),
+            registry=registry,
+            combiner=combiner,
+            order_manager=order_mgr,
+            risk_manager=risk,
+            watchlist=[],
+            position_tracker=tracker,
+        )
+        # Use default thresholds
+        loop._held_sell_bias = 0.0
+        loop._held_min_confidence = 0.25
+
+        # Exchange shows AAPL held
+        mock_market_data.get_positions.return_value = [
+            Position(
+                symbol="AAPL", exchange="NASD", quantity=10,
+                avg_price=150.0, current_price=145.0,
+            ),
+        ]
+
+        # Strategy returns weak SELL (conf=0.30 — below default 0.35 but above 0.25)
+        strategy = AsyncMock()
+        strategy.name = "trend_following"
+        strategy.analyze = AsyncMock(
+            return_value=Signal(
+                signal_type=SignalType.SELL,
+                confidence=0.30,
+                strategy_name="trend_following",
+                reason="weak sell",
+            )
+        )
+        registry.get_enabled.return_value = [strategy]
+        registry.get_profile_weights.return_value = {"trend_following": 1.0}
+
+        mock_adapter.create_sell_order = AsyncMock(
+            return_value=OrderResult(
+                order_id="S1", symbol="AAPL", side="SELL",
+                order_type="limit", quantity=10, price=145.0,
+                status="filled", filled_price=145.0,
+            )
+        )
+
+        await loop._evaluate_all()
+
+        # Weak SELL (0.30) should pass with held_min_confidence=0.25
+        mock_adapter.create_sell_order.assert_called_once()
+
+    async def test_sell_on_indifference_losing_position(
+        self,
+        mock_adapter,
+        mock_market_data,
+    ):
+        """HOLD signal + losing P&L on held position → sell on indifference."""
+        from data.indicator_service import IndicatorService
+        from strategies.combiner import SignalCombiner
+
+        registry = MagicMock()
+        risk = RiskManager()
+        order_mgr = OrderManager(adapter=mock_adapter, risk_manager=risk)
+        tracker = MagicMock()
+        tracker.tracked_symbols = ["AAPL"]
+        tracker.get_buy_strategy = MagicMock(return_value="trend_following")
+
+        loop = EvaluationLoop(
+            adapter=mock_adapter,
+            market_data=mock_market_data,
+            indicator_svc=IndicatorService(),
+            registry=registry,
+            combiner=SignalCombiner(),
+            order_manager=order_mgr,
+            risk_manager=risk,
+            watchlist=[],
+            position_tracker=tracker,
+        )
+        loop._stale_pnl_threshold = -0.03
+
+        # Position at -5% (below -3% threshold)
+        mock_market_data.get_positions.return_value = [
+            Position(
+                symbol="AAPL", exchange="NASD", quantity=10,
+                avg_price=100.0, current_price=95.0,
+            ),
+        ]
+
+        # All strategies say HOLD (no strong opinion)
+        strategy = AsyncMock()
+        strategy.name = "trend_following"
+        strategy.analyze = AsyncMock(
+            return_value=Signal(
+                signal_type=SignalType.HOLD,
+                confidence=0.3,
+                strategy_name="trend_following",
+                reason="hold",
+            )
+        )
+        registry.get_enabled.return_value = [strategy]
+        registry.get_profile_weights.return_value = {"trend_following": 1.0}
+
+        mock_adapter.create_sell_order = AsyncMock(
+            return_value=OrderResult(
+                order_id="S1", symbol="AAPL", side="SELL",
+                order_type="limit", quantity=10, price=95.0,
+                status="filled", filled_price=95.0,
+            )
+        )
+
+        await loop._evaluate_all()
+
+        # HOLD + losing P&L → position_cleanup sell
+        mock_adapter.create_sell_order.assert_called_once()
+
+    async def test_no_sell_on_indifference_positive_pnl(
+        self,
+        mock_adapter,
+        mock_market_data,
+    ):
+        """HOLD + positive P&L should NOT trigger sell on indifference."""
+        from data.indicator_service import IndicatorService
+        from strategies.combiner import SignalCombiner
+
+        registry = MagicMock()
+        risk = RiskManager()
+        order_mgr = OrderManager(adapter=mock_adapter, risk_manager=risk)
+        tracker = MagicMock()
+        tracker.tracked_symbols = ["AAPL"]
+
+        loop = EvaluationLoop(
+            adapter=mock_adapter,
+            market_data=mock_market_data,
+            indicator_svc=IndicatorService(),
+            registry=registry,
+            combiner=SignalCombiner(),
+            order_manager=order_mgr,
+            risk_manager=risk,
+            watchlist=[],
+            position_tracker=tracker,
+        )
+        loop._stale_pnl_threshold = -0.03
+
+        # Position at +5% (above threshold)
+        mock_market_data.get_positions.return_value = [
+            Position(
+                symbol="AAPL", exchange="NASD", quantity=10,
+                avg_price=100.0, current_price=105.0,
+            ),
+        ]
+
+        strategy = AsyncMock()
+        strategy.name = "trend_following"
+        strategy.analyze = AsyncMock(
+            return_value=Signal(
+                signal_type=SignalType.HOLD,
+                confidence=0.3,
+                strategy_name="trend_following",
+                reason="hold",
+            )
+        )
+        registry.get_enabled.return_value = [strategy]
+        registry.get_profile_weights.return_value = {"trend_following": 1.0}
+
+        mock_adapter.create_sell_order = AsyncMock()
+
+        await loop._evaluate_all()
+
+        # Positive P&L → no sell
+        mock_adapter.create_sell_order.assert_not_called()
+
+    async def test_no_sell_on_indifference_non_held(
+        self,
+        mock_adapter,
+        mock_market_data,
+    ):
+        """Non-held positions should not trigger sell on indifference."""
+        from data.indicator_service import IndicatorService
+        from strategies.combiner import SignalCombiner
+
+        registry = MagicMock()
+        risk = RiskManager()
+        order_mgr = OrderManager(adapter=mock_adapter, risk_manager=risk)
+        tracker = MagicMock()
+        tracker.tracked_symbols = []  # Nothing tracked
+
+        loop = EvaluationLoop(
+            adapter=mock_adapter,
+            market_data=mock_market_data,
+            indicator_svc=IndicatorService(),
+            registry=registry,
+            combiner=SignalCombiner(),
+            order_manager=order_mgr,
+            risk_manager=risk,
+            watchlist=["AAPL"],
+            position_tracker=tracker,
+        )
+        loop._stale_pnl_threshold = -0.03
+
+        # No positions held
+        mock_market_data.get_positions.return_value = []
+
+        strategy = AsyncMock()
+        strategy.name = "trend_following"
+        strategy.analyze = AsyncMock(
+            return_value=Signal(
+                signal_type=SignalType.HOLD,
+                confidence=0.3,
+                strategy_name="trend_following",
+                reason="hold",
+            )
+        )
+        registry.get_enabled.return_value = [strategy]
+        registry.get_profile_weights.return_value = {"trend_following": 1.0}
+
+        mock_adapter.create_sell_order = AsyncMock()
+
+        await loop._evaluate_all()
+
+        # Not held → no sell
+        mock_adapter.create_sell_order.assert_not_called()
+
+    async def test_held_sell_bias_applied_to_combiner(
+        self,
+        mock_adapter,
+        mock_market_data,
+    ):
+        """Held positions should pass held_sell_bias to combiner."""
+        from data.indicator_service import IndicatorService
+        from strategies.combiner import SignalCombiner
+
+        registry = MagicMock()
+        risk = RiskManager()
+        order_mgr = OrderManager(adapter=mock_adapter, risk_manager=risk)
+        tracker = MagicMock()
+        tracker.tracked_symbols = ["AAPL"]
+        tracker.get_buy_strategy = MagicMock(return_value="trend_following")
+
+        combiner = SignalCombiner()
+        combine_spy = MagicMock(wraps=combiner.combine)
+        combiner.combine = combine_spy
+
+        loop = EvaluationLoop(
+            adapter=mock_adapter,
+            market_data=mock_market_data,
+            indicator_svc=IndicatorService(),
+            registry=registry,
+            combiner=combiner,
+            order_manager=order_mgr,
+            risk_manager=risk,
+            watchlist=[],
+            position_tracker=tracker,
+        )
+        loop._held_sell_bias = 0.10
+        loop._held_min_confidence = 0.25
+
+        mock_market_data.get_positions.return_value = [
+            Position(
+                symbol="AAPL", exchange="NASD", quantity=10,
+                avg_price=150.0, current_price=145.0,
+            ),
+        ]
+
+        strategy = AsyncMock()
+        strategy.name = "trend_following"
+        strategy.analyze = AsyncMock(
+            return_value=Signal(
+                signal_type=SignalType.SELL,
+                confidence=0.6,
+                strategy_name="trend_following",
+                reason="sell",
+            )
+        )
+        registry.get_enabled.return_value = [strategy]
+        registry.get_profile_weights.return_value = {"trend_following": 1.0}
+
+        mock_adapter.create_sell_order = AsyncMock(
+            return_value=OrderResult(
+                order_id="S1", symbol="AAPL", side="SELL",
+                order_type="limit", quantity=10, price=145.0,
+                status="filled", filled_price=145.0,
+            )
+        )
+
+        await loop._evaluate_all()
+
+        # Verify combiner was called with held_sell_bias for AAPL
+        combine_spy.assert_called_once()
+        call_kwargs = combine_spy.call_args
+        assert call_kwargs.kwargs.get("held_sell_bias") == 0.10
+        assert call_kwargs.kwargs.get("min_confidence") == 0.25
+
+    async def test_sell_on_indifference_mild_loss_not_triggered(
+        self,
+        mock_adapter,
+        mock_market_data,
+    ):
+        """P&L slightly above threshold should not trigger sell on indifference."""
+        from data.indicator_service import IndicatorService
+        from strategies.combiner import SignalCombiner
+
+        registry = MagicMock()
+        risk = RiskManager()
+        order_mgr = OrderManager(adapter=mock_adapter, risk_manager=risk)
+        tracker = MagicMock()
+        tracker.tracked_symbols = ["AAPL"]
+
+        loop = EvaluationLoop(
+            adapter=mock_adapter,
+            market_data=mock_market_data,
+            indicator_svc=IndicatorService(),
+            registry=registry,
+            combiner=SignalCombiner(),
+            order_manager=order_mgr,
+            risk_manager=risk,
+            watchlist=[],
+            position_tracker=tracker,
+        )
+        loop._stale_pnl_threshold = -0.03
+
+        # Position at -2% (above -3% threshold → NOT stale)
+        mock_market_data.get_positions.return_value = [
+            Position(
+                symbol="AAPL", exchange="NASD", quantity=10,
+                avg_price=100.0, current_price=98.0,
+            ),
+        ]
+
+        strategy = AsyncMock()
+        strategy.name = "trend_following"
+        strategy.analyze = AsyncMock(
+            return_value=Signal(
+                signal_type=SignalType.HOLD,
+                confidence=0.3,
+                strategy_name="trend_following",
+                reason="hold",
+            )
+        )
+        registry.get_enabled.return_value = [strategy]
+        registry.get_profile_weights.return_value = {"trend_following": 1.0}
+
+        mock_adapter.create_sell_order = AsyncMock()
+
+        await loop._evaluate_all()
+
+        # -2% is above -3% threshold → no sell
+        mock_adapter.create_sell_order.assert_not_called()

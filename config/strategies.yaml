@@ -7,6 +7,10 @@ global:
   evaluation_interval_sec: 300
   max_active_strategies: 6
   signal_combination: weighted_vote  # weighted_vote | majority | highest_confidence
+  # Held-position exit tuning: lower the bar for selling existing positions
+  held_sell_bias: 0.10          # SELL confidence boost when evaluating held stocks
+  held_min_confidence: 0.25     # min_confidence for held positions (vs 0.35 default)
+  stale_pnl_threshold: -0.03   # P&L below this + HOLD signal → sell on indifference
 
 # Market state -> strategy weight profiles
 profiles:

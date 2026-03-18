@@ -363,3 +363,79 @@ class TestConsensusSignalCombiner:
         result = combiner.combine(signals, weights)
         assert result.signal_type == SignalType.BUY
         assert result.confidence > 0.5
+
+
+class TestHeldSellBias:
+    """Tests for held_sell_bias parameter in combine()."""
+
+    def test_held_sell_bias_boosts_sell(self):
+        """SELL signal confidence boosted when held_sell_bias > 0."""
+        combiner = SignalCombiner()
+        signals = [
+            _signal("trend_following", SignalType.SELL, 0.6),
+        ]
+        weights = {"trend_following": 1.0}
+        no_bias = combiner.combine(signals, weights)
+        with_bias = combiner.combine(signals, weights, held_sell_bias=0.10)
+        assert no_bias.signal_type == SignalType.SELL
+        assert with_bias.signal_type == SignalType.SELL
+        assert with_bias.confidence > no_bias.confidence
+
+    def test_held_sell_bias_zero_no_change(self):
+        """Default held_sell_bias=0 produces identical results."""
+        combiner = SignalCombiner()
+        signals = [
+            _signal("trend_following", SignalType.BUY, 0.7),
+            _signal("supertrend", SignalType.SELL, 0.6),
+        ]
+        weights = {"trend_following": 0.5, "supertrend": 0.5}
+        default = combiner.combine(signals, weights)
+        explicit = combiner.combine(signals, weights, held_sell_bias=0.0)
+        assert default.signal_type == explicit.signal_type
+        assert default.confidence == pytest.approx(explicit.confidence)
+
+    def test_held_sell_bias_no_effect_without_sell_signals(self):
+        """Bias doesn't create phantom sells when no strategy votes SELL."""
+        combiner = SignalCombiner()
+        signals = [
+            _signal("trend_following", SignalType.BUY, 0.7),
+            _signal("supertrend", SignalType.HOLD, 0.5),
+        ]
+        weights = {"trend_following": 0.5, "supertrend": 0.5}
+        result = combiner.combine(signals, weights, held_sell_bias=0.20)
+        # No SELL signal → bias doesn't apply → BUY as normal
+        assert result.signal_type == SignalType.BUY
+
+    def test_held_sell_bias_flips_marginal_buy_to_sell(self):
+        """When BUY barely wins, held_sell_bias can flip the result to SELL."""
+        combiner = SignalCombiner()
+        # BUY: 0.55*0.35 = 0.1925, SELL: 0.50*0.30 = 0.15
+        # active_weight = 0.65
+        # buy_norm = 0.1925/0.65 ≈ 0.296
+        # sell_norm = 0.15/0.65 ≈ 0.231
+        # Without bias: sell_norm < buy_norm, but both < 0.35 → HOLD
+        # With bias: sell_norm + 0.10 = 0.331 > buy_norm 0.296 → SELL if ≥ min_confidence
+        signals = [
+            _signal("trend_following", SignalType.BUY, 0.55),
+            _signal("supertrend", SignalType.SELL, 0.50),
+            _signal("dual_momentum", SignalType.HOLD, 0.5),
+        ]
+        weights = {"trend_following": 0.35, "supertrend": 0.30, "dual_momentum": 0.35}
+        no_bias = combiner.combine(signals, weights, min_confidence=0.25)
+        with_bias = combiner.combine(
+            signals, weights, min_confidence=0.25, held_sell_bias=0.10,
+        )
+        assert no_bias.signal_type == SignalType.BUY
+        assert with_bias.signal_type == SignalType.SELL
+
+    def test_held_sell_bias_does_not_break_strong_buy(self):
+        """Strong unanimous BUY is not flipped by moderate held_sell_bias."""
+        combiner = SignalCombiner()
+        signals = [
+            _signal("trend_following", SignalType.BUY, 0.9),
+            _signal("supertrend", SignalType.BUY, 0.8),
+            _signal("dual_momentum", SignalType.BUY, 0.7),
+        ]
+        weights = {"trend_following": 0.35, "supertrend": 0.30, "dual_momentum": 0.35}
+        result = combiner.combine(signals, weights, held_sell_bias=0.10)
+        assert result.signal_type == SignalType.BUY
