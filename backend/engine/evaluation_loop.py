@@ -97,6 +97,10 @@ class EvaluationLoop:
         # Recovery watch: recently sold symbols get re-evaluated for re-entry
         self._recovery_watch: dict[str, float] = {}  # {symbol: timestamp_when_sold}
         self._recovery_watch_secs = 7 * 86400  # 7 days
+        # Sell cooldown: block BUY for recently-sold symbols (STOCK-20)
+        self._sell_cooldown_secs: int = 24 * 3600  # 24 hours
+        # Per-symbol maximum position weight (% of portfolio) (STOCK-20)
+        self._max_per_symbol_pct: float = 0.10  # 10% max per symbol
         # Daily buy counter (resets at midnight)
         self._daily_buy_count: int = 0
         self._daily_buy_date: str = ""
@@ -649,6 +653,24 @@ class EvaluationLoop:
                 logger.debug("Skipping BUY for %s: already held", symbol)
                 return
 
+            # STOCK-20: Sell cooldown — block BUY for recently-sold symbols.
+            # After a stop-loss or strategy sell, wait at least _sell_cooldown_secs
+            # before re-buying to prevent sell-then-immediately-rebuy churn.
+            sell_ts = self._recovery_watch.get(symbol)
+            if sell_ts is not None and self._sell_cooldown_secs > 0:
+                elapsed = time.time() - sell_ts
+                if elapsed < self._sell_cooldown_secs:
+                    hours_ago = elapsed / 3600
+                    cooldown_h = self._sell_cooldown_secs / 3600
+                    logger.info(
+                        "Skipping BUY for %s: sell cooldown (sold %.1fh ago, "
+                        "cooldown=%.0fh)",
+                        symbol,
+                        hours_ago,
+                        cooldown_h,
+                    )
+                    return
+
             # Skip if signal hasn't changed since last evaluation (daily strategies
             # produce the same signal all day — no point re-buying)
             last = self._last_signal.get(symbol)
@@ -676,6 +698,27 @@ class EvaluationLoop:
                     symbol,
                 )
                 return
+
+            # STOCK-20: Per-symbol position concentration limit.
+            # Block additional buys if existing position value exceeds
+            # max_per_symbol_pct of portfolio. Defense-in-depth for cases
+            # where position_tracker is unavailable (e.g. after restart).
+            existing_pos = next(
+                (p for p in positions if p.symbol == symbol and p.quantity > 0),
+                None,
+            )
+            if existing_pos and balance.total > 0:
+                existing_value = existing_pos.current_price * existing_pos.quantity
+                max_value = balance.total * self._max_per_symbol_pct
+                if existing_value >= max_value:
+                    logger.info(
+                        "Skipping BUY for %s: position concentration %.1f%% "
+                        ">= limit %.1f%%",
+                        symbol,
+                        (existing_value / balance.total) * 100,
+                        self._max_per_symbol_pct * 100,
+                    )
+                    return
 
             # Combined portfolio value for integrated margin allocation
             combined_pv = await self._get_combined_portfolio_value(balance.total)
