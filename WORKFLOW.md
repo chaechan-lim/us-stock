@@ -70,6 +70,7 @@ project:
     frontend-build: "cd frontend && npm run build"
   skills_dir: ".symphony/skills"
   hooks:
+    after_create: "ln -sfn /home/chans/us-stock/venv venv"
     pre_run: ".symphony/hooks/pre-run.sh"
     post_success: ".symphony/hooks/post-success.sh"
     hook_must_pass: true
