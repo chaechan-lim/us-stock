@@ -1,13 +1,15 @@
 """LLM client + provider tests."""
-import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
+
 from dataclasses import dataclass
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
 
 from services.llm.client import LLMClient, LLMResponse, ToolCall
 from services.llm.providers import AnthropicProvider
 
-
 # ── Mock helpers ──────────────────────────────────────────────
+
 
 @dataclass
 class MockLLMConfig:
@@ -56,8 +58,8 @@ def _make_client_with_mock_provider(config=None):
 
 # ── LLMClient tests ──────────────────────────────────────────
 
-class TestLLMClientInit:
 
+class TestLLMClientInit:
     def test_init_anthropic_only(self):
         client, _ = _make_client_with_mock_provider()
         assert client._anthropic is not None
@@ -73,6 +75,7 @@ class TestLLMClientInit:
         config = MockLLMConfig(gemini_api_key="test-key")
         with patch.object(AnthropicProvider, "__init__", return_value=None):
             from services.llm.providers import GeminiProvider
+
             with patch.object(GeminiProvider, "__init__", return_value=None):
                 client = LLMClient(config)
         assert client._anthropic is not None
@@ -80,7 +83,6 @@ class TestLLMClientInit:
 
 
 class TestLLMClientFallbackChain:
-
     def test_chain_anthropic_only(self):
         client, _ = _make_client_with_mock_provider()
         chain = client._build_fallback_chain()
@@ -101,7 +103,21 @@ class TestLLMClientFallbackChain:
     def test_chain_with_model_override(self):
         client, _ = _make_client_with_mock_provider()
         chain = client._build_fallback_chain(model_override="claude-sonnet-4-6")
-        assert chain[0][0] == "claude-sonnet-4-6"
+        models = [m for m, _ in chain]
+        assert models[0] == "claude-sonnet-4-6"
+        # Haiku should be a fallback when override is set
+        assert "claude-haiku-4-5-20251001" in models
+        # No duplicates
+        assert len(models) == len(set(models))
+
+    def test_chain_with_model_override_deduplicates(self):
+        """Override same as primary should not create duplicates."""
+        client, _ = _make_client_with_mock_provider()
+        chain = client._build_fallback_chain(
+            model_override="claude-haiku-4-5-20251001",
+        )
+        models = [m for m, _ in chain]
+        assert models.count("claude-haiku-4-5-20251001") == 1
 
     def test_chain_no_fallback(self):
         config = MockLLMConfig(fallback_model="")
@@ -111,7 +127,6 @@ class TestLLMClientFallbackChain:
 
 
 class TestLLMClientGenerate:
-
     @pytest.mark.asyncio
     async def test_generate_success(self):
         client, provider = _make_client_with_mock_provider()
@@ -188,7 +203,6 @@ class TestLLMClientGenerate:
 
 
 class TestLLMClientToolUse:
-
     @pytest.mark.asyncio
     async def test_tool_use_response(self):
         client, provider = _make_client_with_mock_provider()
@@ -211,7 +225,6 @@ class TestLLMClientToolUse:
 
 
 class TestFormatToolLoopMessages:
-
     def test_format_delegates_to_provider(self):
         client, provider = _make_client_with_mock_provider()
 
@@ -237,8 +250,8 @@ class TestFormatToolLoopMessages:
 
 # ── AnthropicProvider tests ───────────────────────────────────
 
-class TestAnthropicProvider:
 
+class TestAnthropicProvider:
     @pytest.mark.asyncio
     async def test_create_text_response(self):
         with patch("anthropic.AsyncAnthropic") as mock_cls:
