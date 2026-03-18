@@ -7,6 +7,15 @@ global:
   evaluation_interval_sec: 300
   max_active_strategies: 6
   signal_combination: weighted_vote  # weighted_vote | majority | highest_confidence
+  # Profit-taking: sell a portion at intermediate gain before full TP
+  profit_taking:
+    enabled: true
+    threshold_pct: 0.10    # 10% gain triggers partial sell
+    sell_ratio: 0.50       # sell 50% of position
+  # Default trailing stop for strategies without explicit config
+  trailing_stop_defaults:
+    activation_pct: 0.06   # activate after 6% gain
+    trail_pct: 0.03        # sell if drops 3% from peak
 
 # Market state -> strategy weight profiles
 profiles:
@@ -183,6 +192,10 @@ strategies:
     take_profit:
       type: fixed_pct
       max_pct: 0.20         # SL/TP optimized: moderate
+    trailing_stop:
+      enabled: true
+      activation_pct: 0.06
+      trail_pct: 0.04
 
   supertrend:
     enabled: true
@@ -193,6 +206,10 @@ strategies:
       confirmation_bars: 1   # walk-forward: 3 -> 1 (more robust)
     stop_loss:
       type: supertrend
+    trailing_stop:
+      enabled: true
+      activation_pct: 0.08
+      trail_pct: 0.05
 
   macd_histogram:
     enabled: true
@@ -274,7 +291,11 @@ strategies:
       max_pct: 0.12         # SL/TP optimized: wide
     take_profit:
       type: fixed_pct
-      max_pct: 0.30         # SL/TP optimized: wide
+      max_pct: 0.20         # lowered: 0.30 -> 0.20 (realistic target)
+    trailing_stop:
+      enabled: true
+      activation_pct: 0.06
+      trail_pct: 0.04
 
   larry_williams:
     enabled: true

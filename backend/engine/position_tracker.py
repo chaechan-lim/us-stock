@@ -38,9 +38,10 @@ class TrackedPosition:
     strategy: str = ""
     stop_loss_pct: float | None = None
     take_profit_pct: float | None = None
-    trailing_activation_pct: float = 0.0  # disabled: cuts winners short
+    trailing_activation_pct: float = 0.0
     trailing_stop_pct: float = 0.0
     tracked_at: float = field(default_factory=time.monotonic)
+    partial_profit_taken: bool = False  # True after partial profit sell executed
 
 
 class PositionTracker:
@@ -75,8 +76,25 @@ class PositionTracker:
         strategy: str = "",
         stop_loss_pct: float | None = None,
         take_profit_pct: float | None = None,
+        trailing_activation_pct: float | None = None,
+        trailing_stop_pct: float | None = None,
     ) -> None:
-        """Start tracking a position."""
+        """Start tracking a position.
+
+        Args:
+            trailing_activation_pct: Profit % to activate trailing stop.
+                Falls back to RiskParams default if None.
+            trailing_stop_pct: Trail % from peak to trigger sell.
+                Falls back to RiskParams default if None.
+        """
+        # Apply trailing stop defaults from risk params when not specified
+        trail_act = trailing_activation_pct
+        trail_pct = trailing_stop_pct
+        if trail_act is None:
+            trail_act = self._risk.params.default_trailing_activation_pct
+        if trail_pct is None:
+            trail_pct = self._risk.params.default_trailing_stop_pct
+
         self._tracked[symbol] = TrackedPosition(
             symbol=symbol,
             entry_price=entry_price,
@@ -85,8 +103,19 @@ class PositionTracker:
             strategy=strategy,
             stop_loss_pct=stop_loss_pct,
             take_profit_pct=take_profit_pct,
+            trailing_activation_pct=trail_act,
+            trailing_stop_pct=trail_pct,
         )
-        logger.info("Tracking position: %s %d @ $%.2f", symbol, quantity, entry_price)
+        logger.info(
+            "Tracking position: %s %d @ $%.2f (SL=%.1f%% TP=%.1f%% trail=%.1f%%/%.1f%%)",
+            symbol,
+            quantity,
+            entry_price,
+            (stop_loss_pct or 0) * 100,
+            (take_profit_pct or 0) * 100,
+            trail_act * 100,
+            trail_pct * 100,
+        )
         self._schedule_db_upsert(symbol)
 
     def untrack(self, symbol: str) -> None:
@@ -149,12 +178,26 @@ class PositionTracker:
             action = self._evaluate(tracked, current_price)
             if action:
                 triggered.append(action)
-                await self._execute_sell(tracked, current_price, action["reason"], session=session)
+                if action["reason"] == "profit_taking":
+                    await self._execute_partial_sell(
+                        tracked,
+                        current_price,
+                        action.get("partial_qty", 0),
+                        session=session,
+                    )
+                else:
+                    await self._execute_sell(
+                        tracked, current_price, action["reason"], session=session
+                    )
 
         return triggered
 
     def _evaluate(self, tracked: TrackedPosition, current_price: float) -> dict | None:
-        """Evaluate if any exit condition is met."""
+        """Evaluate if any exit condition is met.
+
+        Check order: stop_loss → profit_taking (partial) → trailing_stop → take_profit.
+        Profit-taking sells a portion at intermediate gains before TP is reached.
+        """
         # Widen SL if earnings are near
         sl_pct = tracked.stop_loss_pct
         if self._event_calendar and sl_pct:
@@ -173,18 +216,21 @@ class PositionTracker:
                 "pnl": pnl,
             }
 
-        # Take-profit
-        if self._risk.check_take_profit(
-            tracked.entry_price, current_price, tracked.take_profit_pct
-        ):
-            pnl = (current_price - tracked.entry_price) * tracked.quantity
-            return {
-                "symbol": tracked.symbol,
-                "reason": "take_profit",
-                "entry": tracked.entry_price,
-                "current": current_price,
-                "pnl": pnl,
-            }
+        # Partial profit-taking at intermediate gain level
+        if self._check_profit_taking(tracked, current_price):
+            gain_pct = (current_price - tracked.entry_price) / tracked.entry_price
+            sell_qty = self._calculate_profit_take_qty(tracked)
+            if sell_qty > 0:
+                pnl = (current_price - tracked.entry_price) * sell_qty
+                return {
+                    "symbol": tracked.symbol,
+                    "reason": "profit_taking",
+                    "entry": tracked.entry_price,
+                    "current": current_price,
+                    "pnl": pnl,
+                    "partial_qty": sell_qty,
+                    "gain_pct": round(gain_pct * 100, 1),
+                }
 
         # Trailing stop
         if self._risk.check_trailing_stop(
@@ -204,7 +250,142 @@ class PositionTracker:
                 "pnl": pnl,
             }
 
+        # Take-profit (full position)
+        if self._risk.check_take_profit(
+            tracked.entry_price, current_price, tracked.take_profit_pct
+        ):
+            pnl = (current_price - tracked.entry_price) * tracked.quantity
+            return {
+                "symbol": tracked.symbol,
+                "reason": "take_profit",
+                "entry": tracked.entry_price,
+                "current": current_price,
+                "pnl": pnl,
+            }
+
         return None
+
+    def _check_profit_taking(
+        self, tracked: TrackedPosition, current_price: float
+    ) -> bool:
+        """Check if partial profit-taking should be triggered.
+
+        Returns True when:
+        - Profit-taking is enabled in risk params
+        - Position has not already had partial profit taken
+        - Current gain exceeds the profit-taking threshold
+        - Current gain is BELOW the take-profit threshold (TP = full sell)
+        - Position has enough quantity for partial sell (>= 2 shares)
+        """
+        if not self._risk.params.profit_taking_enabled:
+            return False
+        if tracked.partial_profit_taken:
+            return False
+        if tracked.quantity < 2:
+            return False
+        if tracked.entry_price <= 0:
+            return False
+
+        gain_pct = (current_price - tracked.entry_price) / tracked.entry_price
+
+        # Don't partial-sell if we've already reached full TP level
+        tp_pct = tracked.take_profit_pct or self._risk.params.default_take_profit_pct
+        if gain_pct >= tp_pct:
+            return False
+
+        return gain_pct >= self._risk.params.profit_taking_threshold_pct
+
+    def _calculate_profit_take_qty(self, tracked: TrackedPosition) -> int:
+        """Calculate number of shares to sell for partial profit-taking."""
+        sell_ratio = self._risk.params.profit_taking_sell_ratio
+        sell_qty = max(1, int(tracked.quantity * sell_ratio))
+        # Never sell the entire position via profit-taking
+        sell_qty = min(sell_qty, tracked.quantity - 1)
+        return sell_qty
+
+    async def _execute_partial_sell(
+        self,
+        tracked: TrackedPosition,
+        price: float,
+        sell_qty: int,
+        session: str = "regular",
+    ) -> None:
+        """Execute a partial sell (profit-taking) and keep remaining position tracked."""
+        gain_pct = (price - tracked.entry_price) / tracked.entry_price * 100
+        logger.warning(
+            "PROFIT_TAKING for %s: selling %d/%d shares (gain=%.1f%%) entry=$%.2f current=$%.2f",
+            tracked.symbol,
+            sell_qty,
+            tracked.quantity,
+            gain_pct,
+            tracked.entry_price,
+            price,
+        )
+
+        order_type = "limit" if session != "regular" else "market"
+
+        order = await self._orders.place_sell(
+            symbol=tracked.symbol,
+            quantity=sell_qty,
+            price=price,
+            strategy_name=f"{tracked.strategy}:profit_taking",
+            order_type=order_type,
+            exchange=self._resolve_exchange(tracked.symbol),
+            entry_price=tracked.entry_price,
+            buy_strategy=tracked.strategy,
+            session=session,
+        )
+
+        if order:
+            fill_qty = order.filled_quantity or sell_qty
+            fill_price = order.filled_price or price
+            pnl = (fill_price - tracked.entry_price) * fill_qty
+            self._risk.update_daily_pnl(pnl)
+
+            # Update tracked position: reduce quantity, mark partial taken
+            tracked.quantity -= fill_qty
+            tracked.partial_profit_taken = True
+
+            # Tighten stop-loss to breakeven after profit-taking
+            # This protects the remaining position from turning into a loss
+            tracked.stop_loss_pct = max(
+                0.01,  # minimum 1% SL
+                min(tracked.stop_loss_pct or 0.08, 0.03),  # tighten to at most 3%
+            )
+
+            logger.info(
+                "Profit taken for %s: sold %d, remaining %d, SL tightened to %.1f%%",
+                tracked.symbol,
+                fill_qty,
+                tracked.quantity,
+                tracked.stop_loss_pct * 100,
+            )
+            self._schedule_db_upsert(tracked.symbol)
+
+            if self._notification:
+                try:
+                    await self._notification.notify_profit_taking(
+                        tracked.symbol,
+                        fill_qty,
+                        tracked.entry_price,
+                        price,
+                        pnl,
+                        tracked.quantity,
+                    )
+                except AttributeError:
+                    # Notification adapter may not have notify_profit_taking yet
+                    try:
+                        await self._notification.notify_take_profit(
+                            tracked.symbol,
+                            fill_qty,
+                            tracked.entry_price,
+                            price,
+                            pnl,
+                        )
+                    except Exception as e:
+                        logger.error("Failed to send profit_taking notification: %s", e)
+                except Exception as e:
+                    logger.error("Failed to send profit_taking notification: %s", e)
 
     async def _execute_sell(
         self,
@@ -213,7 +394,7 @@ class PositionTracker:
         reason: str,
         session: str = "regular",
     ) -> None:
-        """Execute a sell order and notify."""
+        """Execute a full sell order and notify."""
         session_tag = f" [{session}]" if session != "regular" else ""
         logger.warning(
             "%s triggered for %s%s: entry=$%.2f current=$%.2f",

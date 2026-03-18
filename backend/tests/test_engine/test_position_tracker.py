@@ -594,3 +594,486 @@ async def test_restore_paper_order_only_uses_unknown(adapter, risk, order_mgr):
     assert restored[0]["strategy"] == "unknown"
 
     await engine.dispose()
+
+
+# ── Profit-taking tests (STOCK-19) ──────────────────────────────────
+
+
+@pytest.fixture
+def risk_with_profit_taking():
+    """RiskManager with profit-taking enabled."""
+    return RiskManager(
+        RiskParams(
+            default_stop_loss_pct=0.08,
+            default_take_profit_pct=0.20,
+            profit_taking_enabled=True,
+            profit_taking_threshold_pct=0.10,
+            profit_taking_sell_ratio=0.50,
+            default_trailing_activation_pct=0.06,
+            default_trailing_stop_pct=0.03,
+        )
+    )
+
+
+@pytest.mark.asyncio
+async def test_profit_taking_triggered(adapter, risk_with_profit_taking, order_mgr):
+    """Position at +12% gain triggers partial profit-taking (50% sell)."""
+    risk = risk_with_profit_taking
+    order_mgr_pt = OrderManager(adapter=adapter, risk_manager=risk)
+
+    adapter.fetch_positions = AsyncMock(
+        return_value=[
+            Position(
+                symbol="NVDA", exchange="NASD", quantity=20, avg_price=100.0, current_price=112.0
+            ),  # +12% gain (above 10% threshold, below 20% TP)
+        ]
+    )
+    from exchange.base import OrderResult
+
+    adapter.create_sell_order = AsyncMock(
+        return_value=OrderResult(
+            order_id="sell_pt1",
+            symbol="NVDA",
+            side="SELL",
+            order_type="market",
+            quantity=10,
+            status="filled",
+            filled_price=112.0,
+            filled_quantity=10,
+        )
+    )
+
+    tracker = PositionTracker(adapter, risk, order_mgr_pt)
+    tracker.track("NVDA", 100.0, 20)
+
+    triggered = await tracker.check_all()
+    assert len(triggered) == 1
+    assert triggered[0]["reason"] == "profit_taking"
+    assert triggered[0]["partial_qty"] == 10  # 50% of 20
+    assert triggered[0]["gain_pct"] == pytest.approx(12.0)
+
+    # Position should still be tracked with reduced quantity
+    assert "NVDA" in tracker.tracked_symbols
+    assert tracker._tracked["NVDA"].quantity == 10  # 20 - 10 sold
+    assert tracker._tracked["NVDA"].partial_profit_taken is True
+    # SL should be tightened to at most 3%
+    assert tracker._tracked["NVDA"].stop_loss_pct <= 0.03
+
+
+@pytest.mark.asyncio
+async def test_profit_taking_not_triggered_below_threshold(adapter, risk_with_profit_taking):
+    """Position at +8% gain should NOT trigger profit-taking (threshold is 10%)."""
+    risk = risk_with_profit_taking
+    order_mgr_pt = OrderManager(adapter=adapter, risk_manager=risk)
+
+    adapter.fetch_positions = AsyncMock(
+        return_value=[
+            Position(
+                symbol="AAPL", exchange="NASD", quantity=10, avg_price=100.0, current_price=108.0
+            ),  # +8% gain, below 10% threshold
+        ]
+    )
+
+    tracker = PositionTracker(adapter, risk, order_mgr_pt)
+    tracker.track("AAPL", 100.0, 10)
+
+    triggered = await tracker.check_all()
+    assert len(triggered) == 0
+    assert tracker._tracked["AAPL"].partial_profit_taken is False
+
+
+@pytest.mark.asyncio
+async def test_profit_taking_skipped_when_above_tp(adapter, risk_with_profit_taking):
+    """Position at +22% (above 20% TP) should do full TP, not partial profit-taking."""
+    risk = risk_with_profit_taking
+    order_mgr_pt = OrderManager(adapter=adapter, risk_manager=risk)
+
+    adapter.fetch_positions = AsyncMock(
+        return_value=[
+            Position(
+                symbol="MSFT", exchange="NASD", quantity=10, avg_price=100.0, current_price=122.0
+            ),  # +22% gain, above 20% TP
+        ]
+    )
+    from exchange.base import OrderResult
+
+    adapter.create_sell_order = AsyncMock(
+        return_value=OrderResult(
+            order_id="sell_tp2",
+            symbol="MSFT",
+            side="SELL",
+            order_type="market",
+            quantity=10,
+            status="filled",
+            filled_price=122.0,
+        )
+    )
+
+    tracker = PositionTracker(adapter, risk, order_mgr_pt)
+    tracker.track("MSFT", 100.0, 10)
+
+    triggered = await tracker.check_all()
+    assert len(triggered) == 1
+    assert triggered[0]["reason"] == "take_profit"  # full TP, not partial
+    assert "MSFT" not in tracker.tracked_symbols  # fully untracked
+
+
+@pytest.mark.asyncio
+async def test_profit_taking_only_once(adapter, risk_with_profit_taking):
+    """Profit-taking should only fire once per position (partial_profit_taken flag)."""
+    risk = risk_with_profit_taking
+    order_mgr_pt = OrderManager(adapter=adapter, risk_manager=risk)
+
+    adapter.fetch_positions = AsyncMock(
+        return_value=[
+            Position(
+                symbol="TSLA", exchange="NASD", quantity=20, avg_price=100.0, current_price=115.0
+            ),
+        ]
+    )
+    from exchange.base import OrderResult
+
+    adapter.create_sell_order = AsyncMock(
+        return_value=OrderResult(
+            order_id="sell_pt2",
+            symbol="TSLA",
+            side="SELL",
+            order_type="market",
+            quantity=10,
+            status="filled",
+            filled_price=115.0,
+            filled_quantity=10,
+        )
+    )
+
+    tracker = PositionTracker(adapter, risk, order_mgr_pt)
+    tracker.track("TSLA", 100.0, 20)
+
+    # First check: profit-taking fires
+    triggered = await tracker.check_all()
+    assert len(triggered) == 1
+    assert triggered[0]["reason"] == "profit_taking"
+    assert tracker._tracked["TSLA"].partial_profit_taken is True
+
+    # Second check with same price: should NOT fire again
+    adapter.fetch_positions = AsyncMock(
+        return_value=[
+            Position(
+                symbol="TSLA", exchange="NASD", quantity=10, avg_price=100.0, current_price=115.0
+            ),
+        ]
+    )
+    triggered2 = await tracker.check_all()
+    assert len(triggered2) == 0
+
+
+@pytest.mark.asyncio
+async def test_profit_taking_disabled(adapter):
+    """Profit-taking disabled in RiskParams → no partial sell."""
+    risk_no_pt = RiskManager(
+        RiskParams(
+            default_stop_loss_pct=0.08,
+            default_take_profit_pct=0.20,
+            profit_taking_enabled=False,
+        )
+    )
+    order_mgr_no = OrderManager(adapter=adapter, risk_manager=risk_no_pt)
+
+    adapter.fetch_positions = AsyncMock(
+        return_value=[
+            Position(
+                symbol="GOOG", exchange="NASD", quantity=10, avg_price=100.0, current_price=115.0
+            ),
+        ]
+    )
+
+    tracker = PositionTracker(adapter, risk_no_pt, order_mgr_no)
+    tracker.track("GOOG", 100.0, 10)
+
+    triggered = await tracker.check_all()
+    assert len(triggered) == 0  # +15% but profit-taking disabled, below TP
+
+
+@pytest.mark.asyncio
+async def test_profit_taking_min_quantity(adapter, risk_with_profit_taking):
+    """Position with only 1 share should not trigger profit-taking."""
+    risk = risk_with_profit_taking
+    order_mgr_pt = OrderManager(adapter=adapter, risk_manager=risk)
+
+    adapter.fetch_positions = AsyncMock(
+        return_value=[
+            Position(
+                symbol="BRK.A", exchange="NASD", quantity=1, avg_price=100.0, current_price=115.0
+            ),
+        ]
+    )
+
+    tracker = PositionTracker(adapter, risk, order_mgr_pt)
+    tracker.track("BRK.A", 100.0, 1)
+
+    triggered = await tracker.check_all()
+    assert len(triggered) == 0  # can't split 1 share
+
+
+# ── Trailing stop propagation tests (STOCK-19) ──────────────────────
+
+
+def test_track_with_trailing_stop_params(adapter, risk_with_profit_taking):
+    """track() accepts and stores trailing stop parameters."""
+    risk = risk_with_profit_taking
+    order_mgr_pt = OrderManager(adapter=adapter, risk_manager=risk)
+    tracker = PositionTracker(adapter, risk, order_mgr_pt)
+
+    tracker.track(
+        "AAPL", 150.0, 10,
+        strategy="trend_following",
+        stop_loss_pct=0.08,
+        take_profit_pct=0.20,
+        trailing_activation_pct=0.08,
+        trailing_stop_pct=0.05,
+    )
+
+    tracked = tracker._tracked["AAPL"]
+    assert tracked.trailing_activation_pct == 0.08
+    assert tracked.trailing_stop_pct == 0.05
+
+
+def test_track_trailing_defaults_from_risk_params(adapter, risk_with_profit_taking):
+    """track() falls back to RiskParams defaults when trailing not specified."""
+    risk = risk_with_profit_taking
+    order_mgr_pt = OrderManager(adapter=adapter, risk_manager=risk)
+    tracker = PositionTracker(adapter, risk, order_mgr_pt)
+
+    tracker.track("AAPL", 150.0, 10, strategy="trend_following")
+
+    tracked = tracker._tracked["AAPL"]
+    assert tracked.trailing_activation_pct == 0.06  # from RiskParams default
+    assert tracked.trailing_stop_pct == 0.03  # from RiskParams default
+
+
+@pytest.mark.asyncio
+async def test_trailing_stop_with_defaults(adapter, risk_with_profit_taking):
+    """Trailing stop fires using default activation/trail from RiskParams."""
+    risk = risk_with_profit_taking
+    order_mgr_pt = OrderManager(adapter=adapter, risk_manager=risk)
+
+    adapter.fetch_positions = AsyncMock(
+        return_value=[
+            Position(
+                symbol="AAPL", exchange="NASD", quantity=10, avg_price=100.0, current_price=103.0
+            ),
+        ]
+    )
+    from exchange.base import OrderResult
+
+    adapter.create_sell_order = AsyncMock(
+        return_value=OrderResult(
+            order_id="sell_trail1",
+            symbol="AAPL",
+            side="SELL",
+            order_type="market",
+            quantity=10,
+            status="filled",
+            filled_price=103.0,
+        )
+    )
+
+    tracker = PositionTracker(adapter, risk, order_mgr_pt)
+    tracker.track("AAPL", 100.0, 10)  # defaults: activation=6%, trail=3%
+
+    # Simulate price went to 110 (10% gain, above 6% activation)
+    tracker._tracked["AAPL"].highest_price = 110.0
+    # Now at 103 → drop from peak = (110-103)/110 = 6.4% > 3% trail
+
+    triggered = await tracker.check_all()
+    assert len(triggered) == 1
+    assert triggered[0]["reason"] == "trailing_stop"
+    assert "AAPL" not in tracker.tracked_symbols
+
+
+@pytest.mark.asyncio
+async def test_trailing_stop_not_activated_yet(adapter, risk_with_profit_taking):
+    """Trailing stop should not fire if price hasn't risen enough to activate."""
+    risk = risk_with_profit_taking
+    order_mgr_pt = OrderManager(adapter=adapter, risk_manager=risk)
+
+    adapter.fetch_positions = AsyncMock(
+        return_value=[
+            Position(
+                symbol="AAPL", exchange="NASD", quantity=10, avg_price=100.0, current_price=104.0
+            ),
+        ]
+    )
+
+    tracker = PositionTracker(adapter, risk, order_mgr_pt)
+    tracker.track("AAPL", 100.0, 10)  # defaults: activation=6%, trail=3%
+    # highest_price = 104 (4% gain, below 6% activation threshold)
+
+    triggered = await tracker.check_all()
+    assert len(triggered) == 0
+
+
+# ── TP cap tests (STOCK-19) ─────────────────────────────────────────
+
+
+def test_tp_cap_us_lowered():
+    """US TP cap should be 20% (was 30%)."""
+    risk = RiskManager()
+    # High volatility stock: ATR = 10% of price → TP would be 35% uncapped
+    sl, tp = risk.calculate_dynamic_sl_tp(100.0, 10.0, market="US")
+    assert tp <= 0.20  # capped at 20%
+
+
+def test_tp_cap_kr_lowered():
+    """KR TP cap should be 25% (was 30%)."""
+    risk = RiskManager()
+    # High volatility stock: ATR = 10% of price → TP would be 50% uncapped
+    sl, tp = risk.calculate_dynamic_sl_tp(100.0, 10.0, market="KR")
+    assert tp <= 0.25  # capped at 25%
+
+
+def test_tp_cap_low_volatility_us():
+    """Low-vol US stock gets reasonable TP, not capped."""
+    risk = RiskManager()
+    # Low volatility: ATR = 2% of price → TP = 2% * 3.5 = 7%
+    sl, tp = risk.calculate_dynamic_sl_tp(100.0, 2.0, market="US")
+    assert tp == pytest.approx(0.07)
+    assert sl == pytest.approx(0.04)
+
+
+# ── Notification tests for profit-taking (STOCK-19) ─────────────────
+
+
+@pytest.mark.asyncio
+async def test_profit_taking_notification(adapter, risk_with_profit_taking):
+    """Notification sent when profit-taking fires."""
+    risk = risk_with_profit_taking
+    order_mgr_pt = OrderManager(adapter=adapter, risk_manager=risk)
+
+    adapter.fetch_positions = AsyncMock(
+        return_value=[
+            Position(
+                symbol="AAPL", exchange="NASD", quantity=20, avg_price=100.0, current_price=112.0
+            ),
+        ]
+    )
+    from exchange.base import OrderResult
+
+    adapter.create_sell_order = AsyncMock(
+        return_value=OrderResult(
+            order_id="sell_pt_notif",
+            symbol="AAPL",
+            side="SELL",
+            order_type="market",
+            quantity=10,
+            status="filled",
+            filled_price=112.0,
+            filled_quantity=10,
+        )
+    )
+
+    notif = AsyncMock()
+    # Simulate notify_profit_taking not available (fallback to notify_take_profit)
+    notif.notify_profit_taking = AsyncMock(side_effect=AttributeError)
+    tracker = PositionTracker(adapter, risk, order_mgr_pt, notification=notif)
+    tracker.track("AAPL", 100.0, 20)
+
+    await tracker.check_all()
+    # Should try notify_profit_taking first, then fallback
+    notif.notify_take_profit.assert_called_once()
+
+
+# ── Integration: profit-taking then trailing stop (STOCK-19) ────────
+
+
+@pytest.mark.asyncio
+async def test_profit_taking_then_trailing_stop(adapter, risk_with_profit_taking):
+    """After profit-taking at 12%, remaining position hits trailing stop."""
+    risk = risk_with_profit_taking
+    order_mgr_pt = OrderManager(adapter=adapter, risk_manager=risk)
+
+    # Phase 1: Price at +12% → profit-taking
+    adapter.fetch_positions = AsyncMock(
+        return_value=[
+            Position(
+                symbol="META", exchange="NASD", quantity=20, avg_price=100.0, current_price=112.0
+            ),
+        ]
+    )
+    from exchange.base import OrderResult
+
+    adapter.create_sell_order = AsyncMock(
+        return_value=OrderResult(
+            order_id="pt1",
+            symbol="META",
+            side="SELL",
+            order_type="market",
+            quantity=10,
+            status="filled",
+            filled_price=112.0,
+            filled_quantity=10,
+        )
+    )
+
+    tracker = PositionTracker(adapter, risk, order_mgr_pt)
+    tracker.track("META", 100.0, 20)
+
+    triggered1 = await tracker.check_all()
+    assert len(triggered1) == 1
+    assert triggered1[0]["reason"] == "profit_taking"
+    assert tracker._tracked["META"].quantity == 10
+
+    # Phase 2: Price peaks at 115, then drops to 109
+    # Trail from peak: (115-109)/115 = 5.2% > 3% trail
+    adapter.fetch_positions = AsyncMock(
+        return_value=[
+            Position(
+                symbol="META", exchange="NASD", quantity=10, avg_price=100.0, current_price=109.0
+            ),
+        ]
+    )
+    adapter.create_sell_order = AsyncMock(
+        return_value=OrderResult(
+            order_id="trail1",
+            symbol="META",
+            side="SELL",
+            order_type="market",
+            quantity=10,
+            status="filled",
+            filled_price=109.0,
+        )
+    )
+    tracker._tracked["META"].highest_price = 115.0
+
+    triggered2 = await tracker.check_all()
+    assert len(triggered2) == 1
+    assert triggered2[0]["reason"] == "trailing_stop"
+    assert "META" not in tracker.tracked_symbols
+
+
+# ── Profit-taking sell quantity calculation (STOCK-19) ───────────────
+
+
+def test_calculate_profit_take_qty():
+    """Verify profit-take quantity calculation."""
+    risk = RiskManager(
+        RiskParams(profit_taking_sell_ratio=0.50)
+    )
+    order_mgr_mock = MagicMock()
+    adapter_mock = MagicMock()
+    tracker = PositionTracker(adapter_mock, risk, order_mgr_mock)
+
+    # 20 shares → sell 10
+    tracker.track("A", 100.0, 20)
+    qty = tracker._calculate_profit_take_qty(tracker._tracked["A"])
+    assert qty == 10
+
+    # 3 shares → sell 1 (min 1, but can't sell all)
+    tracker.track("B", 100.0, 3)
+    qty = tracker._calculate_profit_take_qty(tracker._tracked["B"])
+    assert qty == 1
+
+    # 2 shares → sell 1 (max = quantity - 1 = 1)
+    tracker.track("C", 100.0, 2)
+    qty = tracker._calculate_profit_take_qty(tracker._tracked["C"])
+    assert qty == 1

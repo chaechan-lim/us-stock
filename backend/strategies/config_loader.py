@@ -57,6 +57,14 @@ class StrategyConfigLoader:
     def get_stop_loss_config(self, strategy_name: str) -> dict:
         return self.get_strategy_config(strategy_name).get("stop_loss", {})
 
+    def get_trailing_stop_config(self, strategy_name: str) -> dict:
+        """Get trailing stop config for a strategy.
+
+        Returns dict with 'enabled', 'activation_pct', 'trail_pct' keys,
+        or empty dict if trailing stop is not configured for this strategy.
+        """
+        return self.get_strategy_config(strategy_name).get("trailing_stop", {})
+
     def get_stock_profiles(self) -> dict[str, dict[str, float]]:
         """Get stock category -> strategy weight profiles."""
         return self._config.get("stock_profiles", {})

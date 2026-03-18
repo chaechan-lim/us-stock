@@ -790,6 +790,14 @@ class EvaluationLoop:
                     sl_pct = self._risk_manager.params.default_stop_loss_pct
                     tp_pct = self._risk_manager.params.default_take_profit_pct
 
+                # Look up trailing stop config from strategy YAML
+                trail_act: float | None = None
+                trail_pct: float | None = None
+                trail_cfg = self._registry.get_trailing_stop_config(strategy_name)
+                if trail_cfg and trail_cfg.get("enabled", False):
+                    trail_act = trail_cfg.get("activation_pct")
+                    trail_pct = trail_cfg.get("trail_pct")
+
                 self._position_tracker.track(
                     symbol=symbol,
                     entry_price=price,
@@ -797,6 +805,8 @@ class EvaluationLoop:
                     strategy=strategy_name,
                     stop_loss_pct=sl_pct,
                     take_profit_pct=tp_pct,
+                    trailing_activation_pct=trail_act,
+                    trailing_stop_pct=trail_pct,
                 )
 
         elif signal.signal_type == SignalType.SELL:

@@ -25,6 +25,13 @@ class RiskParams:
     default_take_profit_pct: float = 0.20
     # Market-level fund allocation (share of total portfolio)
     market_allocations: dict[str, float] | None = None  # e.g. {"US": 0.5, "KR": 0.5}
+    # Profit-taking: sell a portion of position at intermediate gain levels
+    profit_taking_enabled: bool = True
+    profit_taking_threshold_pct: float = 0.10  # 10% gain triggers partial sell
+    profit_taking_sell_ratio: float = 0.50  # sell 50% of remaining position
+    # Default trailing stop (used when strategy config doesn't specify)
+    default_trailing_activation_pct: float = 0.06  # activate after 6% gain
+    default_trailing_stop_pct: float = 0.03  # trail 3% from peak
 
 
 @dataclass
@@ -455,12 +462,13 @@ class RiskManager:
         atr_pct = atr / price  # e.g. 0.02 = 2% daily ATR
 
         # SL = 2x ATR, clamped to [3%, 15%] for US, [5%, 20%] for KR
+        # TP capped at realistic levels (was 30%, lowered to avoid unreachable targets)
         if market == "KR":
             sl = max(0.05, min(0.20, atr_pct * 2.5))
-            tp = max(0.08, min(0.30, atr_pct * 5.0))
+            tp = max(0.08, min(0.25, atr_pct * 4.0))
         else:
             sl = max(0.03, min(0.15, atr_pct * 2.0))
-            tp = max(0.06, min(0.30, atr_pct * 4.0))
+            tp = max(0.06, min(0.20, atr_pct * 3.5))
 
         return round(sl, 4), round(tp, 4)
 

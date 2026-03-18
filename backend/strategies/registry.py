@@ -93,3 +93,7 @@ class StrategyRegistry:
     def get_profile_weights(self, market_state: str) -> dict[str, float]:
         """Get strategy weights for current market state."""
         return self._config_loader.get_profile_weights(market_state)
+
+    def get_trailing_stop_config(self, strategy_name: str) -> dict:
+        """Get trailing stop config for a strategy from YAML."""
+        return self._config_loader.get_trailing_stop_config(strategy_name)
