@@ -497,6 +497,85 @@ async def test_take_profit_content():
 
 
 @pytest.mark.asyncio
+async def test_profit_taking_content():
+    """notify_profit_taking shows partial sell details with gain %."""
+    svc, adapter = _svc_with_mock()
+    # Sold 10 shares, 10 remaining, entry $100 -> exit $115 (15% gain), P&L $150
+    await svc.notify_profit_taking("AAPL", 10, 100.0, 115.0, 150.0, 10)
+
+    title, body, level, fields = adapter.sent_rich[0]
+    assert "Profit-Taking" in title
+    assert "Partial Sell" in title
+    assert "AAPL" in body
+    assert "x10" in body
+    assert "remaining 10" in body
+    assert "$100.00" in body
+    assert "$115.00" in body
+    assert "+15.0%" in body
+    assert "+$150.00" in body
+    assert level == AlertLevel.INFO
+    # Check fields
+    assert fields["Sold"] == "10"
+    assert fields["Remaining"] == "10"
+    assert fields["Gain"] == "+15.0%"
+    assert fields["P&L"] == "+$150.00"
+
+
+@pytest.mark.asyncio
+async def test_profit_taking_kr_market():
+    """notify_profit_taking formats KR market prices with won symbol."""
+    svc, adapter = _svc_with_mock()
+    # KR stock (numeric symbol), sold 5, remaining 15, entry 50000 -> exit 57500 (15%)
+    await svc.notify_profit_taking("005930", 5, 50000.0, 57500.0, 37500.0, 15)
+
+    title, body, level, fields = adapter.sent_rich[0]
+    assert "Profit-Taking" in title
+    assert "005930" in body
+    assert "x5" in body
+    assert "remaining 15" in body
+    assert "+15.0%" in body
+    assert "+\u20a937,500" in body  # won currency
+
+
+@pytest.mark.asyncio
+async def test_profit_taking_negative_gain():
+    """notify_profit_taking handles negative gain (shouldn't normally happen but be safe)."""
+    svc, adapter = _svc_with_mock()
+    await svc.notify_profit_taking("TSLA", 5, 200.0, 190.0, -50.0, 5)
+
+    title, body, level, fields = adapter.sent_rich[0]
+    assert "Profit-Taking" in title
+    assert "-5.0%" in body
+    assert "-$50.00" in body
+
+
+@pytest.mark.asyncio
+async def test_profit_taking_zero_entry():
+    """notify_profit_taking handles zero entry price without division error."""
+    svc, adapter = _svc_with_mock()
+    await svc.notify_profit_taking("TEST", 1, 0.0, 10.0, 10.0, 1)
+
+    title, body, level, fields = adapter.sent_rich[0]
+    assert "Profit-Taking" in title
+    assert "+0.0%" in body
+
+
+@pytest.mark.asyncio
+async def test_profit_taking_data_dict():
+    """notify_profit_taking stores gain_pct and remaining_qty in alert data."""
+    svc, adapter = _svc_with_mock()
+    await svc.notify_profit_taking("MSFT", 10, 200.0, 240.0, 400.0, 10)
+
+    record = svc.history[0]
+    assert record.data["qty"] == 10
+    assert record.data["remaining_qty"] == 10
+    assert record.data["gain_pct"] == pytest.approx(20.0)
+    assert record.data["entry"] == 200.0
+    assert record.data["exit"] == 240.0
+    assert record.data["pnl"] == 400.0
+
+
+@pytest.mark.asyncio
 async def test_trailing_stop_content():
     svc, adapter = _svc_with_mock()
     await svc.notify_trailing_stop("GOOG", 8, 140.0, 155.0, 170.0, 120.0)

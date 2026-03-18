@@ -577,6 +577,29 @@ class NotificationService:
              "Exit": self._fmt_price(exit_price, mkt), "P&L": pnl_str},
         )
 
+    async def notify_profit_taking(
+        self, symbol: str, qty: int, entry: float, exit_price: float, pnl: float,
+        remaining_qty: int, market: str = "",
+    ) -> bool:
+        """Notify partial profit-taking sell with sold/remaining details."""
+        mkt = market or self._detect_market(symbol)
+        label = self._symbol_label(symbol)
+        pnl_str = self._pnl_sign(pnl, mkt)
+        gain_pct = ((exit_price - entry) / entry * 100) if entry else 0.0
+        fp = self._fmt_price
+        return await self._dispatch(
+            AlertCategory.POSITION, AlertLevel.INFO, symbol,
+            "Profit-Taking (Partial Sell)",
+            f"SELL {label} x{qty} (remaining {remaining_qty}) | "
+            f"{fp(entry, mkt)} -> {fp(exit_price, mkt)} | "
+            f"Gain {gain_pct:+.1f}% | P&L: {pnl_str}",
+            {"qty": qty, "remaining_qty": remaining_qty, "entry": entry,
+             "exit": exit_price, "pnl": pnl, "gain_pct": gain_pct},
+            {"Symbol": label, "Sold": str(qty), "Remaining": str(remaining_qty),
+             "Entry": fp(entry, mkt), "Exit": fp(exit_price, mkt),
+             "Gain": f"{gain_pct:+.1f}%", "P&L": pnl_str},
+        )
+
     async def notify_trailing_stop(
         self, symbol: str, qty: int, entry: float, exit_price: float,
         highest: float, pnl: float, market: str = "",
