@@ -21,7 +21,7 @@ import pandas as pd
 from exchange.base import ExchangeAdapter
 from data.market_data_service import MarketDataService
 from data.indicator_service import IndicatorService
-from strategies.base import Signal
+from strategies.base import PositionContext, Signal
 from strategies.combiner import SignalCombiner
 from strategies.registry import StrategyRegistry
 from engine.order_manager import OrderManager
@@ -240,6 +240,25 @@ class EvaluationLoop:
                     for s in signals
                 ]
 
+                # STOCK-21: evaluate_exit() for held positions
+                current_price = float(df.iloc[-1]["close"])
+                pos_ctx = self._build_position_context(symbol, current_price)
+                if pos_ctx is not None:
+                    strategy_map = {s.name: s for s in strategies}
+                    evaluated = []
+                    for sig in signals:
+                        strat = strategy_map.get(sig.strategy_name)
+                        if strat is not None:
+                            try:
+                                evaluated.append(
+                                    strat.evaluate_exit(sig, pos_ctx, df)
+                                )
+                            except Exception:
+                                evaluated.append(sig)
+                        else:
+                            evaluated.append(sig)
+                    signals = evaluated
+
             # Combine signals with per-stock weights
             combined = self._combiner.combine(
                 signals,
@@ -380,6 +399,33 @@ class EvaluationLoop:
                             symbol,
                             n_remapped,
                         )
+
+                    # STOCK-21: evaluate_exit() — strategy-level profit-taking
+                    # Build position context and let each strategy evaluate
+                    # whether the held position should be exited for profit.
+                    current_price = float(df.iloc[-1]["close"])
+                    pos_ctx = self._build_position_context(symbol, current_price)
+                    if pos_ctx is not None:
+                        strategy_map = {s.name: s for s in strategies}
+                        evaluated = []
+                        for sig in signals:
+                            strat = strategy_map.get(sig.strategy_name)
+                            if strat is not None:
+                                try:
+                                    evaluated.append(
+                                        strat.evaluate_exit(sig, pos_ctx, df)
+                                    )
+                                except Exception as e:
+                                    logger.debug(
+                                        "evaluate_exit failed for %s/%s: %s",
+                                        sig.strategy_name,
+                                        symbol,
+                                        e,
+                                    )
+                                    evaluated.append(sig)
+                            else:
+                                evaluated.append(sig)
+                        signals = evaluated
 
                 combined = self._combiner.combine(
                     signals,
@@ -875,6 +921,43 @@ class EvaluationLoop:
                     self._position_tracker.untrack(symbol)
                     # Add to recovery watch for re-entry evaluation
                     self._recovery_watch[symbol] = time.time()
+
+    def _build_position_context(
+        self, symbol: str, current_price: float
+    ) -> PositionContext | None:
+        """Build a PositionContext for a held symbol.
+
+        Returns None if the position tracker is unavailable or the symbol
+        is not tracked. Uses TrackedPosition data to avoid extra API calls.
+        """
+        if not self._position_tracker:
+            return None
+        try:
+            tracked_dict = getattr(self._position_tracker, "_tracked", None)
+            if tracked_dict is None:
+                return None
+            tracked = tracked_dict.get(symbol)
+            if tracked is None:
+                return None
+            pnl_pct = (
+                (current_price - tracked.entry_price) / tracked.entry_price
+                if tracked.entry_price > 0
+                else 0.0
+            )
+            hold_secs = time.time() - tracked.tracked_at
+            return PositionContext(
+                symbol=symbol,
+                entry_price=tracked.entry_price,
+                current_price=current_price,
+                highest_price=tracked.highest_price,
+                quantity=tracked.quantity,
+                pnl_pct=pnl_pct,
+                hold_seconds=hold_secs,
+                strategy=tracked.strategy,
+            )
+        except Exception as e:
+            logger.debug("Failed to build position context for %s: %s", symbol, e)
+            return None
 
     def record_trade_result(
         self,

@@ -2195,3 +2195,228 @@ class TestSellCooldownDefault:
     async def test_recovery_watch_initialized_empty(self, eval_loop):
         """Recovery watch should start empty."""
         assert eval_loop._recovery_watch == {}
+
+
+# ------------------------------------------------------------------
+# STOCK-21: evaluate_exit() integration in EvaluationLoop
+# ------------------------------------------------------------------
+
+class TestBuildPositionContext:
+    """Tests for EvaluationLoop._build_position_context()."""
+
+    async def test_build_context_with_tracked_position(self, eval_loop):
+        """Should build context from TrackedPosition data."""
+        import time
+
+        tracked = MagicMock()
+        tracked.entry_price = 100.0
+        tracked.highest_price = 115.0
+        tracked.quantity = 50
+        tracked.strategy = "trend_following"
+        tracked.tracked_at = time.time() - 3600  # 1 hour ago
+
+        position_tracker = MagicMock()
+        position_tracker._tracked = {"AAPL": tracked}
+        position_tracker.tracked_symbols = ["AAPL"]
+        eval_loop._position_tracker = position_tracker
+
+        ctx = eval_loop._build_position_context("AAPL", 110.0)
+
+        assert ctx is not None
+        assert ctx.symbol == "AAPL"
+        assert ctx.entry_price == 100.0
+        assert ctx.current_price == 110.0
+        assert ctx.highest_price == 115.0
+        assert ctx.quantity == 50
+        assert abs(ctx.pnl_pct - 0.10) < 0.001
+        assert ctx.hold_seconds > 0
+
+    async def test_build_context_no_tracker(self, eval_loop):
+        """Should return None when no position tracker."""
+        eval_loop._position_tracker = None
+        ctx = eval_loop._build_position_context("AAPL", 110.0)
+        assert ctx is None
+
+    async def test_build_context_symbol_not_tracked(self, eval_loop):
+        """Should return None for untracked symbol."""
+        position_tracker = MagicMock()
+        position_tracker._tracked = {}
+        eval_loop._position_tracker = position_tracker
+
+        ctx = eval_loop._build_position_context("AAPL", 110.0)
+        assert ctx is None
+
+    async def test_build_context_no_tracked_dict(self, eval_loop):
+        """Should return None when _tracked attribute missing (mock)."""
+        position_tracker = MagicMock(spec=[])  # No attributes
+        eval_loop._position_tracker = position_tracker
+
+        ctx = eval_loop._build_position_context("AAPL", 110.0)
+        assert ctx is None
+
+
+class TestEvaluateExitIntegration:
+    """Tests that evaluate_exit() is called during held position evaluation."""
+
+    async def test_evaluate_exit_called_for_held_positions(
+        self, mock_adapter, mock_market_data, mock_registry
+    ):
+        """When a held position is evaluated, evaluate_exit() should be called
+        on each strategy for each signal."""
+        import time
+        from data.indicator_service import IndicatorService
+        from strategies.combiner import SignalCombiner
+
+        risk = RiskManager()
+        order_mgr = OrderManager(adapter=mock_adapter, risk_manager=risk)
+
+        # Set up a strategy that returns HOLD
+        mock_strategy = mock_registry.get_enabled.return_value[0]
+        mock_strategy.analyze.return_value = Signal(
+            signal_type=SignalType.HOLD,
+            confidence=0.5,
+            strategy_name="trend_following",
+            reason="neutral",
+        )
+        # Mock evaluate_exit to verify it gets called
+        mock_strategy.evaluate_exit = MagicMock(
+            return_value=Signal(
+                signal_type=SignalType.HOLD,
+                confidence=0.5,
+                strategy_name="trend_following",
+                reason="neutral",
+            )
+        )
+
+        # Create a tracked position
+        tracked = MagicMock()
+        tracked.entry_price = 100.0
+        tracked.highest_price = 110.0
+        tracked.quantity = 50
+        tracked.strategy = "trend_following"
+        tracked.tracked_at = time.time() - 86400
+
+        position_tracker = MagicMock()
+        position_tracker._tracked = {"AAPL": tracked}
+        position_tracker.tracked_symbols = ["AAPL"]
+        position_tracker.get_buy_strategy.return_value = "trend_following"
+
+        loop = EvaluationLoop(
+            adapter=mock_adapter,
+            market_data=mock_market_data,
+            indicator_svc=IndicatorService(),
+            registry=mock_registry,
+            combiner=SignalCombiner(),
+            order_manager=order_mgr,
+            risk_manager=risk,
+            watchlist=["AAPL"],
+            position_tracker=position_tracker,
+        )
+
+        await loop.evaluate_symbol("AAPL", is_held=True)
+
+        # evaluate_exit should have been called
+        mock_strategy.evaluate_exit.assert_called_once()
+
+    async def test_evaluate_exit_not_called_for_non_held(
+        self, mock_adapter, mock_market_data, mock_registry
+    ):
+        """evaluate_exit() should NOT be called for non-held positions."""
+        from data.indicator_service import IndicatorService
+        from strategies.combiner import SignalCombiner
+
+        risk = RiskManager()
+        order_mgr = OrderManager(adapter=mock_adapter, risk_manager=risk)
+
+        mock_strategy = mock_registry.get_enabled.return_value[0]
+        mock_strategy.evaluate_exit = MagicMock()
+
+        loop = EvaluationLoop(
+            adapter=mock_adapter,
+            market_data=mock_market_data,
+            indicator_svc=IndicatorService(),
+            registry=mock_registry,
+            combiner=SignalCombiner(),
+            order_manager=order_mgr,
+            risk_manager=risk,
+            watchlist=["AAPL"],
+        )
+
+        await loop.evaluate_symbol("AAPL", is_held=False)
+
+        mock_strategy.evaluate_exit.assert_not_called()
+
+    async def test_evaluate_exit_promotes_hold_to_sell(
+        self, mock_adapter, mock_market_data, mock_registry
+    ):
+        """When evaluate_exit promotes HOLD→SELL for a profitable position,
+        the combiner should receive SELL signals and potentially execute."""
+        import time
+        from data.indicator_service import IndicatorService
+        from strategies.combiner import SignalCombiner
+
+        risk = RiskManager()
+        order_mgr = OrderManager(adapter=mock_adapter, risk_manager=risk)
+
+        mock_strategy = mock_registry.get_enabled.return_value[0]
+        mock_strategy.analyze.return_value = Signal(
+            signal_type=SignalType.HOLD,
+            confidence=0.5,
+            strategy_name="trend_following",
+            reason="neutral",
+        )
+        # evaluate_exit returns SELL
+        mock_strategy.evaluate_exit = MagicMock(
+            return_value=Signal(
+                signal_type=SignalType.SELL,
+                confidence=0.75,
+                strategy_name="trend_following",
+                reason="profit_take(pnl=12.0%, weakness=2/3)",
+            )
+        )
+
+        tracked = MagicMock()
+        tracked.entry_price = 100.0
+        tracked.highest_price = 112.0
+        tracked.quantity = 50
+        tracked.strategy = "trend_following"
+        tracked.tracked_at = time.time() - 86400
+
+        position_tracker = MagicMock()
+        position_tracker._tracked = {"AAPL": tracked}
+        position_tracker.tracked_symbols = ["AAPL"]
+        position_tracker.get_buy_strategy.return_value = "trend_following"
+
+        # Need a sell-able position
+        mock_market_data.get_positions.return_value = [
+            Position(symbol="AAPL", exchange="NASD", quantity=50, avg_price=100.0),
+        ]
+        mock_adapter.create_sell_order = AsyncMock(
+            return_value=OrderResult(
+                order_id="S1",
+                symbol="AAPL",
+                side="SELL",
+                order_type="limit",
+                quantity=50,
+                price=112.0,
+                status="filled",
+                filled_price=112.0,
+            )
+        )
+
+        loop = EvaluationLoop(
+            adapter=mock_adapter,
+            market_data=mock_market_data,
+            indicator_svc=IndicatorService(),
+            registry=mock_registry,
+            combiner=SignalCombiner(),
+            order_manager=order_mgr,
+            risk_manager=risk,
+            watchlist=["AAPL"],
+            position_tracker=position_tracker,
+        )
+
+        await loop.evaluate_symbol("AAPL", is_held=True)
+
+        # Sell should have been executed
+        mock_adapter.create_sell_order.assert_called_once()

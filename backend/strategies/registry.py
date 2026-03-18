@@ -54,6 +54,11 @@ class StrategyRegistry:
 
     def _load_strategies(self) -> None:
         """Instantiate enabled strategies with config params."""
+        # Propagate profit_exit config to BaseStrategy class-level params
+        profit_exit_cfg = self._config_loader.get_profit_exit_config()
+        if profit_exit_cfg:
+            BaseStrategy.set_profit_exit_params(profit_exit_cfg)
+
         for name, cls in STRATEGY_CLASSES.items():
             if self._config_loader.is_enabled(name):
                 params = self._config_loader.get_strategy_params(name)
@@ -75,6 +80,12 @@ class StrategyRegistry:
     def reload_config(self) -> None:
         """Hot-reload strategy configuration from YAML."""
         self._config_loader.reload()
+
+        # Propagate profit_exit config on reload
+        profit_exit_cfg = self._config_loader.get_profit_exit_config()
+        if profit_exit_cfg:
+            BaseStrategy.set_profit_exit_params(profit_exit_cfg)
+
         for name, strategy in self._strategies.items():
             params = self._config_loader.get_strategy_params(name)
             strategy.set_params(params)

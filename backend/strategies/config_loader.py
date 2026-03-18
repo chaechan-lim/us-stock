@@ -77,5 +77,13 @@ class StrategyConfigLoader:
         """Get group consensus configuration for SignalCombiner."""
         return self._config.get("consensus", {})
 
+    def get_profit_exit_config(self) -> dict:
+        """Get strategy-level profit-exit evaluation parameters.
+
+        Returns the global.profit_exit section from strategies.yaml,
+        used by BaseStrategy.evaluate_exit() for profit-taking decisions.
+        """
+        return self.global_config.get("profit_exit", {})
+
     def get_screening_config(self) -> dict:
         return self._config.get("screening", {})

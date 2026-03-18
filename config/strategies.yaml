@@ -12,6 +12,17 @@ global:
     enabled: true
     threshold_pct: 0.10    # 10% gain triggers partial sell
     sell_ratio: 0.50       # sell 50% of position
+  # Strategy-level profit-exit evaluation (STOCK-21)
+  # Used by BaseStrategy.evaluate_exit() when position is profitable
+  profit_exit:
+    sell_confidence_boost_min_pnl: 0.02   # min PnL% to boost SELL confidence
+    sell_confidence_boost_factor: 0.5     # confidence += PnL% * factor
+    sell_confidence_boost_max: 0.15       # max confidence boost
+    profit_take_min_pnl: 0.08            # min PnL% to trigger profit-take on HOLD
+    profit_take_base_confidence: 0.65     # base confidence for profit-take SELL
+    profit_take_weakness_required: 1      # min weakness indicators (0-3) needed
+    rsi_overbought: 70.0                 # RSI threshold for technical weakness
+    volume_weakness_ratio: 0.8           # volume/MA ratio below = weakness
   # Default trailing stop for strategies without explicit config
   trailing_stop_defaults:
     activation_pct: 0.06   # activate after 6% gain
