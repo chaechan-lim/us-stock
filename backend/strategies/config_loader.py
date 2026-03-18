@@ -85,5 +85,20 @@ class StrategyConfigLoader:
         """
         return self.global_config.get("profit_exit", {})
 
+    def get_tiered_trailing_stop_config(self) -> dict:
+        """Get tiered trailing stop configuration.
+
+        Returns dict with 'enabled' and 'tiers' keys.
+        Each tier has 'gain_pct' and 'trail_pct'.
+        """
+        return self.global_config.get("tiered_trailing_stop", {})
+
+    def get_breakeven_stop_config(self) -> dict:
+        """Get breakeven stop configuration.
+
+        Returns dict with 'enabled', 'activation_ratio', 'lock_ratio', 'lock_pct'.
+        """
+        return self.global_config.get("breakeven_stop", {})
+
     def get_screening_config(self) -> dict:
         return self._config.get("screening", {})

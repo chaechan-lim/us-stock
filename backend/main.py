@@ -148,12 +148,31 @@ async def lifespan(app: FastAPI):
         "US": config.risk.market_allocation_us,
         "KR": config.risk.market_allocation_kr,
     }
+
+    # Load tiered trailing stop and breakeven stop config from strategies.yaml (STOCK-24)
+    tiered_cfg = registry._config_loader.get_tiered_trailing_stop_config()
+    tiered_tiers = None
+    if tiered_cfg.get("enabled", False):
+        raw_tiers = tiered_cfg.get("tiers", [])
+        tiered_tiers = [(t["gain_pct"], t["trail_pct"]) for t in raw_tiers]
+
+    be_cfg = registry._config_loader.get_breakeven_stop_config()
+    be_enabled = be_cfg.get("enabled", True)
+    be_activation = be_cfg.get("activation_ratio", 0.50)
+    be_lock_ratio = be_cfg.get("lock_ratio", 0.75)
+    be_lock_pct = be_cfg.get("lock_pct", 0.50)
+
     risk_params = RiskParams(
         market_allocations=market_allocs,
         max_position_pct=0.08,          # 8% per position (diversified, backtest optimal)
         max_positions=20,               # More positions, better diversification
         default_stop_loss_pct=0.12,     # Wider SL: more room for volatility
         default_take_profit_pct=0.50,   # Wide TP: let winners run
+        tiered_trailing_tiers=tiered_tiers,
+        breakeven_stop_enabled=be_enabled,
+        breakeven_stop_activation_ratio=be_activation,
+        breakeven_stop_lock_ratio=be_lock_ratio,
+        breakeven_stop_lock_pct=be_lock_pct,
     )
     risk_manager = RiskManager(params=risk_params)
 
@@ -162,6 +181,11 @@ async def lifespan(app: FastAPI):
         market_allocations=market_allocs,
         default_stop_loss_pct=0.12,     # 12% (wider for KR volatility)
         default_take_profit_pct=0.25,   # 25% (allow larger moves)
+        tiered_trailing_tiers=tiered_tiers,
+        breakeven_stop_enabled=be_enabled,
+        breakeven_stop_activation_ratio=be_activation,
+        breakeven_stop_lock_ratio=be_lock_ratio,
+        breakeven_stop_lock_pct=be_lock_pct,
     )
     kr_risk_manager = RiskManager(params=kr_risk_params)
     order_manager = OrderManager(adapter=adapter, risk_manager=risk_manager, notification=notification, market_data=market_data, is_paper=config.is_paper)

@@ -207,8 +207,11 @@ class PositionTracker:
     def _evaluate(self, tracked: TrackedPosition, current_price: float) -> dict | None:
         """Evaluate if any exit condition is met.
 
-        Check order: stop_loss → profit_taking (partial) → trailing_stop → take_profit.
-        Profit-taking sells a portion at intermediate gains before TP is reached.
+        Check order: stop_loss → profit_taking (partial) → flat trailing_stop
+        → tiered_trailing_stop → breakeven_stop → take_profit.
+
+        Tiered trailing and breakeven stops protect large unrealized gains
+        without cutting early winners (STOCK-24).
         """
         # Widen SL if earnings are near
         sl_pct = tracked.stop_loss_pct
@@ -244,7 +247,7 @@ class PositionTracker:
                     "gain_pct": round(gain_pct * 100, 1),
                 }
 
-        # Trailing stop
+        # Trailing stop (flat, per-strategy)
         if self._risk.check_trailing_stop(
             tracked.entry_price,
             current_price,
@@ -256,6 +259,41 @@ class PositionTracker:
             return {
                 "symbol": tracked.symbol,
                 "reason": "trailing_stop",
+                "entry": tracked.entry_price,
+                "current": current_price,
+                "highest": tracked.highest_price,
+                "pnl": pnl,
+            }
+
+        # Tiered trailing stop (global, gain-adaptive — STOCK-24)
+        if self._risk.check_tiered_trailing_stop(
+            tracked.entry_price,
+            current_price,
+            tracked.highest_price,
+        ):
+            pnl = (current_price - tracked.entry_price) * tracked.quantity
+            gain_pct = (tracked.highest_price - tracked.entry_price) / tracked.entry_price
+            return {
+                "symbol": tracked.symbol,
+                "reason": "tiered_trailing_stop",
+                "entry": tracked.entry_price,
+                "current": current_price,
+                "highest": tracked.highest_price,
+                "pnl": pnl,
+                "peak_gain_pct": round(gain_pct * 100, 1),
+            }
+
+        # Breakeven stop (ratcheted SL — STOCK-24)
+        if self._risk.check_breakeven_stop(
+            tracked.entry_price,
+            current_price,
+            tracked.highest_price,
+            tracked.take_profit_pct,
+        ):
+            pnl = (current_price - tracked.entry_price) * tracked.quantity
+            return {
+                "symbol": tracked.symbol,
+                "reason": "breakeven_stop",
                 "entry": tracked.entry_price,
                 "current": current_price,
                 "highest": tracked.highest_price,
