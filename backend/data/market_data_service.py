@@ -12,6 +12,7 @@ Data source strategy:
 import asyncio
 import time
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 import pandas as pd
@@ -28,7 +29,9 @@ BALANCE_CACHE_TTL = 30      # seconds
 POSITIONS_CACHE_TTL = 30    # seconds
 EXCHANGE_RATE_CACHE_TTL = 300  # 5 min — rate doesn't change fast
 API_CALL_TIMEOUT = 30       # seconds — max wait for a single adapter call
+YFINANCE_TIMEOUT = 15       # seconds — max wait for yfinance (runs in thread)
 MAX_CACHE_ENTRIES = 150     # max entries per cache dict (prevent unbounded growth)
+_YF_EXECUTOR_WORKERS = 4    # dedicated thread pool size for yfinance calls
 
 
 class MarketDataService:
@@ -46,6 +49,10 @@ class MarketDataService:
         self._balance_cache: tuple[Balance, float] | None = None
         self._positions_cache: tuple[list[Position], float] | None = None
         self._exchange_rate_cache: tuple[float, float] | None = None  # (rate, timestamp)
+        # Dedicated thread pool for yfinance blocking I/O — isolates from asyncio global pool
+        self._yf_executor = ThreadPoolExecutor(
+            max_workers=_YF_EXECUTOR_WORKERS, thread_name_prefix="yfinance"
+        )
 
     # -- Market Data --
 
@@ -85,9 +92,19 @@ class MarketDataService:
             self._ohlcv_cache[cache_key] = (cached[0], now)  # LRU: update access time
             return cached[0]
 
-        # Try yfinance first (no rate limit)
+        # Try yfinance first (no rate limit) — run in dedicated thread pool
         yf_sym = self._yf_symbol_mapper(symbol) if self._yf_symbol_mapper else symbol
-        df = self._fetch_yfinance(yf_sym, timeframe, limit)
+        try:
+            loop = asyncio.get_running_loop()
+            df = await asyncio.wait_for(
+                loop.run_in_executor(
+                    self._yf_executor, self._fetch_yfinance, yf_sym, timeframe, limit
+                ),
+                timeout=YFINANCE_TIMEOUT,
+            )
+        except Exception as e:
+            logger.warning("yfinance async fetch failed for %s: %s", yf_sym, e)
+            df = pd.DataFrame()
         if not df.empty:
             if len(self._ohlcv_cache) >= MAX_CACHE_ENTRIES:
                 self._evict_oldest(self._ohlcv_cache)
@@ -279,3 +296,10 @@ class MarketDataService:
         """
         self._balance_cache = None
         self._positions_cache = None
+
+    def shutdown(self) -> None:
+        """Shut down the yfinance thread pool executor.
+
+        Call during application shutdown for clean resource release.
+        """
+        self._yf_executor.shutdown(wait=False)

@@ -1,5 +1,7 @@
 """Tests for MarketDataService with caching."""
 
+import asyncio
+import threading
 import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -257,3 +259,91 @@ class TestCacheEviction:
             await svc.get_ticker(f"SYM{i}")
 
         assert len(svc._ticker_cache) <= MAX_CACHE_ENTRIES
+
+
+class TestYfinanceNonBlocking:
+    """Test that yfinance calls run in a thread and don't block the event loop."""
+
+    async def test_yfinance_runs_in_executor_not_blocking(self, mock_adapter):
+        """Slow yfinance must not block other async tasks."""
+        cancel_event = threading.Event()
+
+        def slow_yfinance(symbol: str, timeframe: str, limit: int) -> pd.DataFrame:
+            """Simulate a slow yfinance call that respects cancellation."""
+            cancel_event.wait(timeout=0.5)  # block the thread for 0.5s
+            return pd.DataFrame({
+                "open": [100.0], "high": [105.0], "low": [99.0],
+                "close": [103.0], "volume": [1000.0],
+            })
+
+        svc = MarketDataService(
+            adapter=mock_adapter,
+            rate_limiter=RateLimiter(max_per_second=100),
+        )
+
+        # Track whether a concurrent async task runs while yfinance is blocked
+        concurrent_ran = False
+
+        async def concurrent_task() -> None:
+            nonlocal concurrent_ran
+            await asyncio.sleep(0.05)
+            concurrent_ran = True
+
+        with patch.object(svc, "_fetch_yfinance", side_effect=slow_yfinance):
+            ohlcv_task = asyncio.create_task(svc.get_ohlcv("AAPL"))
+            concurrent = asyncio.create_task(concurrent_task())
+            await asyncio.gather(ohlcv_task, concurrent)
+
+        cancel_event.set()  # clean up the thread
+        assert concurrent_ran, "Concurrent async task should run while yfinance is in thread"
+        svc.shutdown()
+
+    async def test_yfinance_timeout_fires(self, mock_adapter):
+        """Yfinance calls that exceed YFINANCE_TIMEOUT get cancelled."""
+        cancel_event = threading.Event()
+
+        def stuck_yfinance(symbol: str, timeframe: str, limit: int) -> pd.DataFrame:
+            """Simulate a yfinance call that hangs until cancelled."""
+            cancel_event.wait(timeout=30)  # long wait, but event will release it
+            return pd.DataFrame()
+
+        svc = MarketDataService(
+            adapter=mock_adapter,
+            rate_limiter=RateLimiter(max_per_second=100),
+        )
+        # Use a very short timeout for the test
+        with patch("data.market_data_service.YFINANCE_TIMEOUT", 0.2):
+            with patch.object(svc, "_fetch_yfinance", side_effect=stuck_yfinance):
+                # KIS fallback returns empty, so get_ohlcv should still return a DataFrame
+                mock_adapter.fetch_ohlcv.return_value = []
+                df = await svc.get_ohlcv("AAPL")
+
+        cancel_event.set()  # release the blocked thread
+        assert df.empty, "Should fall back to KIS when yfinance times out"
+        mock_adapter.fetch_ohlcv.assert_called_once()
+        svc.shutdown()
+
+    async def test_yfinance_exception_falls_back_to_kis(self, mock_adapter):
+        """If yfinance raises an exception in the thread, KIS fallback is used."""
+        def failing_yfinance(symbol: str, timeframe: str, limit: int) -> pd.DataFrame:
+            raise ConnectionError("yfinance server down")
+
+        svc = MarketDataService(
+            adapter=mock_adapter,
+            rate_limiter=RateLimiter(max_per_second=100),
+        )
+        with patch.object(svc, "_fetch_yfinance", side_effect=failing_yfinance):
+            df = await svc.get_ohlcv("AAPL")
+
+        assert not df.empty, "Should fall back to KIS adapter data"
+        mock_adapter.fetch_ohlcv.assert_called_once()
+        svc.shutdown()
+
+    async def test_shutdown_cleans_executor(self, mock_adapter):
+        """shutdown() should cleanly shut down the thread pool."""
+        svc = MarketDataService(
+            adapter=mock_adapter,
+            rate_limiter=RateLimiter(max_per_second=100),
+        )
+        svc.shutdown()
+        assert svc._yf_executor._shutdown, "Executor should be shut down"
