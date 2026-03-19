@@ -1,6 +1,7 @@
 """Tests for ETF Engine."""
 
 import time
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -387,3 +388,315 @@ class TestStatus:
 
         status = engine.get_status()
         assert status["last_regime"] == "uptrend"
+
+
+# --- Helper for DB mock ---
+
+def _mock_session_factory(orders=None):
+    """Create a mock async session factory that returns given orders.
+
+    Uses SQLAlchemy statement introspection instead of brittle string matching
+    to extract the symbol from WHERE clauses and validate filter conditions.
+
+    Args:
+        orders: dict mapping symbol -> mock Order, or None for no results.
+    """
+    orders = orders or {}
+
+    class FakeResult:
+        def __init__(self, order):
+            self._order = order
+
+        def scalar_one_or_none(self):
+            return self._order
+
+    class FakeSession:
+        async def execute(self, stmt):
+            # Extract bind parameters from the compiled statement.
+            # This avoids brittle string matching and properly inspects
+            # the SQLAlchemy query's WHERE clause parameters.
+            compiled = stmt.compile(compile_kwargs={"literal_binds": True})
+            stmt_str = str(compiled)
+
+            # Validate is_paper filter is present (critical for live/paper isolation)
+            assert "is_paper" in stmt_str, (
+                "Query missing is_paper filter — live orders must filter "
+                "out paper trades. See position_tracker.restore_from_exchange() "
+                "for the correct pattern."
+            )
+
+            for sym, order in orders.items():
+                if f"'{sym}'" in stmt_str:
+                    return FakeResult(order)
+            return FakeResult(None)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+    def factory():
+        return FakeSession()
+
+    return factory
+
+
+def _make_order_mock(symbol: str, strategy_name: str, created_at: datetime | None = None):
+    """Create a mock Order for DB restore tests."""
+    order = MagicMock()
+    order.symbol = symbol
+    order.strategy_name = strategy_name
+    order.created_at = created_at or datetime.now(UTC)
+    order.side = "BUY"
+    order.status = "filled"
+    return order
+
+
+class TestRestoreManagedPositions:
+    """Test restore_managed_positions() for server restart recovery."""
+
+    @pytest.mark.asyncio
+    async def test_restore_leveraged_etf_from_broker(self, engine, mock_market_data):
+        """Leveraged ETF on broker → restored as regime position."""
+        pos = MagicMock(symbol="TQQQ", quantity=100, current_price=55.0, avg_price=50.0)
+        mock_market_data.get_positions.return_value = [pos]
+
+        restored = await engine.restore_managed_positions()
+
+        assert len(restored) == 1
+        assert restored[0]["symbol"] == "TQQQ"
+        assert restored[0]["reason"] == "regime_restored"
+        assert "TQQQ" in engine._managed_positions
+        assert engine._managed_positions["TQQQ"].reason == "regime_restored"
+
+    @pytest.mark.asyncio
+    async def test_restore_sector_etf_from_broker(self, engine, mock_market_data):
+        """Sector ETF on broker → restored as sector_rotation with sector name."""
+        pos = MagicMock(symbol="XLK", quantity=50, current_price=180.0, avg_price=170.0)
+        mock_market_data.get_positions.return_value = [pos]
+
+        restored = await engine.restore_managed_positions()
+
+        assert len(restored) == 1
+        assert restored[0]["symbol"] == "XLK"
+        assert restored[0]["reason"] == "sector_rotation"
+        assert restored[0]["sector"] == "Technology"
+        assert engine._managed_positions["XLK"].sector == "Technology"
+
+    @pytest.mark.asyncio
+    async def test_restore_with_db_order_metadata(self, engine, mock_market_data):
+        """When DB has order record, use strategy_name and created_at."""
+        pos = MagicMock(symbol="TQQQ", quantity=100, current_price=55.0, avg_price=50.0)
+        mock_market_data.get_positions.return_value = [pos]
+
+        buy_time = datetime.now(UTC) - timedelta(days=5)
+        order = _make_order_mock("TQQQ", "etf_engine_regime", buy_time)
+        session_factory = _mock_session_factory({"TQQQ": order})
+
+        restored = await engine.restore_managed_positions(session_factory)
+
+        assert len(restored) == 1
+        assert restored[0]["source"] == "exchange"
+        # Entry date should match the order's created_at (within 1 second)
+        entry_ts = engine._managed_positions["TQQQ"].entry_date
+        assert abs(entry_ts - buy_time.timestamp()) < 1.0
+
+    @pytest.mark.asyncio
+    async def test_restore_sector_with_db_order(self, engine, mock_market_data):
+        """Sector ETF with DB order uses sector strategy mapping."""
+        pos = MagicMock(symbol="XLE", quantity=30, current_price=90.0, avg_price=85.0)
+        mock_market_data.get_positions.return_value = [pos]
+
+        order = _make_order_mock("XLE", "etf_engine_sector")
+        session_factory = _mock_session_factory({"XLE": order})
+
+        restored = await engine.restore_managed_positions(session_factory)
+
+        assert len(restored) == 1
+        assert restored[0]["reason"] == "sector_rotation"
+        assert engine._managed_positions["XLE"].reason == "sector_rotation"
+
+    @pytest.mark.asyncio
+    async def test_restore_multiple_positions(self, engine, mock_market_data):
+        """Multiple ETF positions restored simultaneously."""
+        pos1 = MagicMock(symbol="TQQQ", quantity=100, current_price=55.0, avg_price=50.0)
+        pos2 = MagicMock(symbol="XLK", quantity=50, current_price=180.0, avg_price=170.0)
+        pos3 = MagicMock(symbol="XLE", quantity=30, current_price=90.0, avg_price=85.0)
+        mock_market_data.get_positions.return_value = [pos1, pos2, pos3]
+
+        restored = await engine.restore_managed_positions()
+
+        assert len(restored) == 3
+        symbols = {r["symbol"] for r in restored}
+        assert symbols == {"TQQQ", "XLK", "XLE"}
+        assert len(engine._managed_positions) == 3
+
+    @pytest.mark.asyncio
+    async def test_restore_ignores_non_etf_positions(self, engine, mock_market_data):
+        """Non-ETF positions (regular stocks) are ignored."""
+        pos_etf = MagicMock(symbol="TQQQ", quantity=100, current_price=55.0, avg_price=50.0)
+        pos_stock = MagicMock(symbol="AAPL", quantity=10, current_price=180.0, avg_price=170.0)
+        mock_market_data.get_positions.return_value = [pos_etf, pos_stock]
+
+        restored = await engine.restore_managed_positions()
+
+        assert len(restored) == 1
+        assert restored[0]["symbol"] == "TQQQ"
+        assert "AAPL" not in engine._managed_positions
+
+    @pytest.mark.asyncio
+    async def test_restore_idempotent(self, engine, mock_market_data):
+        """Calling restore twice doesn't duplicate positions."""
+        pos = MagicMock(symbol="TQQQ", quantity=100, current_price=55.0, avg_price=50.0)
+        mock_market_data.get_positions.return_value = [pos]
+
+        restored1 = await engine.restore_managed_positions()
+        restored2 = await engine.restore_managed_positions()
+
+        assert len(restored1) == 1
+        assert len(restored2) == 1
+        assert restored2[0]["source"] == "already_tracked"
+        assert len(engine._managed_positions) == 1
+
+    @pytest.mark.asyncio
+    async def test_restore_empty_broker(self, engine, mock_market_data):
+        """No positions on broker → empty restore."""
+        mock_market_data.get_positions.return_value = []
+
+        restored = await engine.restore_managed_positions()
+
+        assert restored == []
+        assert len(engine._managed_positions) == 0
+
+    @pytest.mark.asyncio
+    async def test_restore_broker_error_graceful(self, engine, mock_market_data):
+        """Broker API error → graceful empty return."""
+        mock_market_data.get_positions.side_effect = Exception("API timeout")
+
+        restored = await engine.restore_managed_positions()
+
+        assert restored == []
+        assert len(engine._managed_positions) == 0
+
+    @pytest.mark.asyncio
+    async def test_restored_position_hold_limit_works(
+        self, engine, mock_market_data, mock_order_manager,
+    ):
+        """Restored leveraged position with old entry_date triggers hold limit sell."""
+        # Restore a position that was bought 15 days ago
+        pos = MagicMock(symbol="TQQQ", quantity=100, current_price=55.0, avg_price=50.0)
+        mock_market_data.get_positions.return_value = [pos]
+
+        buy_time = datetime.now(UTC) - timedelta(days=15)
+        order = _make_order_mock("TQQQ", "etf_engine_regime", buy_time)
+        session_factory = _mock_session_factory({"TQQQ": order})
+
+        await engine.restore_managed_positions(session_factory)
+
+        # Now check hold limits — should trigger sell (15 days > 10 day limit)
+        actions = await engine._check_hold_limits()
+        assert len(actions) == 1
+        assert "TQQQ" in actions[0]
+        assert mock_order_manager.place_sell.called
+
+    @pytest.mark.asyncio
+    async def test_restored_position_in_status(self, engine, mock_market_data):
+        """Restored positions appear in get_status()."""
+        pos = MagicMock(symbol="XLE", quantity=30, current_price=90.0, avg_price=85.0)
+        mock_market_data.get_positions.return_value = [pos]
+
+        await engine.restore_managed_positions()
+
+        status = engine.get_status()
+        assert "XLE" in status["managed_positions"]
+        assert status["managed_positions"]["XLE"]["reason"] == "sector_rotation"
+        assert status["managed_positions"]["XLE"]["sector"] == "Energy"
+
+    @pytest.mark.asyncio
+    async def test_restore_zero_quantity_skipped(self, engine, mock_market_data):
+        """Positions with 0 quantity are skipped."""
+        pos = MagicMock(symbol="TQQQ", quantity=0, current_price=55.0, avg_price=50.0)
+        mock_market_data.get_positions.return_value = [pos]
+
+        restored = await engine.restore_managed_positions()
+
+        assert restored == []
+        assert len(engine._managed_positions) == 0
+
+    @pytest.mark.asyncio
+    async def test_restore_with_db_failure_falls_back_to_inference(
+        self, engine, mock_market_data,
+    ):
+        """DB exception doesn't crash restore — falls back to ETF type inference."""
+        pos = MagicMock(symbol="TQQQ", quantity=100, current_price=55.0, avg_price=50.0)
+        mock_market_data.get_positions.return_value = [pos]
+
+        # Session factory that raises on execute
+        class FailingSession:
+            async def execute(self, stmt):
+                raise RuntimeError("DB connection lost")
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                pass
+
+        def failing_factory():
+            return FailingSession()
+
+        restored = await engine.restore_managed_positions(failing_factory)
+
+        # Should still restore via inference (leveraged → regime_restored)
+        assert len(restored) == 1
+        assert restored[0]["symbol"] == "TQQQ"
+        assert restored[0]["reason"] == "regime_restored"
+        assert restored[0]["source"] == "inferred"
+        assert "TQQQ" in engine._managed_positions
+
+    @pytest.mark.asyncio
+    async def test_restore_naive_datetime_treated_as_utc(self, engine, mock_market_data):
+        """Naive datetime from DB is treated as UTC, not local timezone."""
+        pos = MagicMock(symbol="TQQQ", quantity=100, current_price=55.0, avg_price=50.0)
+        mock_market_data.get_positions.return_value = [pos]
+
+        # Create a naive datetime (no tzinfo) — simulates some DB drivers
+        naive_dt = datetime(2026, 3, 10, 14, 0, 0)  # no tzinfo
+        order = _make_order_mock("TQQQ", "etf_engine_regime", naive_dt)
+        # Override created_at to be truly naive (MagicMock default uses UTC)
+        order.created_at = naive_dt
+        session_factory = _mock_session_factory({"TQQQ": order})
+
+        restored = await engine.restore_managed_positions(session_factory)
+
+        assert len(restored) == 1
+        # Verify the entry_date matches the naive datetime interpreted as UTC
+        from datetime import timezone as tz
+        expected_ts = naive_dt.replace(tzinfo=tz.utc).timestamp()
+        actual_ts = engine._managed_positions["TQQQ"].entry_date
+        assert abs(actual_ts - expected_ts) < 1.0, (
+            f"Naive datetime should be treated as UTC. "
+            f"Expected ~{expected_ts}, got {actual_ts}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_restore_idempotent_returns_consistent_dict_shape(
+        self, engine, mock_market_data,
+    ):
+        """Second restore call returns dicts with same keys as first call."""
+        pos = MagicMock(symbol="TQQQ", quantity=100, current_price=55.0, avg_price=50.0)
+        mock_market_data.get_positions.return_value = [pos]
+
+        restored1 = await engine.restore_managed_positions()
+        restored2 = await engine.restore_managed_positions()
+
+        # Both should have the same dict keys
+        assert set(restored1[0].keys()) == set(restored2[0].keys()), (
+            f"Dict shape mismatch: first={set(restored1[0].keys())}, "
+            f"second={set(restored2[0].keys())}"
+        )
+        # Specifically verify quantity and sector are present in already_tracked
+        assert "quantity" in restored2[0]
+        assert "sector" in restored2[0]
+        assert restored2[0]["source"] == "already_tracked"

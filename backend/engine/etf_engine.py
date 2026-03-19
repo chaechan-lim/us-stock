@@ -11,8 +11,11 @@ Uses MarketStateDetector for regime signals and SectorAnalyzer for sector rotati
 import logging
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from typing import Any
 
 import pandas as pd
+from sqlalchemy import select, desc
 
 from data.market_data_service import MarketDataService
 from data.market_state import MarketStateDetector, MarketRegime, MarketState
@@ -516,6 +519,153 @@ class ETFEngine:
             logger.warning("ETF Engine: %s", msg)
 
         return actions
+
+    async def restore_managed_positions(
+        self, session_factory: Any = None,
+    ) -> list[dict]:
+        """Restore managed ETF positions from broker + DB on startup.
+
+        Fetches current positions from the exchange adapter, filters to known
+        ETF symbols, and rebuilds _managed_positions with entry metadata from
+        the orders DB table. This ensures hold-day limits, regime transitions,
+        and status reporting work correctly after a server restart.
+
+        Follows the same pattern as PositionTracker.restore_from_exchange().
+
+        Returns:
+            List of restored position summaries.
+        """
+        restored: list[dict] = []
+        try:
+            positions = await self._market_data.get_positions()
+        except Exception as e:
+            logger.error("ETF Engine restore: failed to fetch positions: %s", e)
+            return restored
+
+        # Build set of all ETF symbols this engine manages
+        all_etf_symbols = set(self._etf.all_etf_symbols)
+
+        # Filter to ETF positions with quantity > 0
+        etf_positions = [
+            p for p in positions
+            if p.symbol in all_etf_symbols and p.quantity > 0
+        ]
+        if not etf_positions:
+            logger.info("ETF Engine restore: no ETF positions found on broker")
+            return restored
+
+        # Look up entry info from DB orders table
+        entry_info: dict[str, dict] = {}
+        if session_factory:
+            try:
+                from core.models import Order
+                async with session_factory() as session:
+                    for pos in etf_positions:
+                        # Skip if already tracked (idempotent)
+                        if pos.symbol in self._managed_positions:
+                            continue
+                        stmt = (
+                            select(Order)
+                            .where(
+                                Order.symbol == pos.symbol,
+                                Order.side == "BUY",
+                                Order.strategy_name.like("etf_engine_%"),
+                                Order.status.in_(["filled", "submitted"]),
+                                Order.is_paper == False,  # noqa: E712
+                            )
+                            .order_by(desc(Order.created_at))
+                            .limit(1)
+                        )
+                        result = await session.execute(stmt)
+                        order = result.scalar_one_or_none()
+                        if order:
+                            entry_info[pos.symbol] = {
+                                "strategy_name": order.strategy_name,
+                                "created_at": order.created_at,
+                            }
+            except Exception as e:
+                logger.warning(
+                    "ETF Engine restore: DB lookup failed, will use defaults: %s", e,
+                )
+
+        # Pre-compute sector mapping (invariant across positions)
+        all_sectors = self._etf.get_all_sectors()
+
+        # Rebuild _managed_positions
+        for pos in etf_positions:
+            sym = pos.symbol
+            if sym in self._managed_positions:
+                # Already tracked (idempotent)
+                restored.append({
+                    "symbol": sym,
+                    "quantity": int(pos.quantity),
+                    "reason": self._managed_positions[sym].reason,
+                    "sector": self._managed_positions[sym].sector,
+                    "source": "already_tracked",
+                })
+                continue
+
+            # Determine reason from DB order or infer from ETF type
+            info = entry_info.get(sym)
+            if info:
+                strategy = info["strategy_name"]
+                if strategy == "etf_engine_regime":
+                    reason = "regime_restored"
+                elif strategy == "etf_engine_sector":
+                    reason = "sector_rotation"
+                else:
+                    reason = f"restored_{strategy}"
+
+                # Use actual order creation time for hold-day tracking
+                created_at = info["created_at"]
+                if isinstance(created_at, datetime):
+                    # Ensure timezone-aware before converting to timestamp.
+                    # DB stores UTC but may return naive datetime depending
+                    # on driver — treat naive as UTC (matches DB convention).
+                    if created_at.tzinfo is None:
+                        created_at = created_at.replace(tzinfo=timezone.utc)
+                    entry_date = created_at.timestamp()
+                else:
+                    entry_date = time.time()
+            else:
+                # No DB record — infer from ETF type
+                if self._etf.is_leveraged(sym):
+                    reason = "regime_restored"
+                else:
+                    reason = "sector_rotation"
+                entry_date = time.time()  # lose hold-day accuracy
+
+            # Determine sector for sector ETFs
+            sector = ""
+            for sec_name, sec_info in all_sectors.items():
+                if sec_info.etf == sym:
+                    sector = sec_name
+                    break
+
+            self._managed_positions[sym] = ETFPosition(
+                symbol=sym,
+                entry_date=entry_date,
+                reason=reason,
+                sector=sector,
+            )
+            restored.append({
+                "symbol": sym,
+                "quantity": int(pos.quantity),
+                "reason": reason,
+                "sector": sector,
+                "source": "exchange" if info else "inferred",
+            })
+            logger.info(
+                "ETF Engine restore: %s — reason=%s, sector=%s, source=%s",
+                sym, reason, sector, "db" if info else "inferred",
+            )
+
+        if restored:
+            logger.info(
+                "ETF Engine: restored %d managed positions: %s",
+                len(restored), [r["symbol"] for r in restored],
+            )
+        return restored
 
     def get_status(self) -> dict:
         """Return current ETF engine status."""

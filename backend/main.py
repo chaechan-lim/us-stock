@@ -1673,6 +1673,27 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error("Startup position reconciliation failed: %s", e)
 
+    # Restore ETF Engine managed_positions from broker + DB (STOCK-23)
+    try:
+        us_etf_restored = await etf_engine.restore_managed_positions(session_factory)
+        kr_etf_restored = await kr_etf_engine.restore_managed_positions(session_factory)
+        etf_total = len(us_etf_restored) + len(kr_etf_restored)
+        if etf_total:
+            etf_lines = ["ETF Engine positions restored:"]
+            if us_etf_restored:
+                etf_lines.append(f"  US: {', '.join(r['symbol'] for r in us_etf_restored)}")
+            if kr_etf_restored:
+                etf_lines.append(f"  KR: {', '.join(r['symbol'] for r in kr_etf_restored)}")
+            await notification.notify_system_event(
+                "etf_restore", "\n".join(etf_lines),
+            )
+            logger.info(
+                "ETF Engine restore: US=%d, KR=%d positions",
+                len(us_etf_restored), len(kr_etf_restored),
+            )
+    except Exception as e:
+        logger.error("ETF Engine position restore failed: %s", e)
+
     # Cancel orphaned pending orders on KIS (from previous server instance)
     try:
         for label, adapter_inst in [("US", adapter), ("KR", kr_adapter)]:
