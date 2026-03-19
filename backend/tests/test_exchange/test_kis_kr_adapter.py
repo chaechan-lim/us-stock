@@ -1,11 +1,11 @@
 """Tests for KIS Korean domestic stock adapter."""
 
 import logging
-
-import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from exchange.kis_kr_adapter import KISKRAdapter, TR_ID_KR_LIVE, TR_ID_KR_PAPER
+import pytest
+
+from exchange.kis_kr_adapter import TR_ID_KR_LIVE, TR_ID_KR_PAPER, KISKRAdapter
 
 
 @pytest.fixture
@@ -29,6 +29,32 @@ def mock_config():
 @pytest.fixture
 def adapter(mock_config, mock_auth):
     return KISKRAdapter(config=mock_config, auth=mock_auth)
+
+
+def _mock_post_response(adapter: KISKRAdapter, response_data: dict) -> None:
+    """Helper to mock a POST response on the adapter."""
+    mock_resp = AsyncMock()
+    mock_resp.status = 200
+    mock_resp.json = AsyncMock(return_value=response_data)
+    ctx = MagicMock()
+    ctx.__aenter__ = AsyncMock(return_value=mock_resp)
+    ctx.__aexit__ = AsyncMock(return_value=False)
+    adapter._session = MagicMock()
+    adapter._session.post = MagicMock(return_value=ctx)
+
+
+def _extract_post_body(adapter: KISKRAdapter) -> dict:
+    """Extract the JSON body from the most recent POST call."""
+    call_args = adapter._session.post.call_args
+    if "json" in call_args.kwargs:
+        return call_args.kwargs["json"]
+    return call_args[1]["json"]
+
+
+_SUCCESS_RESPONSE = {
+    "rt_cd": "0",
+    "output": {"ODNO": "0001234567"},
+}
 
 
 class TestInit:
@@ -258,6 +284,154 @@ class TestCreateOrder:
 
         result = await adapter.create_buy_order("005930", 1000, 72000.0)
         assert result.status == "failed"
+
+
+class TestMarketOrderBody:
+    """STOCK-29: Verify market orders send ORD_UNPR='0' and ORD_DVSN='01'.
+
+    This was the root cause of STOCK-25 (KR SL 전면 실패): market orders
+    were sending the actual price instead of '0', causing KIS API rejection.
+    """
+
+    @pytest.mark.asyncio
+    async def test_market_buy_sends_zero_price(self, adapter):
+        """Market buy must send ORD_UNPR='0' even when price is provided."""
+        _mock_post_response(adapter, _SUCCESS_RESPONSE)
+
+        result = await adapter.create_buy_order(
+            "005930", 10, price=72000.0, order_type="market",
+        )
+        assert result.status == "pending"
+
+        body = _extract_post_body(adapter)
+        assert body["ORD_UNPR"] == "0", "Market order must send ORD_UNPR=0"
+        assert body["ORD_DVSN"] == "01", "Market order must send ORD_DVSN=01"
+
+    @pytest.mark.asyncio
+    async def test_market_sell_sends_zero_price(self, adapter):
+        """Market sell (SL/TP) must send ORD_UNPR='0' even when price is provided."""
+        _mock_post_response(adapter, _SUCCESS_RESPONSE)
+
+        result = await adapter.create_sell_order(
+            "005930", 10, price=72000.0, order_type="market",
+        )
+        assert result.status == "pending"
+
+        body = _extract_post_body(adapter)
+        assert body["ORD_UNPR"] == "0", "Market sell must send ORD_UNPR=0"
+        assert body["ORD_DVSN"] == "01", "Market sell must send ORD_DVSN=01"
+
+    @pytest.mark.asyncio
+    async def test_market_buy_no_price_sends_zero(self, adapter):
+        """Market buy without explicit price also sends ORD_UNPR='0'."""
+        _mock_post_response(adapter, _SUCCESS_RESPONSE)
+
+        result = await adapter.create_buy_order(
+            "005930", 10, order_type="market",
+        )
+        assert result.status == "pending"
+
+        body = _extract_post_body(adapter)
+        assert body["ORD_UNPR"] == "0"
+
+    @pytest.mark.asyncio
+    async def test_market_sell_no_price_sends_zero(self, adapter):
+        """Market sell without explicit price also sends ORD_UNPR='0'."""
+        _mock_post_response(adapter, _SUCCESS_RESPONSE)
+
+        result = await adapter.create_sell_order(
+            "005930", 10, order_type="market",
+        )
+        assert result.status == "pending"
+
+        body = _extract_post_body(adapter)
+        assert body["ORD_UNPR"] == "0"
+
+    @pytest.mark.asyncio
+    async def test_market_order_body_has_correct_symbol(self, adapter):
+        """Market order body must include PDNO=symbol."""
+        _mock_post_response(adapter, _SUCCESS_RESPONSE)
+
+        await adapter.create_buy_order("005930", 10, order_type="market")
+
+        body = _extract_post_body(adapter)
+        assert body["PDNO"] == "005930"
+        assert body["ORD_QTY"] == "10"
+        assert body["CANO"] == "12345678"
+        assert body["ACNT_PRDT_CD"] == "01"
+
+
+class TestLimitOrderBody:
+    """STOCK-29: Verify limit orders send correct ORD_UNPR and ORD_DVSN='00'."""
+
+    @pytest.mark.asyncio
+    async def test_limit_buy_sends_integer_price(self, adapter):
+        """KR limit buy must send price as integer string (no decimals)."""
+        _mock_post_response(adapter, _SUCCESS_RESPONSE)
+
+        result = await adapter.create_buy_order(
+            "005930", 10, price=72000.0, order_type="limit",
+        )
+        assert result.status == "pending"
+
+        body = _extract_post_body(adapter)
+        assert body["ORD_UNPR"] == "72000", "KR limit price must be integer string"
+        assert body["ORD_DVSN"] == "00", "Limit order must send ORD_DVSN=00"
+
+    @pytest.mark.asyncio
+    async def test_limit_sell_sends_integer_price(self, adapter):
+        """KR limit sell must send price as integer string."""
+        _mock_post_response(adapter, _SUCCESS_RESPONSE)
+
+        result = await adapter.create_sell_order(
+            "005930", 10, price=73000.0, order_type="limit",
+        )
+        assert result.status == "pending"
+
+        body = _extract_post_body(adapter)
+        assert body["ORD_UNPR"] == "73000", "KR limit price must be integer string"
+        assert body["ORD_DVSN"] == "00", "Limit sell must send ORD_DVSN=00"
+
+    @pytest.mark.asyncio
+    async def test_buy_order_body_structure(self, adapter):
+        """Full body structure verification for KR buy order."""
+        _mock_post_response(adapter, _SUCCESS_RESPONSE)
+
+        await adapter.create_buy_order("005930", 10, 72000.0)
+
+        body = _extract_post_body(adapter)
+        assert body["CANO"] == "12345678"
+        assert body["ACNT_PRDT_CD"] == "01"
+        assert body["PDNO"] == "005930"
+        assert body["ORD_DVSN"] == "00"  # limit
+        assert body["ORD_QTY"] == "10"
+        assert body["ORD_UNPR"] == "72000"
+
+    @pytest.mark.asyncio
+    async def test_sell_order_body_structure(self, adapter):
+        """Full body structure verification for KR sell order."""
+        _mock_post_response(adapter, _SUCCESS_RESPONSE)
+
+        await adapter.create_sell_order("035420", 5, 310000.0)
+
+        body = _extract_post_body(adapter)
+        assert body["CANO"] == "12345678"
+        assert body["ACNT_PRDT_CD"] == "01"
+        assert body["PDNO"] == "035420"
+        assert body["ORD_DVSN"] == "00"  # limit
+        assert body["ORD_QTY"] == "5"
+        assert body["ORD_UNPR"] == "310000"
+
+    @pytest.mark.asyncio
+    async def test_limit_order_default_is_limit_type(self, adapter):
+        """Default order_type is 'limit' — ORD_DVSN should be '00'."""
+        _mock_post_response(adapter, _SUCCESS_RESPONSE)
+
+        # No explicit order_type → defaults to "limit"
+        await adapter.create_buy_order("005930", 10, 72000.0)
+
+        body = _extract_post_body(adapter)
+        assert body["ORD_DVSN"] == "00"
 
 
 class TestFetchPendingOrders:
