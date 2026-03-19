@@ -155,6 +155,34 @@ class RiskManager:
         capped_cash = min(capped_cash, cash_available)  # can't exceed real cash
         return capped_portfolio, capped_cash
 
+    def _check_concentration_limit(
+        self,
+        symbol: str,
+        existing_position_value: float,
+        portfolio_value: float,
+    ) -> PositionSizeResult | None:
+        """Check if existing position exceeds per-symbol concentration limit.
+
+        Returns a rejection PositionSizeResult if the existing position is at
+        or above max_position_pct, otherwise returns None (OK to proceed).
+        STOCK-26: Shared by both calculate_position_size and
+        calculate_kelly_position_size to avoid logic drift.
+        """
+        if existing_position_value > 0 and portfolio_value > 0:
+            existing_pct = existing_position_value / portfolio_value
+            max_pct = self._params.max_position_pct
+            if existing_pct >= max_pct:
+                return PositionSizeResult(
+                    quantity=0,
+                    allocation_usd=0,
+                    risk_per_share=0,
+                    reason=(
+                        f"Already holding {symbol} at {existing_pct:.1%} (>= {max_pct:.0%} limit)"
+                    ),
+                    allowed=False,
+                )
+        return None
+
     def calculate_position_size(
         self,
         symbol: str,
@@ -182,21 +210,10 @@ class RiskManager:
             combined_portfolio_value,
         )
 
-        # STOCK-26: Per-symbol concentration check — reject if already holding
-        # this symbol at or above the max per-position allocation.
-        if existing_position_value > 0 and portfolio_value > 0:
-            existing_pct = existing_position_value / portfolio_value
-            max_pct = self._params.max_position_pct
-            if existing_pct >= max_pct:
-                return PositionSizeResult(
-                    quantity=0,
-                    allocation_usd=0,
-                    risk_per_share=0,
-                    reason=(
-                        f"Already holding {symbol} at {existing_pct:.1%} (>= {max_pct:.0%} limit)"
-                    ),
-                    allowed=False,
-                )
+        # STOCK-26: Per-symbol concentration check
+        rejection = self._check_concentration_limit(symbol, existing_position_value, portfolio_value)
+        if rejection:
+            return rejection
 
         # Check position limit
         if current_positions >= self._params.max_positions:
@@ -297,20 +314,10 @@ class RiskManager:
             combined_portfolio_value,
         )
 
-        # STOCK-26: Per-symbol concentration check
-        if existing_position_value > 0 and portfolio_value > 0:
-            existing_pct = existing_position_value / portfolio_value
-            max_pct = self._params.max_position_pct
-            if existing_pct >= max_pct:
-                return PositionSizeResult(
-                    quantity=0,
-                    allocation_usd=0,
-                    risk_per_share=0,
-                    reason=(
-                        f"Already holding {symbol} at {existing_pct:.1%} (>= {max_pct:.0%} limit)"
-                    ),
-                    allowed=False,
-                )
+        # STOCK-26: Per-symbol concentration check (shared helper)
+        rejection = self._check_concentration_limit(symbol, existing_position_value, portfolio_value)
+        if rejection:
+            return rejection
 
         # Standard risk checks first
         if current_positions >= self._params.max_positions:
@@ -354,6 +361,10 @@ class RiskManager:
 
             if kelly_result.final_allocation_pct > 0:
                 allocation = portfolio_value * kelly_result.final_allocation_pct
+                # STOCK-26: Subtract existing position value so total
+                # concentration stays within max_position_pct.
+                if existing_position_value > 0:
+                    allocation = max(0.0, allocation - existing_position_value)
                 allocation = min(allocation, cash_available * 0.95, exposure_headroom)
 
                 if allocation > 0 and price > 0:
@@ -392,6 +403,10 @@ class RiskManager:
         adjusted_pct = min(adjusted_pct, self._params.max_position_pct)
 
         allocation = portfolio_value * adjusted_pct
+        # STOCK-26: Subtract existing position value so total
+        # concentration stays within max_position_pct.
+        if existing_position_value > 0:
+            allocation = max(0.0, allocation - existing_position_value)
         allocation = min(allocation, cash_available * 0.95, exposure_headroom)
 
         if allocation <= 0 or price <= 0:

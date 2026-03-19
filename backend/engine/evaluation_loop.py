@@ -503,28 +503,39 @@ class EvaluationLoop:
         # per symbol. This prevents the same stock from appearing multiple
         # times in buy_candidates (e.g. from different evaluation paths).
         if buy_candidates:
-            buy_candidates.sort(key=lambda x: x[0], reverse=True)
-            seen_symbols: set[str] = set()
-            deduped: list[tuple[float, str, object, pd.DataFrame]] = []
-            for entry in buy_candidates:
-                sym = entry[1]
-                if sym not in seen_symbols:
-                    seen_symbols.add(sym)
-                    deduped.append(entry)
-            if len(deduped) < len(buy_candidates):
-                logger.info(
-                    "Deduplicated buy candidates: %d -> %d (removed %d duplicates)",
-                    len(buy_candidates),
-                    len(deduped),
-                    len(buy_candidates) - len(deduped),
-                )
-            buy_candidates = deduped
+            buy_candidates = self._dedup_buy_candidates(buy_candidates)
             logger.info(
                 "Buy candidates ranked: %s",
                 [(s, f"{c:.2f}") for c, s, _, _ in buy_candidates[:10]],
             )
             for _conf, symbol, combined, df in buy_candidates:
                 await self._execute_signal(combined, symbol, df)
+
+    @staticmethod
+    def _dedup_buy_candidates(
+        candidates: list[tuple[float, str, object, pd.DataFrame]],
+    ) -> list[tuple[float, str, object, pd.DataFrame]]:
+        """Sort by confidence descending and keep only the first entry per symbol.
+
+        STOCK-26: Prevents the same stock from appearing multiple times in
+        buy_candidates (e.g. from different evaluation paths or strategies).
+        """
+        candidates.sort(key=lambda x: x[0], reverse=True)
+        seen_symbols: set[str] = set()
+        deduped: list[tuple[float, str, object, pd.DataFrame]] = []
+        for entry in candidates:
+            sym = entry[1]
+            if sym not in seen_symbols:
+                seen_symbols.add(sym)
+                deduped.append(entry)
+        if len(deduped) < len(candidates):
+            logger.info(
+                "Deduplicated buy candidates: %d -> %d (removed %d duplicates)",
+                len(candidates),
+                len(deduped),
+                len(candidates) - len(deduped),
+            )
+        return deduped
 
     async def _check_protective_sells(self, held: set[str]) -> None:
         """Sell positions on regime deterioration or negative news sentiment.
@@ -799,8 +810,12 @@ class EvaluationLoop:
                 (p for p in positions if p.symbol == symbol and p.quantity > 0),
                 None,
             )
-            if existing_pos and balance.total > 0:
+            # Compute existing position value once — reused below for
+            # Kelly sizing's existing_position_value parameter (STOCK-26).
+            existing_value = 0.0
+            if existing_pos and hasattr(existing_pos, "current_price"):
                 existing_value = existing_pos.current_price * existing_pos.quantity
+            if existing_value > 0 and balance.total > 0:
                 max_value = balance.total * self._max_per_symbol_pct
                 if existing_value >= max_value:
                     logger.info(
@@ -829,12 +844,7 @@ class EvaluationLoop:
             metrics = self._signal_quality.get_metrics(strategy_name)
             win_rate, avg_win, avg_loss = metrics.kelly_inputs
 
-            # STOCK-26: Calculate existing position value for concentration check
-            existing_value = 0.0
-            if existing_pos and hasattr(existing_pos, "current_price"):
-                existing_value = existing_pos.current_price * existing_pos.quantity
-
-            # Use Kelly-enhanced sizing
+            # Use Kelly-enhanced sizing (existing_value computed above)
             sizing = self._risk_manager.calculate_kelly_position_size(
                 symbol=symbol,
                 price=price,

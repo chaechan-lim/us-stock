@@ -2705,9 +2705,9 @@ class TestBuyCandidateDedup:
             market_state="uptrend",
         )
 
-        # Manually inject duplicate buy candidates
+        # Build duplicate buy candidates for the same symbol
         df = _make_ohlcv_df()
-        loop_buy_candidates = [
+        candidates = [
             (
                 0.75,
                 "AAPL",
@@ -2743,16 +2743,8 @@ class TestBuyCandidateDedup:
             ),
         ]
 
-        # Test dedup logic directly: sort + deduplicate
-        buy_candidates = loop_buy_candidates[:]
-        buy_candidates.sort(key=lambda x: x[0], reverse=True)
-        seen: set[str] = set()
-        deduped = []
-        for entry in buy_candidates:
-            sym = entry[1]
-            if sym not in seen:
-                seen.add(sym)
-                deduped.append(entry)
+        # Call the actual production dedup method
+        deduped = EvaluationLoop._dedup_buy_candidates(candidates)
 
         # AAPL should appear once (0.75 kept, 0.60 dropped)
         # TSLA should appear once

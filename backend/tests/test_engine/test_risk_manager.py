@@ -799,6 +799,65 @@ class TestExistingPositionConcentration:
         )
         assert result.allowed is True
 
+    def test_kelly_small_existing_reduces_allocation(self):
+        """STOCK-26: Partial existing position should reduce Kelly allocation.
+
+        A 3% existing position with 10% max_position_pct should yield a
+        smaller allocation than starting from zero. This prevents the total
+        concentration from exceeding max_position_pct through the Kelly path.
+        """
+        rm = RiskManager(RiskParams(max_position_pct=0.10))
+        without = rm.calculate_kelly_position_size(
+            symbol="AAPL",
+            price=100.0,
+            portfolio_value=100_000,
+            cash_available=100_000,
+            current_positions=0,
+            existing_position_value=0.0,
+        )
+        with_existing = rm.calculate_kelly_position_size(
+            symbol="AAPL",
+            price=100.0,
+            portfolio_value=100_000,
+            cash_available=100_000,
+            current_positions=0,
+            existing_position_value=3_000,  # 3% of portfolio
+        )
+        assert without.allowed is True
+        assert with_existing.allowed is True
+        assert with_existing.allocation_usd < without.allocation_usd
+
+    def test_kelly_with_trade_history_existing_reduces_allocation(self):
+        """STOCK-26: Kelly branch (with trade history) also reduces for existing."""
+        rm = RiskManager(RiskParams(max_position_pct=0.10))
+        without = rm.calculate_kelly_position_size(
+            symbol="AAPL",
+            price=100.0,
+            portfolio_value=100_000,
+            cash_available=100_000,
+            current_positions=0,
+            win_rate=0.55,
+            avg_win=0.08,
+            avg_loss=0.04,
+            signal_confidence=0.7,
+            existing_position_value=0.0,
+        )
+        with_existing = rm.calculate_kelly_position_size(
+            symbol="AAPL",
+            price=100.0,
+            portfolio_value=100_000,
+            cash_available=100_000,
+            current_positions=0,
+            win_rate=0.55,
+            avg_win=0.08,
+            avg_loss=0.04,
+            signal_confidence=0.7,
+            existing_position_value=3_000,  # 3% of portfolio
+        )
+        assert without.allowed is True
+        assert with_existing.allowed is True
+        assert with_existing.allocation_usd < without.allocation_usd
+
     def test_zero_portfolio_value_no_division_error(self):
         """Zero portfolio value should not cause division by zero."""
         rm = RiskManager()

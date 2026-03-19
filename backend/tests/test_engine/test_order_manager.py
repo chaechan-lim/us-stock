@@ -1197,6 +1197,28 @@ class TestStock26FailSafePositionCheck:
         assert order is None
         mock_adapter.create_buy_order.assert_not_called()
 
+    async def test_position_check_failure_counter(self, mock_adapter, risk_manager, mock_market_data):
+        """Position check failures increment the counter for monitoring."""
+        mock_market_data.get_positions.side_effect = ConnectionError("disconnected")
+        om = OrderManager(
+            adapter=mock_adapter,
+            risk_manager=risk_manager,
+            market_data=mock_market_data,
+        )
+        assert om.position_check_failures == 0
+
+        await om.place_buy(
+            symbol="AAPL", price=150.0, portfolio_value=100_000,
+            cash_available=50_000, current_positions=0, strategy_name="test",
+        )
+        assert om.position_check_failures == 1
+
+        await om.place_buy(
+            symbol="TSLA", price=200.0, portfolio_value=100_000,
+            cash_available=50_000, current_positions=0, strategy_name="test",
+        )
+        assert om.position_check_failures == 2
+
     async def test_no_market_data_still_allows_buy(self, mock_adapter, risk_manager):
         """Without market_data service, position check skipped (backward compat)."""
         om = OrderManager(

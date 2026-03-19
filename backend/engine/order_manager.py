@@ -57,6 +57,11 @@ class OrderManager:
         self._market = market
         self._is_paper = is_paper
         self._active_orders: dict[str, ManagedOrder] = {}
+        # STOCK-26: Counter for position check failures (API errors causing
+        # buy rejections). Allows operations to monitor and distinguish
+        # "correctly blocked duplicates" from "missed opportunities due to
+        # API issues."
+        self._position_check_failures: int = 0
 
     def has_pending_order(self, symbol: str, side: str | None = None) -> bool:
         """Check if there is already a pending/submitted/open order for this symbol."""
@@ -110,11 +115,14 @@ class OrderManager:
                     )
                     return None
             except Exception as e:
+                self._position_check_failures += 1
                 logger.warning(
                     "Buy rejected for %s: position check failed (%s). "
-                    "Refusing buy as safety precaution.",
+                    "Refusing buy as safety precaution. "
+                    "(total_failures=%d)",
                     symbol,
                     e,
+                    self._position_check_failures,
                 )
                 return None
 
@@ -540,6 +548,11 @@ class OrderManager:
     @property
     def active_orders(self) -> dict[str, ManagedOrder]:
         return dict(self._active_orders)
+
+    @property
+    def position_check_failures(self) -> int:
+        """Number of buy rejections caused by position-check API failures."""
+        return self._position_check_failures
 
     def clear_completed(self) -> None:
         """Remove completed/cancelled orders from tracking."""
