@@ -47,7 +47,7 @@ async def get_trades(
             trades = [t for t in trades if t.get("market", "US") == market]
         # Sort by created_at descending (newest-first) for consistent ordering
         # even when trades were inserted out of chronological order
-        newest_first = sorted(trades, key=lambda t: t.get('created_at', ''), reverse=True)
+        newest_first = sorted(trades, key=lambda t: t.get('created_at') or '', reverse=True)
         result = newest_first[offset : offset + limit]
 
         # Batch-resolve missing names (fills cache for future calls)
@@ -74,6 +74,8 @@ async def get_trades(
 
             async with _session_factory() as session:
                 repo = TradeRepository(session)
+                # TODO(STOCK-36 follow-up): pass `market` to get_trade_history()
+                # so DB fallback respects market filter — currently only in-memory path filters by market.
                 orders = await repo.get_trade_history(
                     limit=limit, offset=offset, symbol=symbol,
                 )

@@ -137,9 +137,7 @@ class TradeRepository:
             stmt = stmt.where(Order.symbol == symbol)
         if exclude_paper:
             stmt = stmt.where(Order.is_paper == False)  # noqa: E712
-        if offset > 0:
-            stmt = stmt.offset(offset)
-        stmt = stmt.limit(limit)
+        stmt = stmt.offset(offset).limit(limit)
         result = await self._session.execute(stmt)
         return list(result.scalars().all())
 

@@ -1246,3 +1246,66 @@ class TestGetTradesNewestFirst:
         mock_repo.get_trade_history.assert_called_once_with(
             limit=30, offset=30, symbol=None,
         )
+
+    @pytest.mark.asyncio
+    async def test_sort_handles_none_created_at(self):
+        """Trades with created_at=None should not crash the sort."""
+        _trade_log.extend([
+            {
+                "symbol": "AAPL",
+                "side": "BUY",
+                "status": "filled",
+                "created_at": "2026-03-19 01:00:00",
+                "market": "US",
+            },
+            {
+                "symbol": "MSFT",
+                "side": "BUY",
+                "status": "pending",
+                "created_at": None,  # None value — must not crash
+                "market": "US",
+            },
+            {
+                "symbol": "GOOGL",
+                "side": "SELL",
+                "status": "filled",
+                "created_at": "2026-03-20 03:00:00",
+                "market": "US",
+            },
+        ])
+
+        with patch("api.trades.get_name", return_value=""):
+            result = await get_trades(limit=10, offset=0)
+
+        assert len(result) == 3
+        # Newest first, None sorts to the end (empty string)
+        assert result[0]["symbol"] == "GOOGL"
+        assert result[1]["symbol"] == "AAPL"
+        assert result[2]["symbol"] == "MSFT"
+
+    @pytest.mark.asyncio
+    async def test_sort_handles_missing_created_at_key(self):
+        """Trades without created_at key should not crash the sort."""
+        _trade_log.extend([
+            {
+                "symbol": "AAPL",
+                "side": "BUY",
+                "status": "filled",
+                "created_at": "2026-03-19 01:00:00",
+                "market": "US",
+            },
+            {
+                "symbol": "TSLA",
+                "side": "BUY",
+                "status": "pending",
+                "market": "US",
+                # No created_at key at all
+            },
+        ])
+
+        with patch("api.trades.get_name", return_value=""):
+            result = await get_trades(limit=10, offset=0)
+
+        assert len(result) == 2
+        assert result[0]["symbol"] == "AAPL"
+        assert result[1]["symbol"] == "TSLA"

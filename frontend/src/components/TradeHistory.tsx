@@ -10,9 +10,11 @@ const PAGE_SIZE = 30
 /** Format a UTC timestamp string to KST (Asia/Seoul) display. */
 function formatKST(utcStr: string): string {
   if (!utcStr) return '-'
-  // Backend sends created_at without timezone suffix — treat as UTC
-  const isoStr = utcStr.includes('T') || utcStr.endsWith('Z') ? utcStr : utcStr + 'Z'
-  const d = new Date(isoStr)
+  // Backend sends "YYYY-MM-DD HH:MM:SS" — normalise to ISO 8601 with T separator
+  // so all browsers (Safari/Firefox) can parse it reliably.
+  const isoStr = utcStr.includes('T') ? utcStr : utcStr.replace(' ', 'T')
+  const withTZ = isoStr.endsWith('Z') || /[+-]\d{2}:?\d{2}$/.test(isoStr) ? isoStr : isoStr + 'Z'
+  const d = new Date(withTZ)
   if (isNaN(d.getTime())) return utcStr
   return d.toLocaleString('ko-KR', {
     timeZone: 'Asia/Seoul',
@@ -35,8 +37,9 @@ const _kstDateFmt = new Intl.DateTimeFormat('en-CA', {
 
 function getKSTDate(utcStr: string): string {
   if (!utcStr) return ''
-  const isoStr = utcStr.includes('T') || utcStr.endsWith('Z') ? utcStr : utcStr + 'Z'
-  const d = new Date(isoStr)
+  const isoStr = utcStr.includes('T') ? utcStr : utcStr.replace(' ', 'T')
+  const withTZ = isoStr.endsWith('Z') || /[+-]\d{2}:?\d{2}$/.test(isoStr) ? isoStr : isoStr + 'Z'
+  const d = new Date(withTZ)
   if (isNaN(d.getTime())) return ''
   return _kstDateFmt.format(d)
 }
@@ -94,6 +97,9 @@ export default function TradeHistory() {
     }))
   }, [trades])
 
+  // NOTE: hasMore is based on pre-filter count (rawTrades includes pending).
+  // If many pending trades exist, the displayed page may show fewer than PAGE_SIZE items.
+  // Pagination offsets remain correct — only the visual density is slightly inconsistent.
   const hasMore = rawTrades?.length === PAGE_SIZE
   const hasPrev = page > 0
 
