@@ -30,8 +30,13 @@ POSITIONS_CACHE_TTL = 30    # seconds
 EXCHANGE_RATE_CACHE_TTL = 300  # 5 min — rate doesn't change fast
 API_CALL_TIMEOUT = 30       # seconds — max wait for a single adapter call
 YFINANCE_TIMEOUT = 15       # seconds — max wait for yfinance (runs in thread)
+_YF_HTTP_TIMEOUT = 10       # seconds — yfinance HTTP request timeout (passed to ticker.history)
 MAX_CACHE_ENTRIES = 150     # max entries per cache dict (prevent unbounded growth)
-_YF_EXECUTOR_WORKERS = 4    # dedicated thread pool size for yfinance calls
+# Thread pool for yfinance blocking I/O. Sized at 8 to provide headroom: if several
+# yfinance calls hit sustained timeouts, cancelled futures still occupy threads until
+# the underlying HTTP request completes (_YF_HTTP_TIMEOUT). With 8 workers, the pool
+# can absorb a burst of slow calls without starving subsequent requests.
+_YF_EXECUTOR_WORKERS = 8
 
 
 class MarketDataService:
@@ -139,7 +144,12 @@ class MarketDataService:
         return df
 
     def _fetch_yfinance(self, symbol: str, timeframe: str, limit: int) -> pd.DataFrame:
-        """Fetch OHLCV from yfinance (no rate limit)."""
+        """Fetch OHLCV from yfinance (no rate limit).
+
+        Runs inside a dedicated thread pool — must NOT be called from the event loop directly.
+        Uses _YF_HTTP_TIMEOUT to cap the underlying HTTP request so that threads are
+        released promptly even when yfinance servers are unresponsive.
+        """
         try:
             import yfinance as yf
 
@@ -147,7 +157,7 @@ class MarketDataService:
             period = period_map.get(timeframe, "1y")
 
             ticker = yf.Ticker(symbol)
-            df = ticker.history(period=period, interval="1d")
+            df = ticker.history(period=period, interval="1d", timeout=_YF_HTTP_TIMEOUT)
             if df.empty:
                 return pd.DataFrame()
 
@@ -303,3 +313,16 @@ class MarketDataService:
         Call during application shutdown for clean resource release.
         """
         self._yf_executor.shutdown(wait=False)
+
+    def __del__(self) -> None:
+        """Safety net: release thread pool if shutdown() was never called."""
+        try:
+            self._yf_executor.shutdown(wait=False)
+        except Exception:
+            pass
+
+    async def __aenter__(self) -> "MarketDataService":
+        return self
+
+    async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        self.shutdown()
