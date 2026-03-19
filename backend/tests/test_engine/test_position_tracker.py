@@ -1077,3 +1077,159 @@ def test_calculate_profit_take_qty():
     tracker.track("C", 100.0, 2)
     qty = tracker._calculate_profit_take_qty(tracker._tracked["C"])
     assert qty == 1
+
+
+# ── Tiered trailing stop + Breakeven stop integration (STOCK-24) ────
+
+
+@pytest.fixture
+def risk_with_tiered():
+    """RiskManager with tiered trailing stop enabled."""
+    return RiskManager(RiskParams(
+        default_stop_loss_pct=0.15,
+        default_take_profit_pct=0.30,
+        default_trailing_activation_pct=0.06,
+        default_trailing_stop_pct=0.03,
+        tiered_trailing_tiers=[(0.10, 0.05), (0.15, 0.04), (0.20, 0.03)],
+        breakeven_stop_enabled=True,
+        breakeven_stop_activation_ratio=0.50,
+        breakeven_stop_lock_ratio=0.75,
+        breakeven_stop_lock_pct=0.50,
+    ))
+
+
+@pytest.fixture
+def risk_with_breakeven_only():
+    """RiskManager with breakeven stop only (no tiered trailing)."""
+    return RiskManager(RiskParams(
+        default_stop_loss_pct=0.15,
+        default_take_profit_pct=0.30,
+        default_trailing_activation_pct=0.0,
+        default_trailing_stop_pct=0.0,
+        tiered_trailing_tiers=None,
+        breakeven_stop_enabled=True,
+        breakeven_stop_activation_ratio=0.50,
+        breakeven_stop_lock_ratio=0.75,
+        breakeven_stop_lock_pct=0.50,
+    ))
+
+
+def _mock_positions(adapter, positions_list):
+    """Helper to mock adapter.fetch_positions with Position objects."""
+    from exchange.base import OrderResult
+
+    adapter.fetch_positions = AsyncMock(return_value=[
+        Position(symbol=s, exchange="NASD", quantity=q, avg_price=ap, current_price=cp)
+        for s, q, ap, cp in positions_list
+    ])
+    # Mock sell orders for all symbols
+    for s, q, ap, cp in positions_list:
+        adapter.create_sell_order = AsyncMock(return_value=OrderResult(
+            order_id=f"sell-{s}", symbol=s, side="SELL",
+            order_type="market", quantity=q, status="filled", filled_price=cp,
+        ))
+
+
+@pytest.mark.asyncio
+async def test_tiered_trailing_triggers_before_tp(adapter, risk_with_tiered):
+    """Tiered trailing stop fires when large gain drops from peak."""
+    order_mgr = OrderManager(adapter=adapter, risk_manager=risk_with_tiered)
+    tracker = PositionTracker(adapter, risk_with_tiered, order_mgr)
+
+    # Entry=100, peak was 120 (+20%), now dropped to 116 → 3.33% drop > 3% tier3 trail
+    # Disable flat trailing so tiered trailing fires instead
+    tracker.track("DOCN", 100.0, 10, stop_loss_pct=0.15, take_profit_pct=0.30,
+                  trailing_activation_pct=0.0, trailing_stop_pct=0.0)
+    tracker._tracked["DOCN"].highest_price = 120.0
+    tracker._tracked["DOCN"].partial_profit_taken = True  # already took partial profit
+
+    _mock_positions(adapter, [("DOCN", 10, 100.0, 116.0)])
+    triggered = await tracker.check_all()
+    assert len(triggered) == 1
+    assert triggered[0]["reason"] == "tiered_trailing_stop"
+    assert triggered[0]["peak_gain_pct"] == 20.0
+
+
+@pytest.mark.asyncio
+async def test_tiered_trailing_not_triggered_small_drop(adapter, risk_with_tiered):
+    """Small drop from peak should NOT trigger tiered trailing."""
+    order_mgr = OrderManager(adapter=adapter, risk_manager=risk_with_tiered)
+    tracker = PositionTracker(adapter, risk_with_tiered, order_mgr)
+
+    # Entry=100, peak=115 (+15%), current=113 → drop=1.74% < 4% tier2 trail
+    tracker.track("HPSP", 100.0, 10, stop_loss_pct=0.15, take_profit_pct=0.30,
+                  trailing_activation_pct=0.0, trailing_stop_pct=0.0)
+    tracker._tracked["HPSP"].highest_price = 115.0
+    tracker._tracked["HPSP"].partial_profit_taken = True
+
+    _mock_positions(adapter, [("HPSP", 10, 100.0, 113.0)])
+    triggered = await tracker.check_all()
+    assert len(triggered) == 0
+
+
+@pytest.mark.asyncio
+async def test_breakeven_stop_prevents_loss(adapter, risk_with_breakeven_only):
+    """Breakeven stop fires when price drops back to entry after big gain."""
+    order_mgr = OrderManager(adapter=adapter, risk_manager=risk_with_breakeven_only)
+    tracker = PositionTracker(adapter, risk_with_breakeven_only, order_mgr)
+
+    # Entry=100, TP=30%, activation=15%. Peak was 116 (+16%), now 99
+    tracker.track("AMPX", 100.0, 10, stop_loss_pct=0.15, take_profit_pct=0.30)
+    tracker._tracked["AMPX"].highest_price = 116.0
+    tracker._tracked["AMPX"].partial_profit_taken = True
+
+    _mock_positions(adapter, [("AMPX", 10, 100.0, 99.0)])
+    triggered = await tracker.check_all()
+    assert len(triggered) == 1
+    assert triggered[0]["reason"] == "breakeven_stop"
+
+
+@pytest.mark.asyncio
+async def test_breakeven_not_triggered_above_entry(adapter, risk_with_breakeven_only):
+    """Breakeven stop should NOT fire while price is above entry (breakeven zone)."""
+    order_mgr = OrderManager(adapter=adapter, risk_manager=risk_with_breakeven_only)
+    tracker = PositionTracker(adapter, risk_with_breakeven_only, order_mgr)
+
+    # Entry=100, peak=116 (+16%, activation zone), current=101 → above entry
+    tracker.track("TEST", 100.0, 10, stop_loss_pct=0.15, take_profit_pct=0.30)
+    tracker._tracked["TEST"].highest_price = 116.0
+
+    _mock_positions(adapter, [("TEST", 10, 100.0, 101.0)])
+    triggered = await tracker.check_all()
+    assert len(triggered) == 0
+
+
+@pytest.mark.asyncio
+async def test_flat_trailing_fires_before_tiered(adapter, risk_with_tiered):
+    """If flat trailing stop is tighter, it should fire first."""
+    order_mgr = OrderManager(adapter=adapter, risk_manager=risk_with_tiered)
+    tracker = PositionTracker(adapter, risk_with_tiered, order_mgr)
+
+    # Entry=100, trail activation=6%, trail=3%. Peak=108 (+8%), below tier1 (10%).
+    # Current=104 → drop=3.7% > 3% flat trail → flat trailing fires.
+    tracker.track("FLAT", 100.0, 10, stop_loss_pct=0.15, take_profit_pct=0.30)
+    tracker._tracked["FLAT"].highest_price = 108.0
+
+    _mock_positions(adapter, [("FLAT", 10, 100.0, 104.0)])
+    triggered = await tracker.check_all()
+    assert len(triggered) == 1
+    assert triggered[0]["reason"] == "trailing_stop"  # flat, not tiered
+
+
+@pytest.mark.asyncio
+async def test_lock_gain_protection_above_lock_ratio(adapter, risk_with_breakeven_only):
+    """At 75%+ of TP, breakeven locks 50% of peak gain."""
+    order_mgr = OrderManager(adapter=adapter, risk_manager=risk_with_breakeven_only)
+    tracker = PositionTracker(adapter, risk_with_breakeven_only, order_mgr)
+
+    # Entry=100, TP=30%. Lock at 22.5%. Peak=124 (+24%, above lock).
+    # Lock price = 100 * (1 + 0.24 * 0.50) = 112
+    tracker.track("LOCK", 100.0, 10, stop_loss_pct=0.15, take_profit_pct=0.30)
+    tracker._tracked["LOCK"].highest_price = 124.0
+    tracker._tracked["LOCK"].partial_profit_taken = True
+
+    # Price=111 < lock_price=112 → triggered
+    _mock_positions(adapter, [("LOCK", 10, 100.0, 111.0)])
+    triggered = await tracker.check_all()
+    assert len(triggered) == 1
+    assert triggered[0]["reason"] == "breakeven_stop"

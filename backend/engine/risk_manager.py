@@ -32,6 +32,15 @@ class RiskParams:
     # Default trailing stop (used when strategy config doesn't specify)
     default_trailing_activation_pct: float = 0.06  # activate after 6% gain
     default_trailing_stop_pct: float = 0.03  # trail 3% from peak
+    # Tiered trailing stop: tighter trail at higher gain levels (STOCK-24)
+    # List of (gain_threshold, trail_pct) tuples, sorted by gain ascending.
+    # At 10% gain → 5% trail, at 15% → 4%, at 20% → 3%.
+    tiered_trailing_tiers: list[tuple[float, float]] | None = None
+    # Breakeven stop: ratchet SL upward as gain approaches TP (STOCK-24)
+    breakeven_stop_enabled: bool = True
+    breakeven_stop_activation_ratio: float = 0.50  # activate at 50% of TP
+    breakeven_stop_lock_ratio: float = 0.75  # at 75% of TP, lock 50% of gain
+    breakeven_stop_lock_pct: float = 0.50  # lock this fraction of peak gain
 
 
 @dataclass
@@ -510,6 +519,82 @@ class RiskManager:
 
         drop_from_peak = (highest_price - current_price) / highest_price
         return drop_from_peak >= trail_pct
+
+    def check_tiered_trailing_stop(
+        self,
+        entry_price: float,
+        current_price: float,
+        highest_price: float,
+    ) -> bool:
+        """Return True if tiered trailing stop is triggered.
+
+        Unlike the flat trailing stop, this uses gain-dependent trail
+        percentages: the higher the unrealized gain, the tighter the trail.
+        This protects large gains without cutting early winners.
+
+        Tiers are checked from highest to lowest gain threshold.
+        The first matching tier (highest gain) determines the trail %.
+        """
+        tiers = self._params.tiered_trailing_tiers
+        if not tiers:
+            return False
+        if entry_price <= 0 or highest_price <= 0:
+            return False
+
+        gain_from_entry = (highest_price - entry_price) / entry_price
+
+        # Sort tiers descending by gain threshold, pick highest matching
+        sorted_tiers = sorted(tiers, key=lambda t: t[0], reverse=True)
+        for gain_threshold, trail_pct in sorted_tiers:
+            if gain_from_entry >= gain_threshold and trail_pct > 0:
+                drop_from_peak = (highest_price - current_price) / highest_price
+                return drop_from_peak >= trail_pct
+
+        return False  # No tier matched (gain below all thresholds)
+
+    def check_breakeven_stop(
+        self,
+        entry_price: float,
+        current_price: float,
+        highest_price: float,
+        take_profit_pct: float | None = None,
+    ) -> bool:
+        """Return True if breakeven stop is triggered.
+
+        Ratchets the stop-loss upward as price approaches TP:
+        - At activation_ratio * TP: SL moves to entry price (breakeven)
+        - At lock_ratio * TP: SL moves to entry + lock_pct * peak_gain
+
+        This prevents large winners from turning into losers. The stop
+        only tightens (never loosens) — it uses highest_price to determine
+        what gain level was reached, ensuring the ratchet is monotonic.
+        """
+        if not self._params.breakeven_stop_enabled:
+            return False
+        if entry_price <= 0 or highest_price <= 0:
+            return False
+
+        tp = take_profit_pct or self._params.default_take_profit_pct
+        if tp <= 0:
+            return False
+
+        # Use highest_price to determine which tier we've reached
+        peak_gain_pct = (highest_price - entry_price) / entry_price
+        activation_gain = tp * self._params.breakeven_stop_activation_ratio
+        lock_gain = tp * self._params.breakeven_stop_lock_ratio
+
+        if peak_gain_pct < activation_gain:
+            return False  # Haven't reached activation level yet
+
+        # Determine the ratcheted stop price
+        if peak_gain_pct >= lock_gain:
+            # Lock a fraction of peak gain
+            stop_price = entry_price * (1 + peak_gain_pct * self._params.breakeven_stop_lock_pct)
+        else:
+            # Breakeven: stop at entry price
+            stop_price = entry_price
+
+        return current_price <= stop_price
 
     def update_daily_pnl(self, pnl: float) -> None:
         self._daily_pnl += pnl

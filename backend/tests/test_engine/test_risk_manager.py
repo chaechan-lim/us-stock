@@ -419,3 +419,204 @@ class TestConfidenceBasedSizing:
         assert result.allowed
         # Should be close to max regime position (7% for uptrend)
         assert result.allocation_usd >= 100_000 * 0.06
+
+
+class TestTieredTrailingStop:
+    """Tests for tiered trailing stop (STOCK-24)."""
+
+    DEFAULT_TIERS = [(0.10, 0.05), (0.15, 0.04), (0.20, 0.03)]
+
+    def _make_rm(self, tiers=None):
+        return RiskManager(RiskParams(
+            tiered_trailing_tiers=tiers or self.DEFAULT_TIERS,
+        ))
+
+    def test_no_tiers_returns_false(self):
+        rm = RiskManager()  # No tiers configured
+        assert rm.check_tiered_trailing_stop(100.0, 105.0, 115.0) is False
+
+    def test_empty_tiers_returns_false(self):
+        rm = RiskManager(RiskParams(tiered_trailing_tiers=[]))
+        assert rm.check_tiered_trailing_stop(100.0, 105.0, 115.0) is False
+
+    def test_below_all_tiers_not_triggered(self):
+        rm = self._make_rm()
+        # Peak gain = 8% < 10% (lowest tier)
+        assert rm.check_tiered_trailing_stop(100.0, 105.0, 108.0) is False
+
+    def test_tier1_triggered_10pct_gain_5pct_trail(self):
+        rm = self._make_rm()
+        # Peak=110 (+10%), current=104 → drop=5.45% > 5% trail
+        assert rm.check_tiered_trailing_stop(100.0, 104.0, 110.0) is True
+
+    def test_tier1_not_triggered_small_drop(self):
+        rm = self._make_rm()
+        # Peak=110 (+10%), current=108 → drop=1.8% < 5% trail
+        assert rm.check_tiered_trailing_stop(100.0, 108.0, 110.0) is False
+
+    def test_tier2_triggered_15pct_gain_4pct_trail(self):
+        rm = self._make_rm()
+        # Peak=115 (+15%), current=110 → drop=4.35% > 4% trail
+        assert rm.check_tiered_trailing_stop(100.0, 110.0, 115.0) is True
+
+    def test_tier2_not_triggered_small_drop(self):
+        rm = self._make_rm()
+        # Peak=115 (+15%), current=113 → drop=1.7% < 4% trail
+        assert rm.check_tiered_trailing_stop(100.0, 113.0, 115.0) is False
+
+    def test_tier3_triggered_20pct_gain_3pct_trail(self):
+        rm = self._make_rm()
+        # Peak=120 (+20%), current=116 → drop=3.33% > 3% trail
+        assert rm.check_tiered_trailing_stop(100.0, 116.0, 120.0) is True
+
+    def test_tier3_not_triggered_small_drop(self):
+        rm = self._make_rm()
+        # Peak=120 (+20%), current=118 → drop=1.67% < 3% trail
+        assert rm.check_tiered_trailing_stop(100.0, 118.0, 120.0) is False
+
+    def test_highest_tier_used_when_multiple_match(self):
+        rm = self._make_rm()
+        # Peak=125 (+25%) matches all tiers. Should use tier3 (3% trail)
+        # current=121 → drop=3.2% > 3% → triggered
+        assert rm.check_tiered_trailing_stop(100.0, 121.0, 125.0) is True
+        # current=122 → drop=2.4% < 3% → not triggered (using tightest tier)
+        assert rm.check_tiered_trailing_stop(100.0, 122.0, 125.0) is False
+
+    def test_zero_entry_price(self):
+        rm = self._make_rm()
+        assert rm.check_tiered_trailing_stop(0.0, 100.0, 110.0) is False
+
+    def test_zero_highest_price(self):
+        rm = self._make_rm()
+        assert rm.check_tiered_trailing_stop(100.0, 100.0, 0.0) is False
+
+    def test_single_tier(self):
+        rm = self._make_rm(tiers=[(0.10, 0.03)])
+        # Peak=112 (+12%), current=108 → drop=3.57% > 3%
+        assert rm.check_tiered_trailing_stop(100.0, 108.0, 112.0) is True
+
+    def test_kr_market_large_gain_protection(self):
+        """Simulate HPSP-like scenario: +18% gain should be protected."""
+        rm = self._make_rm()
+        entry = 50000.0
+        peak = 59000.0  # +18%
+        # Price drops to 56500 → drop from peak = 4.24% > 4% (tier2)
+        assert rm.check_tiered_trailing_stop(entry, 56500.0, peak) is True
+
+    def test_us_market_docn_scenario(self):
+        """Simulate DOCN-like scenario: +23.74% gain should be protected."""
+        rm = self._make_rm()
+        entry = 30.0
+        peak = 37.12  # +23.74%
+        # Price drops to 35.80 → drop from peak = 3.55% > 3% (tier3)
+        assert rm.check_tiered_trailing_stop(entry, 35.80, peak) is True
+        # Price at 36.50 → drop from peak = 1.67% < 3% → not triggered
+        assert rm.check_tiered_trailing_stop(entry, 36.50, peak) is False
+
+
+class TestBreakevenStop:
+    """Tests for breakeven stop (STOCK-24)."""
+
+    def _make_rm(self, tp=0.20, enabled=True, activation=0.50, lock_ratio=0.75, lock_pct=0.50):
+        return RiskManager(RiskParams(
+            default_take_profit_pct=tp,
+            breakeven_stop_enabled=enabled,
+            breakeven_stop_activation_ratio=activation,
+            breakeven_stop_lock_ratio=lock_ratio,
+            breakeven_stop_lock_pct=lock_pct,
+        ))
+
+    def test_disabled_returns_false(self):
+        rm = self._make_rm(enabled=False)
+        assert rm.check_breakeven_stop(100.0, 95.0, 115.0) is False
+
+    def test_below_activation_not_triggered(self):
+        rm = self._make_rm(tp=0.20)  # activation at 10%
+        # Peak gain = 8% < 10% activation
+        assert rm.check_breakeven_stop(100.0, 95.0, 108.0) is False
+
+    def test_breakeven_triggered_at_activation(self):
+        rm = self._make_rm(tp=0.20)  # activation at 10%
+        # Peak=110 (+10%), current=99 → below entry → triggered
+        assert rm.check_breakeven_stop(100.0, 99.0, 110.0) is True
+
+    def test_breakeven_not_triggered_above_entry(self):
+        rm = self._make_rm(tp=0.20)  # activation at 10%
+        # Peak=110 (+10%), current=101 → above entry → not triggered
+        assert rm.check_breakeven_stop(100.0, 101.0, 110.0) is False
+
+    def test_breakeven_exact_entry_price(self):
+        rm = self._make_rm(tp=0.20)
+        # Peak=110 (+10%), current=100 (exact entry) → triggered (<=)
+        assert rm.check_breakeven_stop(100.0, 100.0, 110.0) is True
+
+    def test_lock_triggered_at_lock_ratio(self):
+        rm = self._make_rm(tp=0.20)  # lock at 15%
+        # Peak=116 (+16%, above 15% lock), lock = entry * (1 + 0.16 * 0.50) = 108
+        # current=107 → below 108 → triggered
+        assert rm.check_breakeven_stop(100.0, 107.0, 116.0) is True
+
+    def test_lock_not_triggered_above_lock_price(self):
+        rm = self._make_rm(tp=0.20)  # lock at 15%
+        # Peak=116 (+16%), lock price = 100 * (1 + 0.16 * 0.50) = 108
+        # current=109 → above lock → not triggered
+        assert rm.check_breakeven_stop(100.0, 109.0, 116.0) is False
+
+    def test_between_activation_and_lock(self):
+        rm = self._make_rm(tp=0.20)  # activation=10%, lock=15%
+        # Peak=112 (+12%, between 10% and 15%), in breakeven zone
+        # current=101 → above entry → not triggered
+        assert rm.check_breakeven_stop(100.0, 101.0, 112.0) is False
+        # current=99 → below entry → triggered
+        assert rm.check_breakeven_stop(100.0, 99.0, 112.0) is True
+
+    def test_zero_entry_price(self):
+        rm = self._make_rm()
+        assert rm.check_breakeven_stop(0.0, 100.0, 110.0) is False
+
+    def test_zero_highest_price(self):
+        rm = self._make_rm()
+        assert rm.check_breakeven_stop(100.0, 100.0, 0.0) is False
+
+    def test_zero_tp_returns_false(self):
+        rm = self._make_rm(tp=0.0)
+        assert rm.check_breakeven_stop(100.0, 95.0, 110.0, take_profit_pct=0.0) is False
+
+    def test_custom_tp_overrides_default(self):
+        rm = self._make_rm(tp=0.20)
+        # With custom TP=0.30, activation = 15%, lock = 22.5%
+        # Peak=116 (+16%), above activation (15%)
+        # Breakeven zone: current=99 → below entry → triggered
+        assert rm.check_breakeven_stop(100.0, 99.0, 116.0, take_profit_pct=0.30) is True
+
+    def test_custom_tp_changes_lock_level(self):
+        rm = self._make_rm(tp=0.20)
+        # Default TP=20%: lock at 15%. Peak=116 → lock zone.
+        # Custom TP=30%: lock at 22.5%. Peak=116 → breakeven zone (not lock).
+        # Lock price with TP=20%: 100*(1 + 0.16*0.5) = 108
+        # In breakeven zone with TP=30%: stop at entry=100
+        # current=107: triggers lock with TP=20%, NOT with TP=30%
+        assert rm.check_breakeven_stop(100.0, 107.0, 116.0) is True
+        assert rm.check_breakeven_stop(
+            100.0, 107.0, 116.0, take_profit_pct=0.30,
+        ) is False  # TP=30% → breakeven zone (stop=100)
+
+    def test_docn_scenario_23pct_gain_protected(self):
+        """DOCN +23.74% gain: if price drops back toward entry, breakeven fires."""
+        rm = self._make_rm(tp=0.30)  # 30% TP like DOCN's original
+        entry = 30.0
+        peak = 37.12  # +23.74%, above lock=22.5%
+        # Lock price = 30 * (1 + 0.2374 * 0.50) = 33.56
+        # Price drops to 33.0 → below lock → triggered
+        assert rm.check_breakeven_stop(entry, 33.0, peak, take_profit_pct=0.30) is True
+        # Price at 34.0 → above lock → not triggered
+        assert rm.check_breakeven_stop(entry, 34.0, peak, take_profit_pct=0.30) is False
+
+    def test_hpsp_scenario_kr_market(self):
+        """HPSP +18.31% gain: breakeven should protect entry."""
+        rm = self._make_rm(tp=0.30)  # 30% TP
+        entry = 50000.0
+        peak = 59155.0  # +18.31%, above activation=15%, below lock=22.5%
+        # In breakeven zone: stop at entry
+        assert rm.check_breakeven_stop(entry, 49000.0, peak, take_profit_pct=0.30) is True
+        assert rm.check_breakeven_stop(entry, 51000.0, peak, take_profit_pct=0.30) is False

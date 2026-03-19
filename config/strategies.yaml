@@ -31,6 +31,25 @@ global:
   trailing_stop_defaults:
     activation_pct: 0.06   # activate after 6% gain
     trail_pct: 0.03        # sell if drops 3% from peak
+  # Tiered trailing stop: tighter trail at higher gain levels (STOCK-24)
+  # Protects large unrealized gains without cutting early winners.
+  # Each tier: {gain_pct: activation threshold, trail_pct: trail from peak}
+  tiered_trailing_stop:
+    enabled: true
+    tiers:
+      - gain_pct: 0.10    # 10% gain
+        trail_pct: 0.05   # 5% trail from peak
+      - gain_pct: 0.15    # 15% gain
+        trail_pct: 0.04   # 4% trail (tighter)
+      - gain_pct: 0.20    # 20% gain
+        trail_pct: 0.03   # 3% trail (tightest)
+  # Breakeven stop: ratchets SL upward as price approaches TP (STOCK-24)
+  # Prevents large winners from turning into losers.
+  breakeven_stop:
+    enabled: true
+    activation_ratio: 0.50  # activate at 50% of TP reached
+    lock_ratio: 0.75        # at 75% of TP, lock gains
+    lock_pct: 0.50          # lock 50% of peak gain
 
 # Market state -> strategy weight profiles
 profiles:
