@@ -15,11 +15,23 @@ logger = logging.getLogger(__name__)
 
 # Optional trade recorder (set by main.py at startup)
 _trade_recorder = None
+# STOCK-38: Optional async DB recorder for awaited persistence
+_db_recorder = None
 
 
 def set_trade_recorder(recorder):
     global _trade_recorder
     _trade_recorder = recorder
+
+
+def set_db_recorder(recorder):
+    """Set async DB recorder callback for awaited trade persistence.
+
+    STOCK-38: Ensures filled_price/status are saved to DB at order time,
+    rather than relying solely on fire-and-forget or reconciliation.
+    """
+    global _db_recorder
+    _db_recorder = recorder
 
 
 @dataclass
@@ -235,26 +247,29 @@ class OrderManager:
                     filled_price=result.filled_price or 0.0,
                     session=session,
                 )
+            trade_data = {
+                "order_id": result.order_id,
+                "symbol": symbol,
+                "side": "BUY",
+                "quantity": sizing.quantity,
+                "price": price,
+                "filled_price": result.filled_price,
+                "filled_quantity": filled_qty,
+                "slippage": slippage,
+                "strategy": strategy_name,
+                "status": result.status,
+                "created_at": order.created_at,
+                "market": self._market,
+                "exchange": exchange,
+                "session": session,
+                "is_paper": self._is_paper,
+            }
             if _trade_recorder:
-                _trade_recorder(
-                    {
-                        "order_id": result.order_id,
-                        "symbol": symbol,
-                        "side": "BUY",
-                        "quantity": sizing.quantity,
-                        "price": price,
-                        "filled_price": result.filled_price,
-                        "filled_quantity": filled_qty,
-                        "slippage": slippage,
-                        "strategy": strategy_name,
-                        "status": result.status,
-                        "created_at": order.created_at,
-                        "market": self._market,
-                        "exchange": exchange,
-                        "session": session,
-                        "is_paper": self._is_paper,
-                    }
-                )
+                _trade_recorder(trade_data)
+            # STOCK-38: Awaited DB persist ensures filled_price/status
+            # are saved immediately, not relying on fire-and-forget
+            if _db_recorder:
+                await _db_recorder(trade_data)
             return order
 
         except Exception as e:
@@ -354,29 +369,32 @@ class OrderManager:
                 if entry_price > 0:
                     pnl_pct = round((sell_price - entry_price) / entry_price * 100, 2)
 
+            trade_data = {
+                "order_id": result.order_id,
+                "symbol": symbol,
+                "side": "SELL",
+                "quantity": quantity,
+                "price": price,
+                "filled_price": result.filled_price,
+                "filled_quantity": filled_qty,
+                "slippage": slippage,
+                "strategy": strategy_name,
+                "status": result.status,
+                "buy_strategy": buy_strategy,
+                "pnl": pnl,
+                "pnl_pct": pnl_pct,
+                "created_at": order.created_at,
+                "market": self._market,
+                "exchange": exchange,
+                "session": session,
+                "is_paper": self._is_paper,
+            }
             if _trade_recorder:
-                _trade_recorder(
-                    {
-                        "order_id": result.order_id,
-                        "symbol": symbol,
-                        "side": "SELL",
-                        "quantity": quantity,
-                        "price": price,
-                        "filled_price": result.filled_price,
-                        "filled_quantity": filled_qty,
-                        "slippage": slippage,
-                        "strategy": strategy_name,
-                        "status": result.status,
-                        "buy_strategy": buy_strategy,
-                        "pnl": pnl,
-                        "pnl_pct": pnl_pct,
-                        "created_at": order.created_at,
-                        "market": self._market,
-                        "exchange": exchange,
-                        "session": session,
-                        "is_paper": self._is_paper,
-                    }
-                )
+                _trade_recorder(trade_data)
+            # STOCK-38: Awaited DB persist ensures filled_price/status
+            # are saved immediately, not relying on fire-and-forget
+            if _db_recorder:
+                await _db_recorder(trade_data)
             return order
 
         except Exception as e:

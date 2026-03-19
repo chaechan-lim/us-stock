@@ -985,3 +985,153 @@ async def test_save_order_upsert_not_found_with_negative_pnl(repo):
     assert order2.id == order1.id
     assert order2.status == "filled"
     assert order2.pnl == -51.62
+
+# --- STOCK-38: recover_not_found_orders ---
+
+
+@pytest.mark.asyncio
+async def test_recover_not_found_orders_with_pnl(repo, session):
+    """Orders with not_found status and PnL are recovered to filled."""
+    from core.models import Order
+
+    # not_found order WITH pnl — should be recovered
+    order1 = Order(
+        symbol="AAPL",
+        exchange="NASD",
+        side="SELL",
+        order_type="market",
+        quantity=10,
+        price=155.0,
+        status="not_found",
+        pnl=50.0,
+        kis_order_id="KIS001",
+        market="US",
+    )
+    session.add(order1)
+
+    # not_found order WITHOUT pnl — should NOT be recovered
+    order2 = Order(
+        symbol="MSFT",
+        exchange="NASD",
+        side="BUY",
+        order_type="market",
+        quantity=5,
+        price=400.0,
+        status="not_found",
+        pnl=None,
+        kis_order_id="KIS002",
+        market="US",
+    )
+    session.add(order2)
+
+    # filled order — should NOT be touched
+    order3 = Order(
+        symbol="GOOGL",
+        exchange="NASD",
+        side="SELL",
+        order_type="market",
+        quantity=3,
+        price=140.0,
+        filled_price=141.0,
+        status="filled",
+        pnl=3.0,
+        kis_order_id="KIS003",
+        market="US",
+    )
+    session.add(order3)
+
+    await session.commit()
+
+    count = await repo.recover_not_found_orders()
+    assert count == 1
+
+    await session.refresh(order1)
+    assert order1.status == "filled"
+    assert order1.filled_price == 155.0  # Set from price since filled_price was None
+
+    await session.refresh(order2)
+    assert order2.status == "not_found"  # No PnL → not recovered
+
+    await session.refresh(order3)
+    assert order3.status == "filled"
+    assert order3.filled_price == 141.0  # Unchanged
+
+
+@pytest.mark.asyncio
+async def test_recover_not_found_preserves_existing_filled_price(repo, session):
+    """Recovery does not overwrite existing filled_price."""
+    from core.models import Order
+
+    order = Order(
+        symbol="NVDA",
+        exchange="NASD",
+        side="SELL",
+        order_type="market",
+        quantity=5,
+        price=300.0,
+        filled_price=305.0,  # Already has filled_price
+        status="not_found",
+        pnl=25.0,
+        kis_order_id="KIS004",
+        market="US",
+    )
+    session.add(order)
+    await session.commit()
+
+    count = await repo.recover_not_found_orders()
+    assert count == 1
+
+    await session.refresh(order)
+    assert order.status == "filled"
+    assert order.filled_price == 305.0  # Preserved, not overwritten with 300.0
+
+
+@pytest.mark.asyncio
+async def test_recover_not_found_zero_when_none_match(repo, session):
+    """Returns 0 when no not_found orders with PnL exist."""
+    from core.models import Order
+
+    # Only has pending order
+    order = Order(
+        symbol="AAPL",
+        exchange="NASD",
+        side="BUY",
+        order_type="market",
+        quantity=10,
+        price=150.0,
+        status="pending",
+        market="US",
+    )
+    session.add(order)
+    await session.commit()
+
+    count = await repo.recover_not_found_orders()
+    assert count == 0
+
+
+@pytest.mark.asyncio
+async def test_recover_not_found_kr_market(repo, session):
+    """Recovery works for KR market orders too."""
+    from core.models import Order
+
+    order = Order(
+        symbol="005930",
+        exchange="KRX",
+        side="SELL",
+        order_type="market",
+        quantity=10,
+        price=70000.0,
+        status="not_found",
+        pnl=5000.0,
+        kis_order_id="KR001",
+        market="KR",
+    )
+    session.add(order)
+    await session.commit()
+
+    count = await repo.recover_not_found_orders()
+    assert count == 1
+
+    await session.refresh(order)
+    assert order.status == "filled"
+    assert order.filled_price == 70000.0
