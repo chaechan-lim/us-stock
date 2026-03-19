@@ -224,3 +224,53 @@ class TestScannerPipeline:
             max_candidates=3,
         )
         assert len(results) <= 3
+
+    async def test_yfinance_ohlcv_dispatched_via_to_thread(
+        self, mock_market_data, mock_indicator_svc, mock_enricher,
+    ):
+        """_fetch_yfinance_ohlcv must run via asyncio.to_thread to avoid blocking the event loop."""
+        pipe = ScannerPipeline(
+            market_data=mock_market_data,
+            indicator_svc=mock_indicator_svc,
+            enricher=mock_enricher,
+        )
+        mock_df = _make_ohlcv_df()
+        with patch(
+            "scanner.pipeline.asyncio.to_thread",
+            new_callable=AsyncMock,
+            return_value=mock_df,
+        ) as mock_to_thread:
+            await pipe.run_full_scan(["AAPL", "MSFT"])
+
+            # Layer 1 calls to_thread once per symbol
+            assert mock_to_thread.call_count == 2
+            for call in mock_to_thread.call_args_list:
+                fn = call[0][0]
+                assert callable(fn)
+                # Verify the symbol argument was passed
+                assert call[0][1] in ("AAPL", "MSFT")
+
+    async def test_spy_context_dispatched_via_to_thread(
+        self, mock_market_data, mock_indicator_svc, mock_enricher, mock_ai_agent,
+    ):
+        """SPY market context fetch in Layer 3 must also use asyncio.to_thread."""
+        pipe = ScannerPipeline(
+            market_data=mock_market_data,
+            indicator_svc=mock_indicator_svc,
+            enricher=mock_enricher,
+            ai_agent=mock_ai_agent,
+        )
+        mock_df = _make_ohlcv_df()
+        with patch(
+            "scanner.pipeline.asyncio.to_thread",
+            new_callable=AsyncMock,
+            return_value=mock_df,
+        ) as mock_to_thread:
+            await pipe.run_full_scan(["AAPL", "MSFT", "GOOG"])
+
+            # Layer 1 (3 symbols) + Layer 3 SPY context (1) = 4 calls
+            assert mock_to_thread.call_count == 4
+            # Last call should be for SPY context
+            spy_call = mock_to_thread.call_args_list[-1]
+            assert spy_call[0][1] == "SPY"
+            assert spy_call[1]["period"] == "5d"

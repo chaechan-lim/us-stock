@@ -10,6 +10,7 @@ Uses yfinance for bulk screening (no rate limits).
 KIS API is reserved for order execution and real-time quotes only.
 """
 
+import asyncio
 import logging
 from dataclasses import asdict
 
@@ -101,7 +102,7 @@ class ScannerPipeline:
         last_prices: dict[str, float] = {}  # Cache prices from Layer 1
         for symbol in symbols:
             try:
-                df = _fetch_yfinance_ohlcv(symbol, period="1y")
+                df = await asyncio.to_thread(_fetch_yfinance_ohlcv, symbol, period="1y")
                 if df.empty or len(df) < 50:
                     continue
                 last_prices[symbol] = float(df.iloc[-1]["close"])
@@ -159,7 +160,7 @@ class ScannerPipeline:
             # Build market context from SPY if available
             market_ctx = {}
             try:
-                spy_df = _fetch_yfinance_ohlcv("SPY", period="5d")
+                spy_df = await asyncio.to_thread(_fetch_yfinance_ohlcv, "SPY", period="5d")
                 if not spy_df.empty:
                     spy_price = float(spy_df.iloc[-1]["close"])
                     spy_change = (spy_price / float(spy_df.iloc[-2]["close"]) - 1) * 100
