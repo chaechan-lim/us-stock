@@ -1,5 +1,6 @@
 """Tests for MarketDataService with caching."""
 
+import asyncio
 import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -257,3 +258,88 @@ class TestCacheEviction:
             await svc.get_ticker(f"SYM{i}")
 
         assert len(svc._ticker_cache) <= MAX_CACHE_ENTRIES
+
+
+class TestYfinanceBlocking:
+    """Verify that _fetch_yfinance is handled correctly (STOCK-27 related).
+
+    _fetch_yfinance is a synchronous method that calls yfinance.
+    These tests verify:
+    1. It is not a coroutine (blocking by design, to be called in thread pool)
+    2. It returns empty DataFrame on import errors
+    3. It returns empty DataFrame on yfinance exceptions
+    4. get_ohlcv still works when yfinance fails (falls back to KIS adapter)
+    """
+
+    def test_fetch_yfinance_is_synchronous(self, service):
+        """_fetch_yfinance must be a regular (non-async) method.
+
+        If it were async, it would need to be awaited. Being synchronous means
+        it must be wrapped in asyncio.to_thread() or run_in_executor() to
+        avoid blocking the event loop.
+        """
+        assert not asyncio.iscoroutinefunction(service._fetch_yfinance), (
+            "_fetch_yfinance must be synchronous (not a coroutine)"
+        )
+        assert callable(service._fetch_yfinance)
+
+    def test_fetch_yfinance_returns_dataframe(self, service):
+        """_fetch_yfinance should return a DataFrame (possibly empty)."""
+        with patch("data.market_data_service.yf", create=True) as mock_yf:
+            mock_ticker = MagicMock()
+            mock_ticker.history.return_value = pd.DataFrame({
+                "Open": [100.0], "High": [105.0], "Low": [99.0],
+                "Close": [103.0], "Volume": [1000.0],
+            })
+            mock_yf.Ticker.return_value = mock_ticker
+
+            # Import yfinance internally, so we need to patch at import level
+            with patch.dict("sys.modules", {"yfinance": mock_yf}):
+                result = service._fetch_yfinance("AAPL", "1D", 200)
+            assert isinstance(result, pd.DataFrame)
+
+    def test_fetch_yfinance_handles_import_error(self, service):
+        """_fetch_yfinance should return empty DataFrame if yfinance import fails."""
+        with patch.dict("sys.modules", {"yfinance": None}):
+            result = service._fetch_yfinance("AAPL", "1D", 200)
+            assert isinstance(result, pd.DataFrame)
+            assert result.empty
+
+    def test_fetch_yfinance_handles_exception(self, service):
+        """_fetch_yfinance returns empty DataFrame on any exception."""
+        bad_yf = MagicMock()
+        bad_yf.Ticker.side_effect = RuntimeError("network error")
+
+        with patch.dict("sys.modules", {"yfinance": bad_yf}):
+            result = service._fetch_yfinance("AAPL", "1D", 200)
+            assert isinstance(result, pd.DataFrame)
+            assert result.empty
+
+    async def test_get_ohlcv_falls_back_on_yfinance_failure(
+        self, service, mock_adapter
+    ):
+        """get_ohlcv falls back to KIS adapter when yfinance returns empty."""
+        with patch.object(
+            service, "_fetch_yfinance", return_value=pd.DataFrame()
+        ):
+            df = await service.get_ohlcv("AAPL")
+
+        # Should have fallen back to adapter
+        assert mock_adapter.fetch_ohlcv.called
+        assert isinstance(df, pd.DataFrame)
+        assert len(df) == 2  # From mock_adapter fixture
+
+    async def test_get_ohlcv_prefers_yfinance_over_adapter(
+        self, service, mock_adapter
+    ):
+        """get_ohlcv uses yfinance result and does NOT call KIS adapter."""
+        yf_df = pd.DataFrame({
+            "open": [72000.0], "high": [73000.0], "low": [71000.0],
+            "close": [72500.0], "volume": [1000000.0],
+        })
+        with patch.object(service, "_fetch_yfinance", return_value=yf_df):
+            df = await service.get_ohlcv("AAPL")
+
+        mock_adapter.fetch_ohlcv.assert_not_called()
+        assert len(df) == 1
+        assert df.iloc[0]["close"] == 72500.0
