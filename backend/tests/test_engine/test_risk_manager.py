@@ -9,8 +9,10 @@ class TestPositionSizing:
     def test_normal_sizing(self):
         rm = RiskManager()
         result = rm.calculate_position_size(
-            symbol="AAPL", price=150.0,
-            portfolio_value=100_000, cash_available=50_000,
+            symbol="AAPL",
+            price=150.0,
+            portfolio_value=100_000,
+            cash_available=50_000,
             current_positions=5,
         )
         assert result.allowed is True
@@ -20,8 +22,10 @@ class TestPositionSizing:
     def test_max_positions_reached(self):
         rm = RiskManager(RiskParams(max_positions=5))
         result = rm.calculate_position_size(
-            symbol="AAPL", price=150.0,
-            portfolio_value=100_000, cash_available=50_000,
+            symbol="AAPL",
+            price=150.0,
+            portfolio_value=100_000,
+            cash_available=50_000,
             current_positions=5,
         )
         assert result.allowed is False
@@ -30,8 +34,10 @@ class TestPositionSizing:
     def test_no_cash(self):
         rm = RiskManager()
         result = rm.calculate_position_size(
-            symbol="AAPL", price=150.0,
-            portfolio_value=100_000, cash_available=0,
+            symbol="AAPL",
+            price=150.0,
+            portfolio_value=100_000,
+            cash_available=0,
             current_positions=0,
         )
         assert result.allowed is False
@@ -39,8 +45,10 @@ class TestPositionSizing:
     def test_price_too_high(self):
         rm = RiskManager(RiskParams(max_position_pct=0.01))
         result = rm.calculate_position_size(
-            symbol="BRK.A", price=600_000.0,
-            portfolio_value=100_000, cash_available=50_000,
+            symbol="BRK.A",
+            price=600_000.0,
+            portfolio_value=100_000,
+            cash_available=50_000,
             current_positions=0,
         )
         assert result.allowed is False
@@ -49,8 +57,10 @@ class TestPositionSizing:
         rm = RiskManager(RiskParams(daily_loss_limit_pct=0.03))
         rm.update_daily_pnl(-3500)  # -3.5% of 100k
         result = rm.calculate_position_size(
-            symbol="AAPL", price=150.0,
-            portfolio_value=100_000, cash_available=50_000,
+            symbol="AAPL",
+            price=150.0,
+            portfolio_value=100_000,
+            cash_available=50_000,
             current_positions=0,
         )
         assert result.allowed is False
@@ -59,8 +69,10 @@ class TestPositionSizing:
     def test_respects_cash_over_position_limit(self):
         rm = RiskManager(RiskParams(max_position_pct=0.50))
         result = rm.calculate_position_size(
-            symbol="AAPL", price=150.0,
-            portfolio_value=100_000, cash_available=30_000,
+            symbol="AAPL",
+            price=150.0,
+            portfolio_value=100_000,
+            cash_available=30_000,
             current_positions=0,
         )
         assert result.allowed is True
@@ -69,8 +81,10 @@ class TestPositionSizing:
     def test_exposure_limit_blocks_buy(self):
         rm = RiskManager(RiskParams(max_total_exposure_pct=0.90))
         result = rm.calculate_position_size(
-            symbol="AAPL", price=150.0,
-            portfolio_value=100_000, cash_available=5_000,  # 95% invested
+            symbol="AAPL",
+            price=150.0,
+            portfolio_value=100_000,
+            cash_available=5_000,  # 95% invested
             current_positions=0,
         )
         assert result.allowed is False
@@ -79,8 +93,10 @@ class TestPositionSizing:
     def test_exposure_headroom_caps_allocation(self):
         rm = RiskManager(RiskParams(max_position_pct=0.10, max_total_exposure_pct=0.90))
         result = rm.calculate_position_size(
-            symbol="AAPL", price=150.0,
-            portfolio_value=100_000, cash_available=15_000,  # 85% invested, 5% headroom
+            symbol="AAPL",
+            price=150.0,
+            portfolio_value=100_000,
+            cash_available=15_000,  # 85% invested, 5% headroom
             current_positions=0,
         )
         assert result.allowed is True
@@ -138,10 +154,16 @@ class TestTrailingStop:
 
     def test_custom_trailing_params(self):
         rm = RiskManager()
-        assert rm.check_trailing_stop(
-            100.0, 104.0, 110.0,
-            activation_pct=0.03, trail_pct=0.05,
-        ) is True
+        assert (
+            rm.check_trailing_stop(
+                100.0,
+                104.0,
+                110.0,
+                activation_pct=0.03,
+                trail_pct=0.05,
+            )
+            is True
+        )
 
 
 class TestDynamicSlTp:
@@ -193,16 +215,21 @@ class TestMarketAllocation:
     """Test market-level fund allocation caps."""
 
     def _make_rm(self, us=0.5, kr=0.5):
-        return RiskManager(RiskParams(
-            market_allocations={"US": us, "KR": kr},
-        ))
+        return RiskManager(
+            RiskParams(
+                market_allocations={"US": us, "KR": kr},
+            )
+        )
 
     def test_caps_portfolio_value(self):
         rm = self._make_rm(us=0.5, kr=0.5)
         result = rm.calculate_position_size(
-            symbol="AAPL", price=100.0,
-            portfolio_value=100_000, cash_available=100_000,
-            current_positions=0, market="US",
+            symbol="AAPL",
+            price=100.0,
+            portfolio_value=100_000,
+            cash_available=100_000,
+            current_positions=0,
+            market="US",
         )
         assert result.allowed is True
         # Max allocation = 50,000 * 10% = 5,000 → 50 shares
@@ -211,8 +238,10 @@ class TestMarketAllocation:
     def test_no_market_param_no_cap(self):
         rm = self._make_rm(us=0.5, kr=0.5)
         result = rm.calculate_position_size(
-            symbol="AAPL", price=100.0,
-            portfolio_value=100_000, cash_available=100_000,
+            symbol="AAPL",
+            price=100.0,
+            portfolio_value=100_000,
+            cash_available=100_000,
             current_positions=0,
         )
         # Without market param, no cap applied → 100,000 * 10% = 10,000
@@ -222,14 +251,20 @@ class TestMarketAllocation:
     def test_kr_market_capped_separately(self):
         rm = self._make_rm(us=0.7, kr=0.3)
         kr_result = rm.calculate_position_size(
-            symbol="005930", price=50.0,
-            portfolio_value=100_000, cash_available=100_000,
-            current_positions=0, market="KR",
+            symbol="005930",
+            price=50.0,
+            portfolio_value=100_000,
+            cash_available=100_000,
+            current_positions=0,
+            market="KR",
         )
         us_result = rm.calculate_position_size(
-            symbol="AAPL", price=50.0,
-            portfolio_value=100_000, cash_available=100_000,
-            current_positions=0, market="US",
+            symbol="AAPL",
+            price=50.0,
+            portfolio_value=100_000,
+            cash_available=100_000,
+            current_positions=0,
+            market="US",
         )
         # KR capped at 30% → 30,000 * 10% = 3,000
         # US capped at 70% → 70,000 * 10% = 7,000
@@ -260,9 +295,12 @@ class TestMarketAllocation:
     def test_kelly_sizing_with_market(self):
         rm = self._make_rm(us=0.5, kr=0.5)
         result = rm.calculate_kelly_position_size(
-            symbol="AAPL", price=100.0,
-            portfolio_value=100_000, cash_available=100_000,
-            current_positions=0, market="US",
+            symbol="AAPL",
+            price=100.0,
+            portfolio_value=100_000,
+            cash_available=100_000,
+            current_positions=0,
+            market="US",
         )
         assert result.allowed is True
         # Capped at 50% of portfolio
@@ -272,9 +310,12 @@ class TestMarketAllocation:
         """No market_allocations → no cap applied."""
         rm = RiskManager()
         result = rm.calculate_position_size(
-            symbol="AAPL", price=100.0,
-            portfolio_value=100_000, cash_available=100_000,
-            current_positions=0, market="US",
+            symbol="AAPL",
+            price=100.0,
+            portfolio_value=100_000,
+            cash_available=100_000,
+            current_positions=0,
+            market="US",
         )
         assert result.allocation_usd <= 100_000 * 0.10 + 1
         assert result.allocation_usd > 50_000 * 0.10
@@ -284,15 +325,21 @@ class TestMarketAllocation:
         rm = self._make_rm(us=0.5, kr=0.5)
         # Without combined: 50% of 60,000 = 30,000
         without = rm.calculate_position_size(
-            symbol="AAPL", price=100.0,
-            portfolio_value=60_000, cash_available=60_000,
-            current_positions=0, market="US",
+            symbol="AAPL",
+            price=100.0,
+            portfolio_value=60_000,
+            cash_available=60_000,
+            current_positions=0,
+            market="US",
         )
         # With combined=100,000: 50% of 100,000 = 50,000, clamped to 60,000
         with_combined = rm.calculate_position_size(
-            symbol="AAPL", price=100.0,
-            portfolio_value=60_000, cash_available=60_000,
-            current_positions=0, market="US",
+            symbol="AAPL",
+            price=100.0,
+            portfolio_value=60_000,
+            cash_available=60_000,
+            current_positions=0,
+            market="US",
             combined_portfolio_value=100_000,
         )
         assert with_combined.quantity >= without.quantity
@@ -302,9 +349,12 @@ class TestMarketAllocation:
         rm = self._make_rm(us=0.5, kr=0.5)
         # 50% of 200,000 = 100,000 → but own portfolio is only 60,000
         result = rm.calculate_position_size(
-            symbol="AAPL", price=100.0,
-            portfolio_value=60_000, cash_available=60_000,
-            current_positions=0, market="US",
+            symbol="AAPL",
+            price=100.0,
+            portfolio_value=60_000,
+            cash_available=60_000,
+            current_positions=0,
+            market="US",
             combined_portfolio_value=200_000,
         )
         # Should be capped by portfolio_value (60,000), not combined cap (100,000)
@@ -314,14 +364,20 @@ class TestMarketAllocation:
         """Kelly sizing also uses combined_portfolio_value."""
         rm = self._make_rm(us=0.5, kr=0.5)
         without = rm.calculate_kelly_position_size(
-            symbol="AAPL", price=100.0,
-            portfolio_value=60_000, cash_available=60_000,
-            current_positions=0, market="US",
+            symbol="AAPL",
+            price=100.0,
+            portfolio_value=60_000,
+            cash_available=60_000,
+            current_positions=0,
+            market="US",
         )
         with_combined = rm.calculate_kelly_position_size(
-            symbol="AAPL", price=100.0,
-            portfolio_value=60_000, cash_available=60_000,
-            current_positions=0, market="US",
+            symbol="AAPL",
+            price=100.0,
+            portfolio_value=60_000,
+            cash_available=60_000,
+            current_positions=0,
+            market="US",
             combined_portfolio_value=100_000,
         )
         assert with_combined.quantity >= without.quantity
@@ -337,9 +393,12 @@ class TestMarketAllocation:
         # combined=9.7M, cap=50% → capped_portfolio=4.85M
         # capped_cash should be 4.85M - 1.3M = 3.55M (not 4.85M!)
         result = rm.calculate_position_size(
-            symbol="005930", price=50_000.0,
-            portfolio_value=9_000_000, cash_available=7_700_000,
-            current_positions=0, market="KR",
+            symbol="005930",
+            price=50_000.0,
+            portfolio_value=9_000_000,
+            cash_available=7_700_000,
+            current_positions=0,
+            market="KR",
             combined_portfolio_value=9_700_000,
         )
         assert result.allowed is True
@@ -353,9 +412,12 @@ class TestMarketAllocation:
         # combined=9.7M, cap=50% → capped_portfolio=4.85M
         # invested(8M) > capped_portfolio(4.85M) → capped_cash=0
         result = rm.calculate_position_size(
-            symbol="005930", price=50_000.0,
-            portfolio_value=9_000_000, cash_available=1_000_000,
-            current_positions=0, market="KR",
+            symbol="005930",
+            price=50_000.0,
+            portfolio_value=9_000_000,
+            cash_available=1_000_000,
+            current_positions=0,
+            market="KR",
             combined_portfolio_value=9_700_000,
         )
         assert result.allowed is False
@@ -368,9 +430,12 @@ class TestMarketAllocation:
         # cap=50% → capped_portfolio=50K
         # capped_cash = 50K - 40K = 10K
         result = rm.calculate_position_size(
-            symbol="AAPL", price=100.0,
-            portfolio_value=100_000, cash_available=60_000,
-            current_positions=0, market="US",
+            symbol="AAPL",
+            price=100.0,
+            portfolio_value=100_000,
+            cash_available=60_000,
+            current_positions=0,
+            market="US",
         )
         assert result.allowed is True
         # allocation from 10K cash (limited)
@@ -383,14 +448,20 @@ class TestConfidenceBasedSizing:
     def test_high_confidence_gets_larger_position(self):
         rm = RiskManager()
         high = rm.calculate_kelly_position_size(
-            symbol="AAPL", price=100.0,
-            portfolio_value=100_000, cash_available=100_000,
-            current_positions=0, signal_confidence=0.9,
+            symbol="AAPL",
+            price=100.0,
+            portfolio_value=100_000,
+            cash_available=100_000,
+            current_positions=0,
+            signal_confidence=0.9,
         )
         low = rm.calculate_kelly_position_size(
-            symbol="AAPL", price=100.0,
-            portfolio_value=100_000, cash_available=100_000,
-            current_positions=0, signal_confidence=0.3,
+            symbol="AAPL",
+            price=100.0,
+            portfolio_value=100_000,
+            cash_available=100_000,
+            current_positions=0,
+            signal_confidence=0.3,
         )
         assert high.allowed and low.allowed
         # High confidence should get a meaningfully larger position
@@ -401,9 +472,12 @@ class TestConfidenceBasedSizing:
     def test_zero_confidence_gets_minimum(self):
         rm = RiskManager()
         result = rm.calculate_kelly_position_size(
-            symbol="AAPL", price=100.0,
-            portfolio_value=100_000, cash_available=100_000,
-            current_positions=0, signal_confidence=0.0,
+            symbol="AAPL",
+            price=100.0,
+            portfolio_value=100_000,
+            cash_available=100_000,
+            current_positions=0,
+            signal_confidence=0.0,
         )
         assert result.allowed
         # Should get a much smaller position than max (7%)
@@ -412,9 +486,12 @@ class TestConfidenceBasedSizing:
     def test_full_confidence_gets_near_max(self):
         rm = RiskManager()
         result = rm.calculate_kelly_position_size(
-            symbol="AAPL", price=100.0,
-            portfolio_value=100_000, cash_available=100_000,
-            current_positions=0, signal_confidence=1.0,
+            symbol="AAPL",
+            price=100.0,
+            portfolio_value=100_000,
+            cash_available=100_000,
+            current_positions=0,
+            signal_confidence=1.0,
         )
         assert result.allowed
         # Should be close to max regime position (7% for uptrend)
@@ -427,9 +504,11 @@ class TestTieredTrailingStop:
     DEFAULT_TIERS = [(0.10, 0.05), (0.15, 0.04), (0.20, 0.03)]
 
     def _make_rm(self, tiers=None):
-        return RiskManager(RiskParams(
-            tiered_trailing_tiers=tiers or self.DEFAULT_TIERS,
-        ))
+        return RiskManager(
+            RiskParams(
+                tiered_trailing_tiers=tiers or self.DEFAULT_TIERS,
+            )
+        )
 
     def test_no_tiers_returns_false(self):
         rm = RiskManager()  # No tiers configured
@@ -518,13 +597,15 @@ class TestBreakevenStop:
     """Tests for breakeven stop (STOCK-24)."""
 
     def _make_rm(self, tp=0.20, enabled=True, activation=0.50, lock_ratio=0.75, lock_pct=0.50):
-        return RiskManager(RiskParams(
-            default_take_profit_pct=tp,
-            breakeven_stop_enabled=enabled,
-            breakeven_stop_activation_ratio=activation,
-            breakeven_stop_lock_ratio=lock_ratio,
-            breakeven_stop_lock_pct=lock_pct,
-        ))
+        return RiskManager(
+            RiskParams(
+                default_take_profit_pct=tp,
+                breakeven_stop_enabled=enabled,
+                breakeven_stop_activation_ratio=activation,
+                breakeven_stop_lock_ratio=lock_ratio,
+                breakeven_stop_lock_pct=lock_pct,
+            )
+        )
 
     def test_disabled_returns_false(self):
         rm = self._make_rm(enabled=False)
@@ -597,9 +678,15 @@ class TestBreakevenStop:
         # In breakeven zone with TP=30%: stop at entry=100
         # current=107: triggers lock with TP=20%, NOT with TP=30%
         assert rm.check_breakeven_stop(100.0, 107.0, 116.0) is True
-        assert rm.check_breakeven_stop(
-            100.0, 107.0, 116.0, take_profit_pct=0.30,
-        ) is False  # TP=30% → breakeven zone (stop=100)
+        assert (
+            rm.check_breakeven_stop(
+                100.0,
+                107.0,
+                116.0,
+                take_profit_pct=0.30,
+            )
+            is False
+        )  # TP=30% → breakeven zone (stop=100)
 
     def test_docn_scenario_23pct_gain_protected(self):
         """DOCN +23.74% gain: if price drops back toward entry, breakeven fires."""
@@ -620,3 +707,152 @@ class TestBreakevenStop:
         # In breakeven zone: stop at entry
         assert rm.check_breakeven_stop(entry, 49000.0, peak, take_profit_pct=0.30) is True
         assert rm.check_breakeven_stop(entry, 51000.0, peak, take_profit_pct=0.30) is False
+
+
+class TestExistingPositionConcentration:
+    """STOCK-26: Existing position value blocks new buys exceeding max_position_pct."""
+
+    def test_existing_at_max_blocks_buy(self):
+        """If already holding at max_position_pct, new buy rejected."""
+        rm = RiskManager(RiskParams(max_position_pct=0.10))
+        result = rm.calculate_position_size(
+            symbol="263750",
+            price=64600.0,
+            portfolio_value=10_000_000,
+            cash_available=5_000_000,
+            current_positions=5,
+            existing_position_value=1_000_000,  # 10% of portfolio
+        )
+        assert result.allowed is False
+        assert "Already holding" in result.reason
+
+    def test_existing_above_max_blocks_buy(self):
+        """If holding above max_position_pct (e.g. 34%), buy rejected."""
+        rm = RiskManager(RiskParams(max_position_pct=0.10))
+        result = rm.calculate_position_size(
+            symbol="263750",
+            price=64600.0,
+            portfolio_value=10_000_000,
+            cash_available=5_000_000,
+            current_positions=5,
+            existing_position_value=3_400_000,  # 34% of portfolio (like the bug)
+        )
+        assert result.allowed is False
+        assert "Already holding" in result.reason
+        assert "263750" in result.reason
+
+    def test_no_existing_position_allows_buy(self):
+        """Without existing position, buy proceeds normally."""
+        rm = RiskManager(RiskParams(max_position_pct=0.10))
+        result = rm.calculate_position_size(
+            symbol="AAPL",
+            price=150.0,
+            portfolio_value=100_000,
+            cash_available=50_000,
+            current_positions=0,
+            existing_position_value=0.0,
+        )
+        assert result.allowed is True
+        assert result.quantity > 0
+
+    def test_small_existing_allows_buy_but_reduces_allocation(self):
+        """Small existing position allows buy but caps remaining allocation."""
+        rm = RiskManager(RiskParams(max_position_pct=0.10))
+        # Existing position = 3% of portfolio (below 10% max)
+        result = rm.calculate_position_size(
+            symbol="AAPL",
+            price=100.0,
+            portfolio_value=100_000,
+            cash_available=50_000,
+            current_positions=2,
+            existing_position_value=3_000,  # 3% of portfolio
+        )
+        assert result.allowed is True
+        # max_alloc should be regime_pct(7%) * portfolio - existing(3000)
+        # = 7000 - 3000 = 4000. So allocation should be <= 4000
+        assert result.allocation_usd <= 4_100  # small tolerance for rounding
+
+    def test_kelly_existing_at_max_blocks_buy(self):
+        """Kelly sizing also blocks when existing position at max."""
+        rm = RiskManager(RiskParams(max_position_pct=0.10))
+        result = rm.calculate_kelly_position_size(
+            symbol="263750",
+            price=64600.0,
+            portfolio_value=10_000_000,
+            cash_available=5_000_000,
+            current_positions=5,
+            existing_position_value=1_000_000,  # 10% of portfolio
+        )
+        assert result.allowed is False
+        assert "Already holding" in result.reason
+
+    def test_kelly_no_existing_allows_buy(self):
+        """Kelly sizing proceeds normally without existing position."""
+        rm = RiskManager(RiskParams(max_position_pct=0.10))
+        result = rm.calculate_kelly_position_size(
+            symbol="AAPL",
+            price=100.0,
+            portfolio_value=100_000,
+            cash_available=100_000,
+            current_positions=0,
+            existing_position_value=0.0,
+        )
+        assert result.allowed is True
+
+    def test_zero_portfolio_value_no_division_error(self):
+        """Zero portfolio value should not cause division by zero."""
+        rm = RiskManager()
+        result = rm.calculate_position_size(
+            symbol="AAPL",
+            price=100.0,
+            portfolio_value=0,
+            cash_available=0,
+            current_positions=0,
+            existing_position_value=1000,
+        )
+        # Should be rejected for lack of cash, not crash
+        assert result.allowed is False
+
+    def test_kr_263750_regression_scenario(self):
+        """STOCK-26 regression: 263750 at 34% of KR portfolio should be blocked.
+
+        In the original incident, 263750 reached 34% concentration due to
+        17 successive buys. With existing_position_value check, the 2nd+ buy
+        would be blocked once the position exceeds max_position_pct.
+        """
+        rm = RiskManager(RiskParams(max_position_pct=0.10))
+        portfolio = 10_000_000  # 10M KRW
+
+        # First buy: no existing position → allowed
+        first = rm.calculate_position_size(
+            symbol="263750",
+            price=64600.0,
+            portfolio_value=portfolio,
+            cash_available=5_000_000,
+            current_positions=0,
+            existing_position_value=0.0,
+        )
+        assert first.allowed is True
+
+        # After first buy: position value ~452K (7 shares * 64600)
+        # Second buy: existing position at ~4.5% → still allowed
+        second = rm.calculate_position_size(
+            symbol="263750",
+            price=64600.0,
+            portfolio_value=portfolio,
+            cash_available=4_500_000,
+            current_positions=1,
+            existing_position_value=452_200.0,
+        )
+        assert second.allowed is True
+
+        # After many buys: position at 10%+ → BLOCKED
+        blocked = rm.calculate_position_size(
+            symbol="263750",
+            price=64600.0,
+            portfolio_value=portfolio,
+            cash_available=4_000_000,
+            current_positions=5,
+            existing_position_value=1_100_000.0,  # 11%
+        )
+        assert blocked.allowed is False

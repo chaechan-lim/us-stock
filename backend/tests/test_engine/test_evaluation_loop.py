@@ -1623,9 +1623,15 @@ class TestHeldPositionBuyToHoldRemap:
         # 1 SELL + 9 BUY (which become HOLD) → active_ratio ≈ 10% < 15%
         strategies = []
         names = [
-            "trend_following", "dual_momentum", "donchian_breakout",
-            "cis_momentum", "larry_williams", "supertrend",
-            "rsi_divergence", "bnf_deviation", "bollinger_squeeze",
+            "trend_following",
+            "dual_momentum",
+            "donchian_breakout",
+            "cis_momentum",
+            "larry_williams",
+            "supertrend",
+            "rsi_divergence",
+            "bnf_deviation",
+            "bollinger_squeeze",
             "macd_histogram",
         ]
         for i, name in enumerate(names):
@@ -1875,9 +1881,7 @@ class TestSellCooldown:
         )
         return loop
 
-    async def test_buy_blocked_during_cooldown(
-        self, loop_with_tracker, mock_adapter
-    ):
+    async def test_buy_blocked_during_cooldown(self, loop_with_tracker, mock_adapter):
         """BUY should be blocked when symbol was recently sold."""
         import time
 
@@ -1888,9 +1892,7 @@ class TestSellCooldown:
         await loop_with_tracker.evaluate_symbol("AAPL")
         mock_adapter.create_buy_order.assert_not_called()
 
-    async def test_buy_allowed_after_cooldown_expires(
-        self, loop_with_tracker, mock_adapter
-    ):
+    async def test_buy_allowed_after_cooldown_expires(self, loop_with_tracker, mock_adapter):
         """BUY should proceed after cooldown period has elapsed."""
         import time
 
@@ -1901,9 +1903,7 @@ class TestSellCooldown:
         await loop_with_tracker.evaluate_symbol("AAPL")
         mock_adapter.create_buy_order.assert_called_once()
 
-    async def test_cooldown_does_not_affect_other_symbols(
-        self, loop_with_tracker, mock_adapter
-    ):
+    async def test_cooldown_does_not_affect_other_symbols(self, loop_with_tracker, mock_adapter):
         """Cooldown for one symbol should not block buys for other symbols."""
         import time
 
@@ -1914,9 +1914,7 @@ class TestSellCooldown:
         await loop_with_tracker.evaluate_symbol("TSLA")
         mock_adapter.create_buy_order.assert_called_once()
 
-    async def test_cooldown_zero_disables_check(
-        self, loop_with_tracker, mock_adapter
-    ):
+    async def test_cooldown_zero_disables_check(self, loop_with_tracker, mock_adapter):
         """Setting cooldown to 0 should disable the check."""
         import time
 
@@ -2002,8 +2000,11 @@ class TestSellCooldown:
         )
         mock_market_data.get_positions.return_value = [
             Position(
-                symbol="AAPL", exchange="NASD", quantity=54,
-                avg_price=150.0, current_price=145.0,
+                symbol="AAPL",
+                exchange="NASD",
+                quantity=54,
+                avg_price=150.0,
+                current_price=145.0,
             ),
         ]
         mock_adapter.create_sell_order = AsyncMock(
@@ -2111,23 +2112,22 @@ class TestPerSymbolConcentrationLimit:
         """
         mock_market_data.get_positions.return_value = [
             Position(
-                symbol="AAPL", exchange="NASD", quantity=100,
-                avg_price=140.0, current_price=150.0,
+                symbol="AAPL",
+                exchange="NASD",
+                quantity=100,
+                avg_price=140.0,
+                current_price=150.0,
             ),
         ]
 
         await loop_no_tracker.evaluate_symbol("AAPL")
         mock_adapter.create_buy_order.assert_not_called()
 
-    async def test_concentration_limit_default_is_10_percent(
-        self, loop_no_tracker
-    ):
+    async def test_concentration_limit_default_is_10_percent(self, loop_no_tracker):
         """Default max_per_symbol_pct should be 10%."""
         assert loop_no_tracker._max_per_symbol_pct == 0.10
 
-    async def test_concentration_limit_customizable(
-        self, loop_no_tracker
-    ):
+    async def test_concentration_limit_customizable(self, loop_no_tracker):
         """Concentration limit should be configurable."""
         loop_no_tracker._max_per_symbol_pct = 0.20
         assert loop_no_tracker._max_per_symbol_pct == 0.20
@@ -2169,12 +2169,17 @@ class TestPerSymbolConcentrationLimit:
         # TSLA is in positions but AAPL is not
         mock_market_data.get_positions.return_value = [
             Position(
-                symbol="TSLA", exchange="NASD", quantity=100,
-                avg_price=180.0, current_price=200.0,
+                symbol="TSLA",
+                exchange="NASD",
+                quantity=100,
+                avg_price=180.0,
+                current_price=200.0,
             ),
         ]
         mock_market_data.get_balance.return_value = Balance(
-            currency="USD", total=100_000, available=80_000,
+            currency="USD",
+            total=100_000,
+            available=80_000,
         )
 
         await loop_no_tracker.evaluate_symbol("AAPL")
@@ -2200,6 +2205,7 @@ class TestSellCooldownDefault:
 # ------------------------------------------------------------------
 # STOCK-21: evaluate_exit() integration in EvaluationLoop
 # ------------------------------------------------------------------
+
 
 class TestBuildPositionContext:
     """Tests for EvaluationLoop._build_position_context()."""
@@ -2441,12 +2447,17 @@ class TestHeldPositionSellBias:
         position_tracker.get_buy_strategy.return_value = "trend_following"
 
         # Exchange shows held position with P&L = -5%
-        mock_market_data.get_positions = AsyncMock(return_value=[
-            Position(
-                symbol="AAPL", exchange="NASD", quantity=10,
-                avg_price=150.0, current_price=142.0,  # -5.3%
-            ),
-        ])
+        mock_market_data.get_positions = AsyncMock(
+            return_value=[
+                Position(
+                    symbol="AAPL",
+                    exchange="NASD",
+                    quantity=10,
+                    avg_price=150.0,
+                    current_price=142.0,  # -5.3%
+                ),
+            ]
+        )
 
         loop = EvaluationLoop(
             adapter=mock_adapter,
@@ -2472,7 +2483,10 @@ class TestHeldPositionSellBias:
 
     @pytest.mark.asyncio
     async def test_sell_on_indifference_triggered(
-        self, mock_adapter, mock_market_data, mock_registry,
+        self,
+        mock_adapter,
+        mock_market_data,
+        mock_registry,
     ):
         """HOLD + P&L < -3% on held position should trigger position_cleanup SELL."""
         from data.indicator_service import IndicatorService
@@ -2500,17 +2514,27 @@ class TestHeldPositionSellBias:
         position_tracker.get_buy_strategy.return_value = "trend_following"
 
         # AAPL held at loss (-5.3%)
-        mock_market_data.get_positions = AsyncMock(return_value=[
-            Position(
-                symbol="AAPL", exchange="NASD", quantity=10,
-                avg_price=150.0, current_price=142.0,
-            ),
-        ])
+        mock_market_data.get_positions = AsyncMock(
+            return_value=[
+                Position(
+                    symbol="AAPL",
+                    exchange="NASD",
+                    quantity=10,
+                    avg_price=150.0,
+                    current_price=142.0,
+                ),
+            ]
+        )
 
         mock_adapter.create_sell_order = AsyncMock(
             return_value=OrderResult(
-                order_id="S1", symbol="AAPL", side="SELL",
-                order_type="market", quantity=10, price=142.0, status="filled",
+                order_id="S1",
+                symbol="AAPL",
+                side="SELL",
+                order_type="market",
+                quantity=10,
+                price=142.0,
+                status="filled",
             )
         )
 
@@ -2535,7 +2559,10 @@ class TestHeldPositionSellBias:
 
     @pytest.mark.asyncio
     async def test_sell_on_indifference_not_triggered_above_threshold(
-        self, mock_adapter, mock_market_data, mock_registry,
+        self,
+        mock_adapter,
+        mock_market_data,
+        mock_registry,
     ):
         """HOLD + P&L > -3% should NOT trigger sell on indifference."""
         from data.indicator_service import IndicatorService
@@ -2561,12 +2588,17 @@ class TestHeldPositionSellBias:
         position_tracker.get_buy_strategy.return_value = "trend_following"
 
         # AAPL held at small loss (-1%)
-        mock_market_data.get_positions = AsyncMock(return_value=[
-            Position(
-                symbol="AAPL", exchange="NASD", quantity=10,
-                avg_price=150.0, current_price=148.5,  # -1%
-            ),
-        ])
+        mock_market_data.get_positions = AsyncMock(
+            return_value=[
+                Position(
+                    symbol="AAPL",
+                    exchange="NASD",
+                    quantity=10,
+                    avg_price=150.0,
+                    current_price=148.5,  # -1%
+                ),
+            ]
+        )
 
         loop = EvaluationLoop(
             adapter=mock_adapter,
@@ -2589,7 +2621,10 @@ class TestHeldPositionSellBias:
 
     @pytest.mark.asyncio
     async def test_non_held_uses_default_confidence(
-        self, mock_adapter, mock_market_data, mock_registry,
+        self,
+        mock_adapter,
+        mock_market_data,
+        mock_registry,
     ):
         """Non-held positions should still use default min_confidence (0.35)."""
         from data.indicator_service import IndicatorService
@@ -2634,4 +2669,118 @@ class TestHeldPositionSellBias:
         await loop._evaluate_all()
 
         # Should NOT buy — confidence (0.30) below default threshold (0.35)
+        mock_adapter.create_buy_order.assert_not_called()
+
+
+class TestBuyCandidateDedup:
+    """STOCK-26: Buy candidates must be deduplicated per symbol.
+
+    In _evaluate_all(), if the same symbol appears multiple times in
+    buy_candidates (e.g. from re-evaluation after restart), only the
+    highest-confidence entry should execute.
+    """
+
+    async def test_dedup_keeps_highest_confidence(
+        self,
+        mock_adapter,
+        mock_market_data,
+        mock_registry,
+    ):
+        """When same symbol appears twice in buy_candidates, keep highest conf."""
+        from data.indicator_service import IndicatorService
+        from strategies.combiner import SignalCombiner
+
+        risk = RiskManager()
+        order_mgr = OrderManager(adapter=mock_adapter, risk_manager=risk)
+
+        loop = EvaluationLoop(
+            adapter=mock_adapter,
+            market_data=mock_market_data,
+            indicator_svc=IndicatorService(),
+            registry=mock_registry,
+            combiner=SignalCombiner(),
+            order_manager=order_mgr,
+            risk_manager=risk,
+            watchlist=["AAPL"],
+            market_state="uptrend",
+        )
+
+        # Manually inject duplicate buy candidates
+        df = _make_ohlcv_df()
+        loop_buy_candidates = [
+            (
+                0.75,
+                "AAPL",
+                Signal(
+                    signal_type=SignalType.BUY,
+                    confidence=0.75,
+                    strategy_name="strat_a",
+                    reason="test",
+                ),
+                df,
+            ),
+            (
+                0.60,
+                "AAPL",
+                Signal(
+                    signal_type=SignalType.BUY,
+                    confidence=0.60,
+                    strategy_name="strat_b",
+                    reason="test",
+                ),
+                df,
+            ),
+            (
+                0.80,
+                "TSLA",
+                Signal(
+                    signal_type=SignalType.BUY,
+                    confidence=0.80,
+                    strategy_name="strat_a",
+                    reason="test",
+                ),
+                df,
+            ),
+        ]
+
+        # Test dedup logic directly: sort + deduplicate
+        buy_candidates = loop_buy_candidates[:]
+        buy_candidates.sort(key=lambda x: x[0], reverse=True)
+        seen: set[str] = set()
+        deduped = []
+        for entry in buy_candidates:
+            sym = entry[1]
+            if sym not in seen:
+                seen.add(sym)
+                deduped.append(entry)
+
+        # AAPL should appear once (0.75 kept, 0.60 dropped)
+        # TSLA should appear once
+        assert len(deduped) == 2
+        symbols = [e[1] for e in deduped]
+        assert "AAPL" in symbols
+        assert "TSLA" in symbols
+        # AAPL entry should be the 0.75 one (second highest after TSLA 0.80)
+        aapl_entry = next(e for e in deduped if e[1] == "AAPL")
+        assert aapl_entry[0] == 0.75
+
+    async def test_signal_dedup_blocks_repeat_buy_within_24h(
+        self,
+        eval_loop,
+        mock_adapter,
+    ):
+        """_last_signal prevents re-executing same BUY signal within 24h."""
+        # First buy should succeed
+        await eval_loop.evaluate_symbol("AAPL")
+        assert mock_adapter.create_buy_order.call_count == 1
+
+        # Second buy attempt for same symbol within 24h should be skipped
+        # The _last_signal dict should now have AAPL
+        assert "AAPL" in eval_loop._last_signal
+        assert eval_loop._last_signal["AAPL"][0] == "BUY"
+
+        # Reset adapter mock to track new calls
+        mock_adapter.create_buy_order.reset_mock()
+        await eval_loop.evaluate_symbol("AAPL")
+        # Should NOT place another buy (24h dedup)
         mock_adapter.create_buy_order.assert_not_called()

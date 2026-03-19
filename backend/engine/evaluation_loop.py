@@ -250,9 +250,7 @@ class EvaluationLoop:
                         strat = strategy_map.get(sig.strategy_name)
                         if strat is not None:
                             try:
-                                evaluated.append(
-                                    strat.evaluate_exit(sig, pos_ctx, df)
-                                )
+                                evaluated.append(strat.evaluate_exit(sig, pos_ctx, df))
                             except Exception:
                                 evaluated.append(sig)
                         else:
@@ -381,9 +379,7 @@ class EvaluationLoop:
                 # making strategy-based exits nearly impossible.
                 is_held = symbol in held
                 if is_held:
-                    n_remapped = sum(
-                        1 for s in signals if s.signal_type == SignalType.BUY
-                    )
+                    n_remapped = sum(1 for s in signals if s.signal_type == SignalType.BUY)
                     if n_remapped:
                         signals = [
                             Signal(
@@ -415,9 +411,7 @@ class EvaluationLoop:
                             strat = strategy_map.get(sig.strategy_name)
                             if strat is not None:
                                 try:
-                                    evaluated.append(
-                                        strat.evaluate_exit(sig, pos_ctx, df)
-                                    )
+                                    evaluated.append(strat.evaluate_exit(sig, pos_ctx, df))
                                 except Exception as e:
                                     logger.debug(
                                         "evaluate_exit failed for %s/%s: %s",
@@ -447,11 +441,7 @@ class EvaluationLoop:
                 # Sell on indifference: if no strategy has a strong opinion
                 # (HOLD) and the held position is losing beyond threshold,
                 # free up capital by selling (STOCK-7).
-                if (
-                    is_held
-                    and combined.signal_type == SignalType.HOLD
-                    and symbol in position_map
-                ):
+                if is_held and combined.signal_type == SignalType.HOLD and symbol in position_map:
                     pos = position_map[symbol]
                     if hasattr(pos, "avg_price") and pos.avg_price > 0:
                         pnl_pct = (pos.current_price - pos.avg_price) / pos.avg_price
@@ -509,8 +499,26 @@ class EvaluationLoop:
                 logger.error("Failed to evaluate %s: %s", symbol, e)
 
         # Phase 2: Execute BUYs ranked by confidence (highest first)
+        # STOCK-26: Deduplicate by symbol — keep only highest confidence
+        # per symbol. This prevents the same stock from appearing multiple
+        # times in buy_candidates (e.g. from different evaluation paths).
         if buy_candidates:
             buy_candidates.sort(key=lambda x: x[0], reverse=True)
+            seen_symbols: set[str] = set()
+            deduped: list[tuple[float, str, object, pd.DataFrame]] = []
+            for entry in buy_candidates:
+                sym = entry[1]
+                if sym not in seen_symbols:
+                    seen_symbols.add(sym)
+                    deduped.append(entry)
+            if len(deduped) < len(buy_candidates):
+                logger.info(
+                    "Deduplicated buy candidates: %d -> %d (removed %d duplicates)",
+                    len(buy_candidates),
+                    len(deduped),
+                    len(buy_candidates) - len(deduped),
+                )
+            buy_candidates = deduped
             logger.info(
                 "Buy candidates ranked: %s",
                 [(s, f"{c:.2f}") for c, s, _, _ in buy_candidates[:10]],
@@ -748,8 +756,7 @@ class EvaluationLoop:
                     hours_ago = elapsed / 3600
                     cooldown_h = self._sell_cooldown_secs / 3600
                     logger.info(
-                        "Skipping BUY for %s: sell cooldown (sold %.1fh ago, "
-                        "cooldown=%.0fh)",
+                        "Skipping BUY for %s: sell cooldown (sold %.1fh ago, cooldown=%.0fh)",
                         symbol,
                         hours_ago,
                         cooldown_h,
@@ -797,8 +804,7 @@ class EvaluationLoop:
                 max_value = balance.total * self._max_per_symbol_pct
                 if existing_value >= max_value:
                     logger.info(
-                        "Skipping BUY for %s: position concentration %.1f%% "
-                        ">= limit %.1f%%",
+                        "Skipping BUY for %s: position concentration %.1f%% >= limit %.1f%%",
                         symbol,
                         (existing_value / balance.total) * 100,
                         self._max_per_symbol_pct * 100,
@@ -823,6 +829,11 @@ class EvaluationLoop:
             metrics = self._signal_quality.get_metrics(strategy_name)
             win_rate, avg_win, avg_loss = metrics.kelly_inputs
 
+            # STOCK-26: Calculate existing position value for concentration check
+            existing_value = 0.0
+            if existing_pos and hasattr(existing_pos, "current_price"):
+                existing_value = existing_pos.current_price * existing_pos.quantity
+
             # Use Kelly-enhanced sizing
             sizing = self._risk_manager.calculate_kelly_position_size(
                 symbol=symbol,
@@ -837,6 +848,7 @@ class EvaluationLoop:
                 factor_score=factor_score,
                 market=self._market,
                 combined_portfolio_value=combined_pv,
+                existing_position_value=existing_value,
             )
 
             # Macro event sizing reduction (CPI/JOBS day = half size)
@@ -961,9 +973,7 @@ class EvaluationLoop:
                     # Add to recovery watch for re-entry evaluation
                     self._recovery_watch[symbol] = time.time()
 
-    def _build_position_context(
-        self, symbol: str, current_price: float
-    ) -> PositionContext | None:
+    def _build_position_context(self, symbol: str, current_price: float) -> PositionContext | None:
         """Build a PositionContext for a held symbol.
 
         Returns None if the position tracker is unavailable or the symbol

@@ -891,10 +891,15 @@ class TestExchangePositionDuplicateBlock:
         )
         assert order is not None
 
-    async def test_buy_proceeds_when_position_check_errors(
+    async def test_buy_rejected_when_position_check_errors(
         self, mock_adapter, risk_manager, mock_market_data
     ):
-        """If get_positions throws, buy should still proceed (other layers provide safety)."""
+        """STOCK-26: If get_positions throws, buy is REJECTED as safety precaution.
+
+        Previously this silently swallowed errors (pass), allowing duplicate buys
+        when the API was down. Now fail-safe: if we can't confirm we don't hold
+        the symbol, refuse to buy.
+        """
         mock_market_data.get_positions.side_effect = RuntimeError("API error")
         om = OrderManager(
             adapter=mock_adapter,
@@ -909,8 +914,8 @@ class TestExchangePositionDuplicateBlock:
             current_positions=0,
             strategy_name="test",
         )
-        assert order is not None
-        mock_adapter.create_buy_order.assert_called_once()
+        assert order is None
+        mock_adapter.create_buy_order.assert_not_called()
 
     async def test_buy_blocked_kr_market(self, mock_adapter, risk_manager, mock_market_data):
         """KR market duplicate buy also blocked by exchange position check."""
@@ -1133,3 +1138,194 @@ class TestExchangeFieldPropagation:
         )
         assert order is not None
         assert order.exchange == "NASD"
+
+
+# --- STOCK-26: Duplicate buy prevention (fail-safe on position check error) ---
+
+
+class TestStock26FailSafePositionCheck:
+    """STOCK-26: Verify position check failure rejects buy (fail-safe).
+
+    Previously `except Exception: pass` allowed buys when get_positions()
+    failed, enabling 17 duplicate buys of 263750.
+    """
+
+    @pytest.fixture
+    def mock_market_data(self):
+        md = AsyncMock()
+        md.get_positions = AsyncMock(return_value=[])
+        md.invalidate_cache = lambda: None
+        return md
+
+    async def test_timeout_error_rejects_buy(self, mock_adapter, risk_manager, mock_market_data):
+        """Timeout during position check rejects buy (fail-safe)."""
+        import asyncio
+
+        mock_market_data.get_positions.side_effect = asyncio.TimeoutError()
+        om = OrderManager(
+            adapter=mock_adapter,
+            risk_manager=risk_manager,
+            market_data=mock_market_data,
+        )
+        order = await om.place_buy(
+            symbol="263750",
+            price=64600.0,
+            portfolio_value=10_000_000,
+            cash_available=5_000_000,
+            current_positions=0,
+            strategy_name="supertrend",
+        )
+        assert order is None
+        mock_adapter.create_buy_order.assert_not_called()
+
+    async def test_connection_error_rejects_buy(self, mock_adapter, risk_manager, mock_market_data):
+        """Connection error during position check rejects buy."""
+        mock_market_data.get_positions.side_effect = ConnectionError("disconnected")
+        om = OrderManager(
+            adapter=mock_adapter,
+            risk_manager=risk_manager,
+            market_data=mock_market_data,
+        )
+        order = await om.place_buy(
+            symbol="AAPL",
+            price=150.0,
+            portfolio_value=100_000,
+            cash_available=50_000,
+            current_positions=0,
+            strategy_name="test",
+        )
+        assert order is None
+        mock_adapter.create_buy_order.assert_not_called()
+
+    async def test_no_market_data_still_allows_buy(self, mock_adapter, risk_manager):
+        """Without market_data service, position check skipped (backward compat)."""
+        om = OrderManager(
+            adapter=mock_adapter,
+            risk_manager=risk_manager,
+            market_data=None,
+        )
+        order = await om.place_buy(
+            symbol="AAPL",
+            price=150.0,
+            portfolio_value=100_000,
+            cash_available=50_000,
+            current_positions=0,
+            strategy_name="test",
+        )
+        assert order is not None
+
+    async def test_consecutive_buys_same_symbol_blocked(
+        self, mock_adapter, risk_manager, mock_market_data
+    ):
+        """STOCK-26 scenario: After first buy fills, second buy for same symbol
+        is blocked by exchange position check (position now shows in exchange).
+        """
+        call_count = 0
+
+        async def create_buy(**kwargs):
+            nonlocal call_count
+            call_count += 1
+            return OrderResult(
+                order_id=f"ORD{call_count:03d}",
+                symbol=kwargs["symbol"],
+                side="BUY",
+                order_type="limit",
+                quantity=kwargs["quantity"],
+                price=kwargs.get("price", 64600.0),
+                filled_quantity=kwargs["quantity"],
+                filled_price=kwargs.get("price", 64600.0),
+                status="filled",
+            )
+
+        mock_adapter.create_buy_order = create_buy
+
+        om = OrderManager(
+            adapter=mock_adapter,
+            risk_manager=risk_manager,
+            market_data=mock_market_data,
+        )
+
+        # First buy: no position yet
+        mock_market_data.get_positions.return_value = []
+        first = await om.place_buy(
+            symbol="263750",
+            price=64600.0,
+            portfolio_value=10_000_000,
+            cash_available=5_000_000,
+            current_positions=0,
+            strategy_name="supertrend",
+        )
+        assert first is not None
+
+        # Second buy: exchange now shows position (first buy filled)
+        mock_market_data.get_positions.return_value = [
+            Position(symbol="263750", exchange="KRX", quantity=10, avg_price=64600.0),
+        ]
+        second = await om.place_buy(
+            symbol="263750",
+            price=64800.0,
+            portfolio_value=10_000_000,
+            cash_available=4_500_000,
+            current_positions=1,
+            strategy_name="supertrend",
+        )
+        assert second is None  # Blocked by exchange position check
+        assert call_count == 1  # Only one order placed
+
+    async def test_263750_scenario_17_buys_prevented(
+        self, mock_adapter, risk_manager, mock_market_data
+    ):
+        """STOCK-26 regression test: Simulates the 263750 scenario where
+        17 BUY orders were placed. After the fix, only 1 should succeed.
+        """
+        buy_count = 0
+
+        async def create_buy(**kwargs):
+            nonlocal buy_count
+            buy_count += 1
+            return OrderResult(
+                order_id=f"ORD{buy_count:03d}",
+                symbol="263750",
+                side="BUY",
+                order_type="limit",
+                quantity=7,
+                price=64600.0,
+                filled_quantity=7,
+                filled_price=64600.0,
+                status="filled",
+            )
+
+        mock_adapter.create_buy_order = create_buy
+        om = OrderManager(
+            adapter=mock_adapter,
+            risk_manager=risk_manager,
+            market_data=mock_market_data,
+            market="KR",
+        )
+
+        # Simulate 17 buy attempts — only first should succeed
+        for i in range(17):
+            # After first buy, exchange reports existing position
+            if i >= 1:
+                mock_market_data.get_positions.return_value = [
+                    Position(
+                        symbol="263750",
+                        exchange="KRX",
+                        quantity=7 * i,
+                        avg_price=64600.0,
+                    ),
+                ]
+            else:
+                mock_market_data.get_positions.return_value = []
+
+            await om.place_buy(
+                symbol="263750",
+                price=64600.0,
+                portfolio_value=10_000_000,
+                cash_available=5_000_000,
+                current_positions=i,
+                strategy_name="supertrend",
+            )
+
+        # Only 1 buy order should have been placed, not 17
+        assert buy_count == 1

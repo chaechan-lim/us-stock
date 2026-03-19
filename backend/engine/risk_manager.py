@@ -57,13 +57,13 @@ REGIME_POSITION_PCT: dict[str, float] = {
     "strong_uptrend": 0.08,  # Max per position (diversified)
     "uptrend": 0.07,
     "sideways": 0.06,
-    "downtrend": 0.04,       # Defensive
+    "downtrend": 0.04,  # Defensive
 }
 REGIME_EXPOSURE_PCT: dict[str, float] = {
     "strong_uptrend": 0.95,
     "uptrend": 0.90,
     "sideways": 0.70,
-    "downtrend": 0.40,       # Mostly cash
+    "downtrend": 0.40,  # Mostly cash
 }
 
 
@@ -165,16 +165,45 @@ class RiskManager:
         atr: float | None = None,
         market: str | None = None,
         combined_portfolio_value: float | None = None,
+        existing_position_value: float = 0.0,
     ) -> PositionSizeResult:
-        """Calculate allowed position size given risk constraints."""
+        """Calculate allowed position size given risk constraints.
+
+        Args:
+            existing_position_value: Current value of any existing position in
+                this symbol. Used to enforce per-symbol concentration limit
+                (STOCK-26). If existing value already exceeds max_position_pct,
+                the buy is rejected.
+        """
         portfolio_value, cash_available = self._apply_market_cap(
-            portfolio_value, cash_available, market, combined_portfolio_value,
+            portfolio_value,
+            cash_available,
+            market,
+            combined_portfolio_value,
         )
+
+        # STOCK-26: Per-symbol concentration check — reject if already holding
+        # this symbol at or above the max per-position allocation.
+        if existing_position_value > 0 and portfolio_value > 0:
+            existing_pct = existing_position_value / portfolio_value
+            max_pct = self._params.max_position_pct
+            if existing_pct >= max_pct:
+                return PositionSizeResult(
+                    quantity=0,
+                    allocation_usd=0,
+                    risk_per_share=0,
+                    reason=(
+                        f"Already holding {symbol} at {existing_pct:.1%} (>= {max_pct:.0%} limit)"
+                    ),
+                    allowed=False,
+                )
 
         # Check position limit
         if current_positions >= self._params.max_positions:
             return PositionSizeResult(
-                quantity=0, allocation_usd=0, risk_per_share=0,
+                quantity=0,
+                allocation_usd=0,
+                risk_per_share=0,
                 reason=f"Max positions reached ({self._params.max_positions})",
                 allowed=False,
             )
@@ -189,13 +218,17 @@ class RiskManager:
             daily_loss_pct = abs(self._daily_pnl) / portfolio_value
             if daily_loss_pct >= self._params.daily_loss_limit_pct:
                 return PositionSizeResult(
-                    quantity=0, allocation_usd=0, risk_per_share=0,
+                    quantity=0,
+                    allocation_usd=0,
+                    risk_per_share=0,
                     reason=f"Daily loss limit hit ({daily_loss_pct:.1%})",
                     allowed=False,
                 )
 
-        # Max allocation per position (regime-adaptive)
+        # Max allocation per position (regime-adaptive), minus existing position value
         max_alloc = portfolio_value * self._get_regime_position_pct()
+        if existing_position_value > 0:
+            max_alloc = max(0.0, max_alloc - existing_position_value)
 
         # Respect cash available (with buffer) — also respect exposure headroom
         max_from_cash = cash_available * 0.95
@@ -204,7 +237,9 @@ class RiskManager:
 
         if allocation <= 0 or price <= 0:
             return PositionSizeResult(
-                quantity=0, allocation_usd=0, risk_per_share=0,
+                quantity=0,
+                allocation_usd=0,
+                risk_per_share=0,
                 reason="No cash available",
                 allowed=False,
             )
@@ -212,7 +247,9 @@ class RiskManager:
         quantity = int(allocation / price)
         if quantity <= 0:
             return PositionSizeResult(
-                quantity=0, allocation_usd=0, risk_per_share=0,
+                quantity=0,
+                allocation_usd=0,
+                risk_per_share=0,
                 reason="Price too high for allocation",
                 allowed=False,
             )
@@ -241,21 +278,46 @@ class RiskManager:
         factor_score: float = 0.0,
         market: str | None = None,
         combined_portfolio_value: float | None = None,
+        existing_position_value: float = 0.0,
     ) -> PositionSizeResult:
         """Kelly-enhanced position sizing.
 
         Uses Kelly Criterion when trade history is available,
         falls back to fixed sizing otherwise. Factor score and
         signal confidence scale position size up/down.
+
+        Args:
+            existing_position_value: Current value of any existing position in
+                this symbol (STOCK-26). Rejects if at/above max_position_pct.
         """
         portfolio_value, cash_available = self._apply_market_cap(
-            portfolio_value, cash_available, market, combined_portfolio_value,
+            portfolio_value,
+            cash_available,
+            market,
+            combined_portfolio_value,
         )
+
+        # STOCK-26: Per-symbol concentration check
+        if existing_position_value > 0 and portfolio_value > 0:
+            existing_pct = existing_position_value / portfolio_value
+            max_pct = self._params.max_position_pct
+            if existing_pct >= max_pct:
+                return PositionSizeResult(
+                    quantity=0,
+                    allocation_usd=0,
+                    risk_per_share=0,
+                    reason=(
+                        f"Already holding {symbol} at {existing_pct:.1%} (>= {max_pct:.0%} limit)"
+                    ),
+                    allowed=False,
+                )
 
         # Standard risk checks first
         if current_positions >= self._params.max_positions:
             return PositionSizeResult(
-                quantity=0, allocation_usd=0, risk_per_share=0,
+                quantity=0,
+                allocation_usd=0,
+                risk_per_share=0,
                 reason=f"Max positions reached ({self._params.max_positions})",
                 allowed=False,
             )
@@ -269,7 +331,9 @@ class RiskManager:
             daily_loss_pct = abs(self._daily_pnl) / portfolio_value
             if daily_loss_pct >= self._params.daily_loss_limit_pct:
                 return PositionSizeResult(
-                    quantity=0, allocation_usd=0, risk_per_share=0,
+                    quantity=0,
+                    allocation_usd=0,
+                    risk_per_share=0,
                     reason=f"Daily loss limit hit ({daily_loss_pct:.1%})",
                     allowed=False,
                 )
@@ -298,7 +362,8 @@ class RiskManager:
                         logger.info(
                             "Kelly sizing %s: kelly=%.3f, conf_boost=%.2f, "
                             "factor_boost=%.2f, alloc=%.1f%%",
-                            symbol, kelly_result.kelly_fraction,
+                            symbol,
+                            kelly_result.kelly_fraction,
                             kelly_result.confidence_boost,
                             kelly_result.factor_boost,
                             kelly_result.final_allocation_pct * 100,
@@ -318,6 +383,7 @@ class RiskManager:
         base_pct = self._get_regime_position_pct()
         # Adjust by factor score: positive factor → up to 1.3x, negative → down to 0.7x
         import numpy as np
+
         factor_mult = 1.0 + 0.3 * np.tanh(factor_score) if factor_score != 0 else 1.0
         # Adjust by confidence: scale linearly — low confidence gets much smaller position
         # conf=0.3→0.58, conf=0.5→0.70, conf=0.7→0.82, conf=0.9→0.94, conf=1.0→1.0
@@ -330,7 +396,9 @@ class RiskManager:
 
         if allocation <= 0 or price <= 0:
             return PositionSizeResult(
-                quantity=0, allocation_usd=0, risk_per_share=0,
+                quantity=0,
+                allocation_usd=0,
+                risk_per_share=0,
                 reason="No cash available",
                 allowed=False,
             )
@@ -338,7 +406,9 @@ class RiskManager:
         quantity = int(allocation / price)
         if quantity <= 0:
             return PositionSizeResult(
-                quantity=0, allocation_usd=0, risk_per_share=0,
+                quantity=0,
+                allocation_usd=0,
+                risk_per_share=0,
                 reason="Price too high for allocation",
                 allowed=False,
             )
@@ -352,7 +422,9 @@ class RiskManager:
         )
 
     def _check_exposure_limit(
-        self, portfolio_value: float, cash_available: float,
+        self,
+        portfolio_value: float,
+        cash_available: float,
         exposure_limit: float | None = None,
     ) -> PositionSizeResult | None:
         """Return rejection result if total exposure exceeds limit."""
@@ -363,14 +435,18 @@ class RiskManager:
         exposure = invested / portfolio_value
         if exposure >= limit:
             return PositionSizeResult(
-                quantity=0, allocation_usd=0, risk_per_share=0,
+                quantity=0,
+                allocation_usd=0,
+                risk_per_share=0,
                 reason=f"Max exposure reached ({exposure:.0%} >= {limit:.0%})",
                 allowed=False,
             )
         return None
 
     def _get_exposure_headroom(
-        self, portfolio_value: float, cash_available: float,
+        self,
+        portfolio_value: float,
+        cash_available: float,
     ) -> float:
         """How much more can be invested before hitting exposure limit."""
         if portfolio_value <= 0:
@@ -400,12 +476,17 @@ class RiskManager:
         - Limit orders only (enforced by caller)
         """
         portfolio_value, cash_available = self._apply_market_cap(
-            portfolio_value, cash_available, market, combined_portfolio_value,
+            portfolio_value,
+            cash_available,
+            market,
+            combined_portfolio_value,
         )
 
         if current_positions >= max_positions:
             return PositionSizeResult(
-                quantity=0, allocation_usd=0, risk_per_share=0,
+                quantity=0,
+                allocation_usd=0,
+                risk_per_share=0,
                 reason=f"Extended hours max positions ({max_positions})",
                 allowed=False,
             )
@@ -418,7 +499,9 @@ class RiskManager:
             daily_loss_pct = abs(self._daily_pnl) / portfolio_value
             if daily_loss_pct >= self._params.daily_loss_limit_pct:
                 return PositionSizeResult(
-                    quantity=0, allocation_usd=0, risk_per_share=0,
+                    quantity=0,
+                    allocation_usd=0,
+                    risk_per_share=0,
                     reason=f"Daily loss limit hit ({daily_loss_pct:.1%})",
                     allowed=False,
                 )
@@ -430,7 +513,9 @@ class RiskManager:
 
         if allocation <= 0 or price <= 0:
             return PositionSizeResult(
-                quantity=0, allocation_usd=0, risk_per_share=0,
+                quantity=0,
+                allocation_usd=0,
+                risk_per_share=0,
                 reason="No cash available (extended hours)",
                 allowed=False,
             )
@@ -438,7 +523,9 @@ class RiskManager:
         quantity = int(allocation / price)
         if quantity <= 0:
             return PositionSizeResult(
-                quantity=0, allocation_usd=0, risk_per_share=0,
+                quantity=0,
+                allocation_usd=0,
+                risk_per_share=0,
                 reason="Price too high for extended hours allocation",
                 allowed=False,
             )
