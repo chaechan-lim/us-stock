@@ -592,13 +592,18 @@ class KISKRAdapter(ExchangeAdapter):
         await self._auth.ensure_valid_token()
 
         ord_dvsn = ord_dvsn_override or ("00" if order_type == "limit" else "01")
+        # KIS KR market orders (ord_dvsn="01") require ORD_UNPR to be "0"
+        if ord_dvsn == "01":
+            order_price = "0"
+        else:
+            order_price = str(int(price)) if price else "0"
         body = {
             "CANO": self._config.account_no,
             "ACNT_PRDT_CD": self._config.account_product,
             "PDNO": symbol,
             "ORD_DVSN": ord_dvsn,
             "ORD_QTY": str(quantity),
-            "ORD_UNPR": str(int(price)) if price else "0",
+            "ORD_UNPR": order_price,
         }
 
         hashkey = await self._auth.get_hashkey(body)
