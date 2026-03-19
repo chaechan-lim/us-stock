@@ -758,7 +758,8 @@ async def lifespan(app: FastAPI):
         try:
             positions = await market_data.get_positions()
             held_symbols = {p.symbol for p in positions if p.quantity > 0}
-        except Exception:
+        except Exception as e:
+            logger.warning("Position fetch failed during watchlist cleanup: %s", e)
             held_symbols = set()
 
         removable = []
@@ -1768,8 +1769,8 @@ async def lifespan(app: FastAPI):
             try:
                 msg = "⚠️ **Startup Background Tasks Failed**\n" + "\n".join(f"- {e}" for e in errors)
                 await notification.send_message(msg)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.error("Failed to send startup failure notification: %s", e)
 
     asyncio.create_task(_initial_data_fetch(), name="initial-data-fetch")
 

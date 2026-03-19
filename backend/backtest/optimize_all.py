@@ -417,8 +417,8 @@ async def optimize_sl_tp(
                 signal = await strategy.analyze(window, symbol)
                 if signal.signal_type != ST.HOLD:
                     signals[i] = signal
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Strategy analysis failed at bar %d for %s: %s", i, symbol, e)
         all_signals[symbol] = signals
 
     t0 = time.monotonic()

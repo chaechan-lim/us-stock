@@ -473,8 +473,8 @@ class FullPipelineBacktest:
                     try:
                         signal = await strategy.analyze(df_window, symbol)
                         signals.append(signal)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug("Strategy %s failed for %s: %s", strategy.name, symbol, e)
 
                 # Get weights: market-state profile + stock category blending
                 market_weights = self._registry.get_profile_weights(profile_name)
@@ -838,8 +838,8 @@ class FullPipelineBacktest:
             try:
                 score = self._screener.score(df_window, symbol)
                 scores.append(score)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Screener scoring failed for %s: %s", symbol, e)
 
         filtered = self._screener.filter_candidates(
             scores, max_candidates=max_symbols,
@@ -1016,7 +1016,8 @@ class FullPipelineBacktest:
             entry = pd.Timestamp(pos.entry_date)
             exit_ = pd.Timestamp(str(date))
             holding_days = (exit_ - entry).days
-        except Exception:
+        except Exception as e:
+            logger.debug("Holding days calculation failed for %s: %s", symbol, e)
             holding_days = 0
 
         self._trades.append(Trade(
@@ -1351,7 +1352,8 @@ class FullPipelineBacktest:
             entry = pd.Timestamp(pos.entry_date)
             exit_ = pd.Timestamp(str(date))
             holding_days = (exit_ - entry).days
-        except Exception:
+        except Exception as e:
+            logger.debug("Holding days calculation failed for %s: %s", symbol, e)
             holding_days = 0
 
         self._trades.append(Trade(

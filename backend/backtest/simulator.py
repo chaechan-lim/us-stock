@@ -196,7 +196,8 @@ class BacktestSimulator:
             entry = pd.Timestamp(pos.entry_date)
             exit_ = pd.Timestamp(str(date))
             holding_days = (exit_ - entry).days
-        except Exception:
+        except Exception as e:
+            logger.debug("Holding days calculation failed for %s: %s", symbol, e)
             holding_days = 0
 
         self._trades.append(Trade(

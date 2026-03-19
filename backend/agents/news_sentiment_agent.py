@@ -178,8 +178,8 @@ class NewsSentimentAgent:
                 memory_context = await self._ctx.build_context(
                     AGENT_TYPE, max_tokens=500,
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("Failed to build agent memory context: %s", e)
 
         prompt = self._build_prompt(articles, memory_context, symbol_names)
 

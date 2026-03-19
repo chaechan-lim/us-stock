@@ -1,10 +1,13 @@
 """Engine control API endpoints."""
 
 import asyncio
+import logging
 
 from fastapi import APIRouter, Request
 
 from engine.scheduler import get_market_phase
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/engine", tags=["engine"])
 
@@ -84,8 +87,8 @@ async def market_state(request: Request):
                 kospi_df = await kr_md.get_ohlcv("069500", limit=250)
                 if not kospi_df.empty:
                     kr_state = kr_detector.detect(kospi_df)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("KR regime detection failed: %s", e)
 
     if kr_state:
         result.update({
@@ -181,8 +184,8 @@ async def run_evaluation(request: Request):
                 repo = TradeRepository(session)
                 items = await repo.get_watchlist(active_only=True)
                 eval_loop.set_watchlist([w.symbol for w in items])
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("Failed to load watchlist from DB: %s", e)
 
     if not eval_loop._watchlist:
         return {"status": "error", "detail": "Watchlist is empty. Add symbols via /watchlist/ first."}
@@ -245,8 +248,8 @@ async def etf_engine_status(request: Request):
                 if not spy_df.empty:
                     state = detector.detect(spy_df)
                     status["last_regime"] = state.regime.value
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("US ETF regime detection failed: %s", e)
 
     if not status["top_sectors"] and market_data:
         external_data = getattr(request.app.state, "external_data", None)
@@ -258,8 +261,8 @@ async def etf_engine_status(request: Request):
                     scores = sector_analyzer.analyze(sector_data)
                     top = sector_analyzer.get_top_sectors(scores, n=3, min_score=0)
                     status["top_sectors"] = [s.name for s in top]
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("US sector performance fetch failed: %s", e)
 
     return status
 
@@ -281,8 +284,8 @@ async def kr_etf_engine_status(request: Request):
                 if not kospi_df.empty:
                     state = detector.detect(kospi_df)
                     status["last_regime"] = state.regime.value
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("KR ETF regime detection failed: %s", e)
 
     if not status["top_sectors"]:
         external_data = getattr(request.app.state, "external_data", None)
@@ -294,8 +297,8 @@ async def kr_etf_engine_status(request: Request):
                     scores = sector_analyzer.analyze(sector_data)
                     top = sector_analyzer.get_top_sectors(scores, n=3, min_score=0)
                     status["top_sectors"] = [s.name for s in top]
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("KR sector performance fetch failed: %s", e)
 
     return status
 

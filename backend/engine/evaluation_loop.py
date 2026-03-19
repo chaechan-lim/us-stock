@@ -251,7 +251,11 @@ class EvaluationLoop:
                         if strat is not None:
                             try:
                                 evaluated.append(strat.evaluate_exit(sig, pos_ctx, df))
-                            except Exception:
+                            except Exception as e:
+                                logger.warning(
+                                    "evaluate_exit failed for %s/%s, using original signal: %s",
+                                    symbol, sig.strategy_name, e,
+                                )
                                 evaluated.append(sig)
                         else:
                             evaluated.append(sig)
@@ -332,8 +336,8 @@ class EvaluationLoop:
             exchange_held = {p.symbol for p in exchange_positions if p.quantity > 0}
             held = held | exchange_held
             position_map = {p.symbol: p for p in exchange_positions if p.quantity > 0}
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("Exchange position fetch failed, using tracker only: %s", e, exc_info=True)
 
         recovery = set(self._recovery_watch.keys()) - held
         eval_symbols = list(dict.fromkeys(self._watchlist + sorted(held) + sorted(recovery)))
@@ -640,8 +644,8 @@ class EvaluationLoop:
                 df = await self._market_data.get_ohlcv(symbol, limit=260)
                 if not df.empty:
                     price_data[symbol] = df
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("Failed to fetch OHLCV for factor scoring (%s): %s", symbol, e)
 
         if len(price_data) < 3:
             return
@@ -695,7 +699,8 @@ class EvaluationLoop:
         try:
             exchange = "KRX" if self._market == "KR" else self._exchange_resolver.resolve(symbol)
             price = await self._market_data.get_price(symbol, exchange)
-        except Exception:
+        except Exception as e:
+            logger.warning("Real-time price fetch failed for %s, using OHLCV close: %s", symbol, e)
             price = float(df.iloc[-1]["close"])
 
         if signal.signal_type == SignalType.BUY:

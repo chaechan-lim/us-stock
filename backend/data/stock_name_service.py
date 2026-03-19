@@ -180,7 +180,8 @@ async def _resolve_via_yfinance(
                     if name:
                         result[sym] = name
                         set_name(sym, name)
-                except Exception:
+                except Exception as e:
+                    logger.debug("Stock name lookup failed for %s: %s", sym, e)
                     continue
         except ImportError:
             pass

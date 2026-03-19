@@ -76,14 +76,14 @@ async def _combined_summary(request: Request) -> dict:
         try:
             kr_balance = await kr_md.get_balance()
             kr_positions = await kr_md.get_positions()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("KR balance/positions fetch failed: %s", e)
     if us_md:
         try:
             us_balance = await us_md.get_balance()
             us_positions = await us_md.get_positions()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("US balance/positions fetch failed: %s", e)
 
     krw_total = kr_balance.total if kr_balance else 0
     krw_available = kr_balance.available if kr_balance else 0
@@ -98,8 +98,8 @@ async def _combined_summary(request: Request) -> dict:
             rate = await us_md.get_exchange_rate()
             if rate > 0:
                 _cached_usd_krw = rate
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("Exchange rate fetch failed: %s", e)
     elif adapter:
         _cached_usd_krw = getattr(adapter, "_last_exchange_rate", _cached_usd_krw)
     if _cached_usd_krw <= 0:
@@ -162,7 +162,8 @@ async def list_positions(request: Request, market: str = "ALL"):
             try:
                 positions = await md.get_positions()
                 results.extend(await _enrich_positions(positions, m, request))
-            except Exception:
+            except Exception as e:
+                logger.warning("Position fetch failed for %s market: %s", m, e)
                 continue
         return results
 
@@ -181,8 +182,8 @@ async def _enrich_positions(positions, market: str, request: Request) -> list[di
     if unknown:
         try:
             await resolve_names(unknown, market)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("Stock name resolution failed: %s", e)
 
     # Get tracked position info (SL/TP/trailing stop)
     tracker = _get_position_tracker(request, market)

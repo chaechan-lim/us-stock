@@ -102,7 +102,8 @@ def load_data(symbols: list[str], period: str = PERIOD):
             ticker = yf.Ticker(sym)
             info = ticker.info or {}
             fundamentals[sym] = info
-        except Exception:
+        except Exception as e:
+            logger.debug("Fundamental data fetch failed for %s: %s", sym, e)
             fundamentals[sym] = {}
 
     return price_data, fundamentals

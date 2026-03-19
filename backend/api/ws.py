@@ -8,6 +8,8 @@ from typing import Set
 
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/ws", tags=["websocket"])
 
 # Connected log clients
@@ -71,7 +73,8 @@ class WebSocketLogHandler(logging.Handler):
 async def _safe_send(ws: WebSocket, data: str):
     try:
         await ws.send_text(data)
-    except Exception:
+    except Exception as e:
+        logger.debug("WebSocket send failed, removing client: %s", e)
         _log_clients.discard(ws)
 
 
@@ -129,8 +132,8 @@ async def ws_prices(websocket: WebSocket):
                             "change_pct": ticker.change_pct,
                             "volume": ticker.volume,
                         }))
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug("Price update failed for %s: %s", sym, e)
             await asyncio.sleep(interval)
 
     task = asyncio.create_task(price_loop())

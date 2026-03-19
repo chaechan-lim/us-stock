@@ -1,5 +1,7 @@
 """Scanner API endpoints."""
 
+import logging
+
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
 
@@ -7,6 +9,8 @@ from api.dependencies import get_market_data
 from data.market_data_service import MarketDataService
 from data.indicator_service import IndicatorService
 from scanner.indicator_screener import IndicatorScreener
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/scanner", tags=["scanner"])
 
@@ -35,7 +39,8 @@ async def run_scan(
             df = indicator_svc.add_all_indicators(df)
             score = screener.score(df, symbol)
             scores.append(score)
-        except Exception:
+        except Exception as e:
+            logger.warning("Scanner failed for %s: %s", symbol, e)
             continue
 
     filtered = screener.filter_candidates(scores, max_candidates=req.max_candidates)

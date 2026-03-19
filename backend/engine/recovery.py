@@ -193,8 +193,8 @@ class TaskRecovery:
                 if was_half_open and self._on_recovery:
                     try:
                         await self._on_recovery(self.name)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.warning("Recovery callback failed for %s: %s", self.name, e)
 
                 self._consecutive_failures = 0
                 self._total_successes += 1

@@ -167,8 +167,8 @@ class ScannerPipeline:
                         "spy_price": spy_price,
                         "spy_1d_change": round(spy_change, 2),
                     }
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("SPY market context fetch failed: %s", e)
 
             top_n = min(3, len(results))
             logger.info("Layer 3: AI analysis on top %d candidates", top_n)

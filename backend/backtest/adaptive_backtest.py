@@ -377,7 +377,7 @@ class AdaptiveBacktestEngine:
                 signal = await strategy.analyze(window, symbol)
                 if signal.signal_type != SignalType.HOLD:
                     signals[i] = signal
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Strategy analysis failed at bar %d for %s: %s", i, symbol, e)
 
         return signals

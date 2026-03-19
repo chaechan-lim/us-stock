@@ -125,8 +125,8 @@ class KISWebSocket:
         if self._ws:
             try:
                 await self._ws.close()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("WebSocket close error (ignored): %s", e)
         self._ws = None
         self._subscriptions.clear()
         self._connected_at = 0
@@ -265,8 +265,8 @@ class KISWebSocket:
             symbol, dtype = sub_key.split(":", 1)
             try:
                 await self.unsubscribe(symbol, dtype)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Unsubscribe failed during refresh for %s:%s: %s", symbol, dtype, e)
 
         # Close connection
         await self.close()

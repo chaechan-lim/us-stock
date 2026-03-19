@@ -1,5 +1,6 @@
 """Tests for Evaluation Loop."""
 
+import logging
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pandas as pd
@@ -2776,3 +2777,44 @@ class TestBuyCandidateDedup:
         await eval_loop.evaluate_symbol("AAPL")
         # Should NOT place another buy (24h dedup)
         mock_adapter.create_buy_order.assert_not_called()
+
+
+class TestSilentExceptionLogging:
+    """STOCK-28: Verify that silent exceptions now produce log output."""
+
+    @pytest.mark.asyncio
+    async def test_exchange_position_fetch_failure_logs_warning(
+        self, eval_loop, mock_market_data, caplog,
+    ):
+        """When get_positions raises in _evaluate_all, should log warning."""
+        # First call to get_positions (in _evaluate_all) fails,
+        # subsequent calls (in _execute_signal) succeed with empty list.
+        mock_market_data.get_positions = AsyncMock(
+            side_effect=[RuntimeError("API connection failed"), []]
+        )
+        eval_loop.set_watchlist(["AAPL"])
+
+        with caplog.at_level(logging.WARNING, logger="engine.evaluation_loop"):
+            await eval_loop._evaluate_all()
+
+        assert any(
+            "Exchange position fetch failed" in r.message for r in caplog.records
+        ), "Expected warning log for position fetch failure"
+
+    @pytest.mark.asyncio
+    async def test_factor_score_ohlcv_failure_logs_warning(
+        self, eval_loop, mock_market_data, caplog,
+    ):
+        """When OHLCV fetch for factor scoring fails, should log warning."""
+        mock_market_data.get_ohlcv = AsyncMock(
+            side_effect=RuntimeError("Network timeout")
+        )
+        eval_loop.set_watchlist(["AAPL", "MSFT", "GOOG"])
+
+        with caplog.at_level(logging.WARNING, logger="engine.evaluation_loop"):
+            await eval_loop._update_factor_scores()
+
+        assert any(
+            "Failed to fetch OHLCV for factor scoring" in r.message
+            for r in caplog.records
+        ), "Expected warning log for OHLCV fetch failure"

@@ -90,7 +90,8 @@ class KISKRAdapter(ExchangeAdapter):
         try:
             from scanner.kr_screener import get_kr_exchange
             return get_kr_exchange(symbol)
-        except Exception:
+        except Exception as e:
+            logger.warning("Exchange detection failed for %s, defaulting to KRX: %s", symbol, e)
             return "KRX"
 
     # -- Market Data --
@@ -254,6 +255,7 @@ class KISKRAdapter(ExchangeAdapter):
         overseas settlement obligations.
         """
         try:
+            cash = 0.0
             # Try OVRS_ICLD_YN=N first (domestic-only buying power)
             for ovrs in ("N", "Y"):
                 params = {
@@ -271,6 +273,10 @@ class KISKRAdapter(ExchangeAdapter):
                     params,
                 )
                 if data.get("rt_cd") != "0":
+                    logger.warning(
+                        "KR 주문가능조회 failed (OVRS=%s): msg_cd=%s msg=%s",
+                        ovrs, data.get("msg_cd", ""), data.get("msg1", ""),
+                    )
                     continue
                 output = data.get("output", {})
                 cash = float(output.get("ord_psbl_cash", 0))
@@ -285,7 +291,7 @@ class KISKRAdapter(ExchangeAdapter):
             logger.warning("KR orderable cash is non-positive, using OVRS=N result: %.0f", cash)
             return cash
         except Exception as e:
-            logger.warning("Failed to fetch KR orderable amount: %s", e)
+            logger.warning("Failed to fetch KR orderable amount: %s", e, exc_info=True)
             return None
 
     async def fetch_positions(self) -> list[Position]:

@@ -231,8 +231,8 @@ class MarketDataService:
         if hasattr(self._adapter, "_fetch_exchange_rate"):
             try:
                 rate = await self._adapter._fetch_exchange_rate()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("Exchange rate fetch failed, will use fallback: %s", e)
 
         # Fallback to cached rate from balance fetch
         if rate <= 0 and hasattr(self._adapter, "_last_exchange_rate"):

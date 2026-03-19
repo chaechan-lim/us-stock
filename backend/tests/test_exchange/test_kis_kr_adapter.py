@@ -1,5 +1,7 @@
 """Tests for KIS Korean domestic stock adapter."""
 
+import logging
+
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -323,3 +325,88 @@ class TestCancelOrder:
         adapter._session.post = MagicMock(return_value=ctx)
 
         assert await adapter.cancel_order("0001234567", "005930") is False
+
+
+class TestDetectExchangeLogging:
+    """STOCK-28: _detect_exchange should log warning on fallback."""
+
+    def test_logs_warning_when_get_kr_exchange_raises(self, caplog):
+        """When get_kr_exchange raises, should log warning and return KRX."""
+        with patch(
+            "scanner.kr_screener.get_kr_exchange",
+            side_effect=ValueError("unknown symbol"),
+        ):
+            with caplog.at_level(logging.WARNING, logger="exchange.kis_kr_adapter"):
+                result = KISKRAdapter._detect_exchange("999999")
+        assert result == "KRX"
+        assert any("Exchange detection failed" in r.message for r in caplog.records)
+        assert any("999999" in r.message for r in caplog.records)
+
+    def test_returns_valid_exchange(self):
+        """Should always return a valid exchange value."""
+        result = KISKRAdapter._detect_exchange("005930")
+        assert result in ("KRX", "KOSDAQ")
+
+
+class TestFetchOrderableAmountLogging:
+    """STOCK-28: _fetch_orderable_amount should not raise NameError."""
+
+    @pytest.mark.asyncio
+    async def test_both_api_calls_fail_no_name_error(self, adapter):
+        """When both OVRS=N and OVRS=Y return rt_cd != 0, should NOT raise NameError."""
+        adapter._session = MagicMock()
+        error_resp = AsyncMock()
+        error_resp.status = 200
+        error_resp.json = AsyncMock(return_value={
+            "rt_cd": "-1",
+            "msg_cd": "APBK0918",
+            "msg1": "주문가능금액 조회 실패",
+        })
+        ctx = MagicMock()
+        ctx.__aenter__ = AsyncMock(return_value=error_resp)
+        ctx.__aexit__ = AsyncMock(return_value=False)
+        adapter._session.get = MagicMock(return_value=ctx)
+
+        # Should NOT raise NameError — cash is now initialized to 0.0
+        result = await adapter._fetch_orderable_amount()
+        assert result == 0.0
+
+    @pytest.mark.asyncio
+    async def test_both_api_calls_fail_logs_warning(self, adapter, caplog):
+        """When API returns error, should log the API error message."""
+        adapter._session = MagicMock()
+        error_resp = AsyncMock()
+        error_resp.status = 200
+        error_resp.json = AsyncMock(return_value={
+            "rt_cd": "-1",
+            "msg_cd": "APBK0918",
+            "msg1": "주문가능금액 조회 실패",
+        })
+        ctx = MagicMock()
+        ctx.__aenter__ = AsyncMock(return_value=error_resp)
+        ctx.__aexit__ = AsyncMock(return_value=False)
+        adapter._session.get = MagicMock(return_value=ctx)
+
+        with caplog.at_level(logging.WARNING, logger="exchange.kis_kr_adapter"):
+            await adapter._fetch_orderable_amount()
+
+        api_error_logs = [r for r in caplog.records if "주문가능조회 failed" in r.message]
+        assert len(api_error_logs) == 2, f"Expected 2 warnings (OVRS=N and Y), got {len(api_error_logs)}"
+
+    @pytest.mark.asyncio
+    async def test_first_succeeds_returns_cash(self, adapter):
+        """When first call (OVRS=N) succeeds, should return that cash value."""
+        adapter._session = MagicMock()
+        success_resp = AsyncMock()
+        success_resp.status = 200
+        success_resp.json = AsyncMock(return_value={
+            "rt_cd": "0",
+            "output": {"ord_psbl_cash": "15000000", "max_buy_amt": "20000000"},
+        })
+        ctx = MagicMock()
+        ctx.__aenter__ = AsyncMock(return_value=success_resp)
+        ctx.__aexit__ = AsyncMock(return_value=False)
+        adapter._session.get = MagicMock(return_value=ctx)
+
+        result = await adapter._fetch_orderable_amount()
+        assert result == 15000000.0

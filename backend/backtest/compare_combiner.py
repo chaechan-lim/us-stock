@@ -166,8 +166,8 @@ async def run_combined_backtest(
             try:
                 signal = await strategy.analyze(window, symbol)
                 strategy_signals.append(signal)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Strategy %s failed for %s at bar %d: %s", strategy.name, symbol, i, e)
 
         combined = combiner.combine(strategy_signals, weights, MIN_CONFIDENCE)
 
