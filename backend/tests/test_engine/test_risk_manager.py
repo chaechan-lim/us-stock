@@ -915,3 +915,210 @@ class TestExistingPositionConcentration:
             existing_position_value=1_100_000.0,  # 11%
         )
         assert blocked.allowed is False
+
+
+class TestSymbolConcentrationExposure:
+    """STOCK-30: Per-symbol concentration limit via existing_symbol_exposure parameter."""
+
+    def test_rejects_when_symbol_concentration_exceeds_limit(self):
+        """Core test: buy rejected when existing_symbol_exposure >= max_position_pct."""
+        rm = RiskManager(RiskParams(max_position_pct=0.10))
+        result = rm.calculate_position_size(
+            symbol="AAPL",
+            price=150.0,
+            portfolio_value=100_000,
+            cash_available=50_000,
+            current_positions=3,
+            existing_symbol_exposure=0.12,  # 12% > 10% limit
+        )
+        assert result.allowed is False
+        assert "Already holding" in result.reason
+        assert "AAPL" in result.reason
+
+    def test_rejects_at_exact_limit(self):
+        """Buy rejected when exposure equals max_position_pct (boundary)."""
+        rm = RiskManager(RiskParams(max_position_pct=0.10))
+        result = rm.calculate_position_size(
+            symbol="MSFT",
+            price=400.0,
+            portfolio_value=100_000,
+            cash_available=50_000,
+            current_positions=2,
+            existing_symbol_exposure=0.10,  # Exactly at 10% limit
+        )
+        assert result.allowed is False
+        assert "Already holding" in result.reason
+
+    def test_allows_when_below_limit(self):
+        """Buy allowed when exposure is below max_position_pct."""
+        rm = RiskManager(RiskParams(max_position_pct=0.10))
+        result = rm.calculate_position_size(
+            symbol="AAPL",
+            price=150.0,
+            portfolio_value=100_000,
+            cash_available=50_000,
+            current_positions=2,
+            existing_symbol_exposure=0.05,  # 5% < 10% limit
+        )
+        assert result.allowed is True
+        assert result.quantity > 0
+
+    def test_zero_exposure_allows_buy(self):
+        """Zero exposure (no existing position) proceeds normally."""
+        rm = RiskManager(RiskParams(max_position_pct=0.10))
+        result = rm.calculate_position_size(
+            symbol="AAPL",
+            price=150.0,
+            portfolio_value=100_000,
+            cash_available=50_000,
+            current_positions=0,
+            existing_symbol_exposure=0.0,
+        )
+        assert result.allowed is True
+        assert result.quantity > 0
+
+    def test_exposure_reduces_allocation(self):
+        """Existing exposure reduces the remaining allocation available."""
+        rm = RiskManager(RiskParams(max_position_pct=0.10))
+        # No exposure → full allocation
+        without = rm.calculate_position_size(
+            symbol="AAPL",
+            price=100.0,
+            portfolio_value=100_000,
+            cash_available=50_000,
+            current_positions=2,
+            existing_symbol_exposure=0.0,
+        )
+        # 5% exposure → reduced allocation
+        with_exposure = rm.calculate_position_size(
+            symbol="AAPL",
+            price=100.0,
+            portfolio_value=100_000,
+            cash_available=50_000,
+            current_positions=2,
+            existing_symbol_exposure=0.05,
+        )
+        assert without.allowed is True
+        assert with_exposure.allowed is True
+        assert with_exposure.allocation_usd < without.allocation_usd
+
+    def test_both_params_uses_higher_value(self):
+        """When both existing_position_value and existing_symbol_exposure are provided,
+        the higher implied value is used (conservative)."""
+        rm = RiskManager(RiskParams(max_position_pct=0.10))
+        # exposure=12% → $12,000 on $100K portfolio
+        # position_value=$8,000 (lower)
+        # Should use exposure-implied value ($12,000) → block
+        result = rm.calculate_position_size(
+            symbol="AAPL",
+            price=150.0,
+            portfolio_value=100_000,
+            cash_available=50_000,
+            current_positions=2,
+            existing_position_value=8_000,  # 8% — below limit
+            existing_symbol_exposure=0.12,  # 12% — above limit
+        )
+        assert result.allowed is False
+        assert "Already holding" in result.reason
+
+    def test_position_value_wins_when_higher(self):
+        """When position_value implies higher exposure, it takes precedence."""
+        rm = RiskManager(RiskParams(max_position_pct=0.10))
+        # exposure=5% → $5,000
+        # position_value=$11,000 (higher, 11%)
+        # Should use position_value → block
+        result = rm.calculate_position_size(
+            symbol="AAPL",
+            price=150.0,
+            portfolio_value=100_000,
+            cash_available=50_000,
+            current_positions=2,
+            existing_position_value=11_000,  # 11% — above limit
+            existing_symbol_exposure=0.05,  # 5% — below limit
+        )
+        assert result.allowed is False
+        assert "Already holding" in result.reason
+
+    def test_kelly_rejects_when_exposure_exceeds_limit(self):
+        """Kelly sizing also rejects when existing_symbol_exposure >= max_position_pct."""
+        rm = RiskManager(RiskParams(max_position_pct=0.10))
+        result = rm.calculate_kelly_position_size(
+            symbol="TSLA",
+            price=200.0,
+            portfolio_value=100_000,
+            cash_available=50_000,
+            current_positions=3,
+            existing_symbol_exposure=0.15,  # 15% > 10% limit
+        )
+        assert result.allowed is False
+        assert "Already holding" in result.reason
+        assert "TSLA" in result.reason
+
+    def test_kelly_exposure_reduces_allocation(self):
+        """Kelly sizing reduces allocation when exposure is below limit."""
+        rm = RiskManager(RiskParams(max_position_pct=0.10))
+        without = rm.calculate_kelly_position_size(
+            symbol="AAPL",
+            price=100.0,
+            portfolio_value=100_000,
+            cash_available=100_000,
+            current_positions=0,
+            existing_symbol_exposure=0.0,
+        )
+        with_exposure = rm.calculate_kelly_position_size(
+            symbol="AAPL",
+            price=100.0,
+            portfolio_value=100_000,
+            cash_available=100_000,
+            current_positions=0,
+            existing_symbol_exposure=0.03,  # 3%
+        )
+        assert without.allowed is True
+        assert with_exposure.allowed is True
+        assert with_exposure.allocation_usd < without.allocation_usd
+
+    def test_kelly_with_trade_history_exposure_reduces(self):
+        """Kelly branch (with trade history) also respects existing_symbol_exposure."""
+        rm = RiskManager(RiskParams(max_position_pct=0.10))
+        without = rm.calculate_kelly_position_size(
+            symbol="AAPL",
+            price=100.0,
+            portfolio_value=100_000,
+            cash_available=100_000,
+            current_positions=0,
+            win_rate=0.55,
+            avg_win=0.08,
+            avg_loss=0.04,
+            signal_confidence=0.7,
+            existing_symbol_exposure=0.0,
+        )
+        with_exposure = rm.calculate_kelly_position_size(
+            symbol="AAPL",
+            price=100.0,
+            portfolio_value=100_000,
+            cash_available=100_000,
+            current_positions=0,
+            win_rate=0.55,
+            avg_win=0.08,
+            avg_loss=0.04,
+            signal_confidence=0.7,
+            existing_symbol_exposure=0.03,  # 3%
+        )
+        assert without.allowed is True
+        assert with_exposure.allowed is True
+        assert with_exposure.allocation_usd < without.allocation_usd
+
+    def test_kr_market_concentration_via_exposure(self):
+        """KR market symbols also blocked via existing_symbol_exposure."""
+        rm = RiskManager(RiskParams(max_position_pct=0.10))
+        result = rm.calculate_position_size(
+            symbol="005930",
+            price=70_000.0,
+            portfolio_value=10_000_000,
+            cash_available=5_000_000,
+            current_positions=3,
+            existing_symbol_exposure=0.34,  # 34% like the 263750 incident
+        )
+        assert result.allowed is False
+        assert "Already holding" in result.reason
+        assert "005930" in result.reason
