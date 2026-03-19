@@ -762,7 +762,7 @@ class KISAdapter(ExchangeAdapter):
         if ord_dvsn == "01":
             order_price = "0"
         else:
-            order_price = f"{price:.2f}" if price else "0"
+            order_price = f"{price:.2f}" if price is not None else "0"
         sll_type = "00" if side == "sell" else ""
         body = {
             "CANO": self._config.account_no,

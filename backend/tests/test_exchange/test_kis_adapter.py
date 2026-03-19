@@ -42,6 +42,18 @@ def _mock_post_response(adapter, response_data):
     adapter._session.post = MagicMock(return_value=ctx)
 
 
+def _extract_post_body(adapter) -> dict:
+    """Extract the JSON body from the most recent POST call."""
+    call_args = adapter._session.post.call_args
+    return call_args[1]["json"]
+
+
+_SUCCESS_RESPONSE = {
+    "rt_cd": "0",
+    "output": {"ODNO": "0001234567"},
+}
+
+
 class TestInit:
     def test_paper_mode(self, adapter):
         assert adapter._is_paper is True
@@ -61,120 +73,106 @@ class TestMarketOrderPrice:
     @pytest.mark.asyncio
     async def test_market_buy_sends_zero_price(self, adapter):
         """Market buy order must send OVRS_ORD_UNPR='0' even when price is provided."""
-        _mock_post_response(
-            adapter,
-            {
-                "rt_cd": "0",
-                "output": {"ODNO": "0001234567"},
-            },
-        )
+        _mock_post_response(adapter, _SUCCESS_RESPONSE)
 
         result = await adapter.create_buy_order("AAPL", 10, price=185.50, order_type="market")
         assert result.status == "pending"
         assert result.order_id == "0001234567"
 
-        # Verify the POST body sent OVRS_ORD_UNPR="0"
-        call_args = adapter._session.post.call_args
-        body = call_args[1].get("json") or call_args[0][1] if len(call_args[0]) > 1 else None
-        if body is None:
-            # aiohttp session.post(url, json=body, ...) or via _post helper
-            body = call_args[1].get("json")
+        body = _extract_post_body(adapter)
         assert body["OVRS_ORD_UNPR"] == "0"
         assert body["ORD_DVSN"] == "01"
 
     @pytest.mark.asyncio
     async def test_market_sell_sends_zero_price(self, adapter):
         """Market sell order must send OVRS_ORD_UNPR='0' even when price is provided."""
-        _mock_post_response(
-            adapter,
-            {
-                "rt_cd": "0",
-                "output": {"ODNO": "0001234568"},
-            },
-        )
+        _mock_post_response(adapter, _SUCCESS_RESPONSE)
 
         result = await adapter.create_sell_order("AAPL", 10, price=185.50, order_type="market")
         assert result.status == "pending"
 
-        call_args = adapter._session.post.call_args
-        body = call_args[1].get("json") or call_args[0][1] if len(call_args[0]) > 1 else None
-        if body is None:
-            body = call_args[1].get("json")
+        body = _extract_post_body(adapter)
         assert body["OVRS_ORD_UNPR"] == "0"
         assert body["ORD_DVSN"] == "01"
 
     @pytest.mark.asyncio
     async def test_market_order_no_price_sends_zero(self, adapter):
         """Market order without price also sends OVRS_ORD_UNPR='0'."""
-        _mock_post_response(
-            adapter,
-            {
-                "rt_cd": "0",
-                "output": {"ODNO": "0001234569"},
-            },
-        )
+        _mock_post_response(adapter, _SUCCESS_RESPONSE)
 
         result = await adapter.create_buy_order("AAPL", 10, order_type="market")
         assert result.status == "pending"
 
-        call_args = adapter._session.post.call_args
-        body = call_args[1].get("json") or call_args[0][1] if len(call_args[0]) > 1 else None
-        if body is None:
-            body = call_args[1].get("json")
+        body = _extract_post_body(adapter)
         assert body["OVRS_ORD_UNPR"] == "0"
+
+    @pytest.mark.asyncio
+    async def test_market_order_price_zero_sends_zero(self, adapter):
+        """Market order with explicit price=0.0 still sends OVRS_ORD_UNPR='0'."""
+        _mock_post_response(adapter, _SUCCESS_RESPONSE)
+
+        result = await adapter.create_buy_order("AAPL", 5, price=0.0, order_type="market")
+        assert result.status == "pending"
+
+        body = _extract_post_body(adapter)
+        assert body["OVRS_ORD_UNPR"] == "0"
+        assert body["ORD_DVSN"] == "01"
+
+
+class TestLimitOrderPrice:
+    """Verify that limit orders send properly formatted prices."""
 
     @pytest.mark.asyncio
     async def test_limit_order_sends_formatted_price(self, adapter):
         """Limit order must send the actual price formatted to 2 decimals."""
-        _mock_post_response(
-            adapter,
-            {
-                "rt_cd": "0",
-                "output": {"ODNO": "0001234570"},
-            },
-        )
+        _mock_post_response(adapter, _SUCCESS_RESPONSE)
 
         result = await adapter.create_buy_order("AAPL", 10, price=185.50, order_type="limit")
         assert result.status == "pending"
 
-        call_args = adapter._session.post.call_args
-        body = call_args[1].get("json") or call_args[0][1] if len(call_args[0]) > 1 else None
-        if body is None:
-            body = call_args[1].get("json")
+        body = _extract_post_body(adapter)
         assert body["OVRS_ORD_UNPR"] == "185.50"
         assert body["ORD_DVSN"] == "00"
 
     @pytest.mark.asyncio
     async def test_limit_order_no_price_sends_zero(self, adapter):
         """Limit order with no price falls back to '0'."""
-        _mock_post_response(
-            adapter,
-            {
-                "rt_cd": "0",
-                "output": {"ODNO": "0001234571"},
-            },
-        )
+        _mock_post_response(adapter, _SUCCESS_RESPONSE)
 
         result = await adapter.create_buy_order("AAPL", 10, order_type="limit")
         assert result.status == "pending"
 
-        call_args = adapter._session.post.call_args
-        body = call_args[1].get("json") or call_args[0][1] if len(call_args[0]) > 1 else None
-        if body is None:
-            body = call_args[1].get("json")
+        body = _extract_post_body(adapter)
         assert body["OVRS_ORD_UNPR"] == "0"
+
+    @pytest.mark.asyncio
+    async def test_limit_order_price_zero_sends_formatted(self, adapter):
+        """Limit order with explicit price=0.0 sends '0.00' (not falsy fallback)."""
+        _mock_post_response(adapter, _SUCCESS_RESPONSE)
+
+        result = await adapter.create_buy_order("AAPL", 10, price=0.0, order_type="limit")
+        assert result.status == "pending"
+
+        body = _extract_post_body(adapter)
+        assert body["OVRS_ORD_UNPR"] == "0.00"
+        assert body["ORD_DVSN"] == "00"
+
+    @pytest.mark.asyncio
+    async def test_limit_order_penny_price(self, adapter):
+        """Limit order with sub-dollar price formats correctly."""
+        _mock_post_response(adapter, _SUCCESS_RESPONSE)
+
+        result = await adapter.create_buy_order("SIRI", 100, price=0.50, order_type="limit")
+        assert result.status == "pending"
+
+        body = _extract_post_body(adapter)
+        assert body["OVRS_ORD_UNPR"] == "0.50"
 
 
 class TestCreateOrder:
     @pytest.mark.asyncio
     async def test_buy_order(self, adapter):
-        _mock_post_response(
-            adapter,
-            {
-                "rt_cd": "0",
-                "output": {"ODNO": "0001234567"},
-            },
-        )
+        _mock_post_response(adapter, _SUCCESS_RESPONSE)
 
         result = await adapter.create_buy_order("AAPL", 10, 185.50)
         assert result.order_id == "0001234567"
