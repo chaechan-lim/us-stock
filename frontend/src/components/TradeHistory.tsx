@@ -134,7 +134,7 @@ function PeriodCard({ label, data }: { label: string; data: PeriodSummary }) {
         <>
           {data.pnl_pct != null && (
             <div className={clsx('text-xs mt-0.5', data.pnl_pct >= 0 ? 'text-green-400/70' : 'text-red-400/70')}>
-              avg {data.pnl_pct >= 0 ? '+' : ''}{data.pnl_pct.toFixed(2)}%
+              {data.pnl_pct >= 0 ? '+' : ''}{data.pnl_pct.toFixed(2)}%
             </div>
           )}
           <div className="text-xs text-gray-500 mt-0.5">

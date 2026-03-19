@@ -340,19 +340,27 @@ async def trade_summary_periods(request: Request, market: str | None = None):
                 wins = [t for t in trades if t.pnl > 0]
                 losses = [t for t in trades if t.pnl <= 0]
                 total_pnl = sum(t.pnl for t in trades)
-                pnl_pcts = [
-                    getattr(t, "pnl_pct", None) for t in trades
-                    if getattr(t, "pnl_pct", None) is not None
-                ]
-                avg_pnl_pct = (
-                    round(sum(pnl_pcts) / len(pnl_pcts), 2) if pnl_pcts else None
-                )
+                # Cost-weighted PnL %: total_pnl / total_cost_basis
+                total_cost = 0.0
+                for t in trades:
+                    qty = getattr(t, "filled_quantity", None) or getattr(t, "quantity", 0) or 0
+                    entry = getattr(t, "entry_price", None)
+                    if not entry:
+                        # Infer entry from pnl and pnl_pct: entry = price - pnl/qty
+                        # or from pnl_pct: entry = sell_price / (1 + pnl_pct/100)
+                        pct = getattr(t, "pnl_pct", None)
+                        sell_price = getattr(t, "filled_price", None) or getattr(t, "price", None) or 0
+                        if pct and sell_price and pct != -100:
+                            entry = sell_price / (1 + pct / 100)
+                    if entry and qty:
+                        total_cost += abs(entry * qty)
+                pnl_pct = round(total_pnl / total_cost * 100, 2) if total_cost > 0 else None
                 return {
                     "trades": len(trades),
                     "wins": len(wins),
                     "losses": len(losses),
                     "pnl": round(total_pnl, 2),
-                    "pnl_pct": avg_pnl_pct,
+                    "pnl_pct": pnl_pct,
                     "win_rate": round(len(wins) / len(trades) * 100, 1) if trades else 0,
                 }
 

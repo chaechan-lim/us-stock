@@ -372,7 +372,7 @@ function PnLLine({ pnl, pnlPct, currency, trades, wins, losses }: { pnl: number;
       </div>
       {pnlPct != null && (
         <div className={`text-xs ${pnlPct >= 0 ? 'text-green-400/70' : 'text-red-400/70'}`}>
-          avg {pnlPct >= 0 ? '+' : ''}{pnlPct.toFixed(2)}%
+          {pnlPct >= 0 ? '+' : ''}{pnlPct.toFixed(2)}%
         </div>
       )}
     </div>
