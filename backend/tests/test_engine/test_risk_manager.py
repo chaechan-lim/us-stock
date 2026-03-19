@@ -1122,3 +1122,146 @@ class TestSymbolConcentrationExposure:
         assert result.allowed is False
         assert "Already holding" in result.reason
         assert "005930" in result.reason
+
+
+class TestExtendedHoursConcentration:
+    """STOCK-32: Extended hours position sizing must enforce per-symbol concentration."""
+
+    def test_existing_at_max_blocks_buy(self):
+        """If already holding at max_position_pct, extended-hours buy rejected."""
+        rm = RiskManager(RiskParams(max_position_pct=0.10))
+        result = rm.calculate_extended_hours_position_size(
+            symbol="AAPL",
+            price=150.0,
+            portfolio_value=100_000,
+            cash_available=50_000,
+            current_positions=1,
+            existing_position_value=10_000,  # 10% of portfolio = at limit
+        )
+        assert result.allowed is False
+        assert "Already holding" in result.reason
+        assert "AAPL" in result.reason
+
+    def test_existing_above_max_blocks_buy(self):
+        """If holding above max_position_pct, extended-hours buy rejected."""
+        rm = RiskManager(RiskParams(max_position_pct=0.10))
+        result = rm.calculate_extended_hours_position_size(
+            symbol="TSLA",
+            price=200.0,
+            portfolio_value=100_000,
+            cash_available=50_000,
+            current_positions=1,
+            existing_position_value=25_000,  # 25% of portfolio
+        )
+        assert result.allowed is False
+        assert "Already holding" in result.reason
+        assert "TSLA" in result.reason
+
+    def test_no_existing_position_allows_buy(self):
+        """Without existing position, extended-hours buy proceeds normally."""
+        rm = RiskManager(RiskParams(max_position_pct=0.10))
+        result = rm.calculate_extended_hours_position_size(
+            symbol="AAPL",
+            price=150.0,
+            portfolio_value=100_000,
+            cash_available=50_000,
+            current_positions=0,
+            existing_position_value=0.0,
+        )
+        assert result.allowed is True
+        assert result.quantity > 0
+        assert "extended hours" in result.reason
+
+    def test_small_existing_reduces_allocation(self):
+        """Small existing position reduces extended-hours allocation."""
+        rm = RiskManager(RiskParams(max_position_pct=0.10))
+        # Without existing position
+        without = rm.calculate_extended_hours_position_size(
+            symbol="AAPL",
+            price=10.0,
+            portfolio_value=100_000,
+            cash_available=50_000,
+            current_positions=0,
+            existing_position_value=0.0,
+        )
+        # With 1% existing position (below 10% max, so not blocked)
+        with_existing = rm.calculate_extended_hours_position_size(
+            symbol="AAPL",
+            price=10.0,
+            portfolio_value=100_000,
+            cash_available=50_000,
+            current_positions=0,
+            existing_position_value=1_000,  # 1% of portfolio
+        )
+        assert without.allowed is True
+        assert with_existing.allowed is True
+        assert with_existing.allocation_usd < without.allocation_usd
+
+    def test_exposure_param_blocks_concentrated_position(self):
+        """existing_symbol_exposure blocks buy when at/above max_position_pct."""
+        rm = RiskManager(RiskParams(max_position_pct=0.10))
+        result = rm.calculate_extended_hours_position_size(
+            symbol="NVDA",
+            price=500.0,
+            portfolio_value=100_000,
+            cash_available=50_000,
+            current_positions=1,
+            existing_symbol_exposure=0.15,  # 15% > 10% limit
+        )
+        assert result.allowed is False
+        assert "Already holding" in result.reason
+        assert "NVDA" in result.reason
+
+    def test_exposure_param_reduces_allocation(self):
+        """existing_symbol_exposure reduces allocation when below limit."""
+        rm = RiskManager(RiskParams(max_position_pct=0.10))
+        without = rm.calculate_extended_hours_position_size(
+            symbol="AAPL",
+            price=10.0,
+            portfolio_value=100_000,
+            cash_available=50_000,
+            current_positions=0,
+        )
+        with_exposure = rm.calculate_extended_hours_position_size(
+            symbol="AAPL",
+            price=10.0,
+            portfolio_value=100_000,
+            cash_available=50_000,
+            current_positions=0,
+            existing_symbol_exposure=0.01,  # 1% existing
+        )
+        assert without.allowed is True
+        assert with_exposure.allowed is True
+        assert with_exposure.allocation_usd < without.allocation_usd
+
+    def test_both_value_and_exposure_uses_higher(self):
+        """When both existing_position_value and exposure provided, use higher."""
+        rm = RiskManager(RiskParams(max_position_pct=0.10))
+        # exposure=12% implies $12,000 > value=$5,000, so exposure should win
+        result = rm.calculate_extended_hours_position_size(
+            symbol="AAPL",
+            price=150.0,
+            portfolio_value=100_000,
+            cash_available=50_000,
+            current_positions=1,
+            existing_position_value=5_000,  # 5%
+            existing_symbol_exposure=0.12,  # 12% > 10% limit
+        )
+        assert result.allowed is False
+        assert "Already holding" in result.reason
+
+    def test_existing_position_fills_extended_hours_alloc(self):
+        """Existing position that fills extended-hours max_position_pct (3%) blocks buy."""
+        rm = RiskManager(RiskParams(max_position_pct=0.10))
+        # Default extended hours max is 3%. If existing = 3%, allocation = 0
+        result = rm.calculate_extended_hours_position_size(
+            symbol="AAPL",
+            price=150.0,
+            portfolio_value=100_000,
+            cash_available=50_000,
+            current_positions=0,
+            max_position_pct=0.03,
+            existing_position_value=3_000,  # 3% = fills the 3% extended-hours alloc
+        )
+        # Concentration check passes (3% < 10%), but max_alloc = 3000-3000 = 0
+        assert result.allowed is False

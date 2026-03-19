@@ -545,6 +545,8 @@ class RiskManager:
         max_positions: int = 5,
         market: str | None = None,
         combined_portfolio_value: float | None = None,
+        existing_position_value: float = 0.0,
+        existing_symbol_exposure: float = 0.0,
     ) -> PositionSizeResult:
         """Conservative position sizing for extended hours trading.
 
@@ -552,6 +554,16 @@ class RiskManager:
         - 3% max per position (vs 8% regular)
         - 5 max positions (vs 20 regular)
         - Limit orders only (enforced by caller)
+
+        Args:
+            existing_position_value: Current value of any existing position in
+                this symbol. Used to enforce per-symbol concentration limit
+                (STOCK-32). If existing value already exceeds max_position_pct,
+                the buy is rejected.
+            existing_symbol_exposure: Existing position as a fraction of
+                portfolio (0.0-1.0). Complementary to existing_position_value;
+                when both are provided, the higher implied value is used
+                (STOCK-32).
         """
         portfolio_value, cash_available = self._apply_market_cap(
             portfolio_value,
@@ -559,6 +571,16 @@ class RiskManager:
             market,
             combined_portfolio_value,
         )
+
+        # STOCK-32: Per-symbol concentration check (shared helper)
+        rejection = self._check_concentration_limit(
+            symbol,
+            existing_position_value,
+            portfolio_value,
+            existing_symbol_exposure,
+        )
+        if rejection:
+            return rejection
 
         if current_positions >= max_positions:
             return PositionSizeResult(
@@ -584,7 +606,16 @@ class RiskManager:
                     allowed=False,
                 )
 
+        # STOCK-32: Subtract effective existing value so total
+        # concentration stays within max_position_pct.
         max_alloc = portfolio_value * max_position_pct
+        effective_existing = self._resolve_existing_value(
+            portfolio_value,
+            existing_position_value,
+            existing_symbol_exposure,
+        )
+        if effective_existing > 0:
+            max_alloc = max(0.0, max_alloc - effective_existing)
         max_from_cash = cash_available * 0.95
         exposure_headroom = self._get_exposure_headroom(portfolio_value, cash_available)
         allocation = min(max_alloc, max_from_cash, exposure_headroom)
