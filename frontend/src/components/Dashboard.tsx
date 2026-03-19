@@ -105,6 +105,10 @@ export default function Dashboard() {
             ? `${summary.total_unrealized_pnl_pct >= 0 ? '+' : ''}${summary.total_unrealized_pnl_pct.toFixed(2)}%`
             : undefined
           }
+          subClassName={summary.total_unrealized_pnl_pct != null
+            ? (summary.total_unrealized_pnl_pct >= 0 ? 'text-green-400' : 'text-red-400')
+            : undefined
+          }
         />
       </div>
 
@@ -345,25 +349,32 @@ function MacroIndicatorsCard() {
   )
 }
 
-function Card({ title, value, sub }: { title: string; value: React.ReactNode; sub?: string }) {
+function Card({ title, value, sub, subClassName }: { title: string; value: React.ReactNode; sub?: string; subClassName?: string }) {
   return (
     <div className="bg-gray-900 rounded-lg p-4">
       <div className="text-xs text-gray-400 uppercase tracking-wide">{title}</div>
       <div className="text-2xl font-bold mt-1">{value}</div>
-      {sub && <div className="text-xs text-gray-500 mt-0.5">{sub}</div>}
+      {sub && <div className={`text-xs mt-0.5 ${subClassName ?? 'text-gray-500'}`}>{sub}</div>}
     </div>
   )
 }
 
-interface PeriodData { pnl: number; trades: number; wins: number; losses: number; win_rate: number }
+interface PeriodData { pnl: number; pnl_pct: number | null; trades: number; wins: number; losses: number; win_rate: number }
 
-function PnLLine({ pnl, currency, trades, wins, losses }: { pnl: number; currency: string; trades: number; wins: number; losses: number }) {
+function PnLLine({ pnl, pnlPct, currency, trades, wins, losses }: { pnl: number; pnlPct?: number | null; currency: string; trades: number; wins: number; losses: number }) {
   const color = pnl >= 0 ? 'text-green-400' : 'text-red-400'
   const sign = pnl >= 0 ? '+' : ''
   return (
-    <div className="flex items-baseline justify-between gap-2">
-      <span className={`text-lg font-bold ${color}`}>{sign}{formatCurrency(pnl, currency)}</span>
-      <span className="text-xs text-gray-500">{trades}T {wins}W/{losses}L</span>
+    <div>
+      <div className="flex items-baseline justify-between gap-2">
+        <span className={`text-lg font-bold ${color}`}>{sign}{formatCurrency(pnl, currency)}</span>
+        <span className="text-xs text-gray-500">{trades}T {wins}W/{losses}L</span>
+      </div>
+      {pnlPct != null && (
+        <div className={`text-xs ${pnlPct >= 0 ? 'text-green-400/70' : 'text-red-400/70'}`}>
+          avg {pnlPct >= 0 ? '+' : ''}{pnlPct.toFixed(2)}%
+        </div>
+      )}
     </div>
   )
 }
@@ -382,13 +393,13 @@ function PnLCard({ label, us, kr }: { label: string; us?: PeriodData; kr?: Perio
           {hasKr && (
             <div>
               <div className="text-[10px] text-purple-400 mb-0.5">KR</div>
-              <PnLLine pnl={kr!.pnl} currency="KRW" trades={kr!.trades} wins={kr!.wins} losses={kr!.losses} />
+              <PnLLine pnl={kr!.pnl} pnlPct={kr!.pnl_pct} currency="KRW" trades={kr!.trades} wins={kr!.wins} losses={kr!.losses} />
             </div>
           )}
           {hasUs && (
             <div>
               <div className="text-[10px] text-blue-400 mb-0.5">US</div>
-              <PnLLine pnl={us!.pnl} currency="USD" trades={us!.trades} wins={us!.wins} losses={us!.losses} />
+              <PnLLine pnl={us!.pnl} pnlPct={us!.pnl_pct} currency="USD" trades={us!.trades} wins={us!.wins} losses={us!.losses} />
             </div>
           )}
         </div>

@@ -1192,7 +1192,7 @@ async def lifespan(app: FastAPI):
 
     scheduler.add_task(
         "news_analysis", task_news_analysis,
-        interval_sec=28800, phases=[MarketPhase.PRE_MARKET, MarketPhase.REGULAR],
+        interval_sec=3600, phases=[MarketPhase.PRE_MARKET, MarketPhase.REGULAR],
     )
 
     # Event calendar refresh (earnings, insider transactions)
@@ -1318,7 +1318,7 @@ async def lifespan(app: FastAPI):
 
     scheduler.add_task(
         "kr_news_analysis", task_kr_news_analysis,
-        interval_sec=28800, phases=[MarketPhase.PRE_MARKET, MarketPhase.REGULAR],
+        interval_sec=3600, phases=[MarketPhase.PRE_MARKET, MarketPhase.REGULAR],
         market="KR",
     )
 
