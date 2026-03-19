@@ -155,11 +155,33 @@ class RiskManager:
         capped_cash = min(capped_cash, cash_available)  # can't exceed real cash
         return capped_portfolio, capped_cash
 
+    def _resolve_existing_value(
+        self,
+        portfolio_value: float,
+        existing_position_value: float,
+        existing_symbol_exposure: float,
+    ) -> float:
+        """Resolve effective existing position value from absolute or exposure inputs.
+
+        When both are provided, returns the larger value (conservative).
+
+        Args:
+            portfolio_value: Total portfolio value.
+            existing_position_value: Absolute value of existing position (USD/KRW).
+            existing_symbol_exposure: Existing position as fraction of portfolio (0.0–1.0).
+        """
+        effective = existing_position_value
+        if existing_symbol_exposure > 0 and portfolio_value > 0:
+            exposure_value = existing_symbol_exposure * portfolio_value
+            effective = max(effective, exposure_value)
+        return effective
+
     def _check_concentration_limit(
         self,
         symbol: str,
         existing_position_value: float,
         portfolio_value: float,
+        existing_symbol_exposure: float = 0.0,
     ) -> PositionSizeResult | None:
         """Check if existing position exceeds per-symbol concentration limit.
 
@@ -167,9 +189,16 @@ class RiskManager:
         or above max_position_pct, otherwise returns None (OK to proceed).
         STOCK-26: Shared by both calculate_position_size and
         calculate_kelly_position_size to avoid logic drift.
+        STOCK-30: Added existing_symbol_exposure (fraction) as complementary
+        input to existing_position_value (absolute).
         """
-        if existing_position_value > 0 and portfolio_value > 0:
-            existing_pct = existing_position_value / portfolio_value
+        effective_value = self._resolve_existing_value(
+            portfolio_value,
+            existing_position_value,
+            existing_symbol_exposure,
+        )
+        if effective_value > 0 and portfolio_value > 0:
+            existing_pct = effective_value / portfolio_value
             max_pct = self._params.max_position_pct
             if existing_pct >= max_pct:
                 return PositionSizeResult(
@@ -194,6 +223,7 @@ class RiskManager:
         market: str | None = None,
         combined_portfolio_value: float | None = None,
         existing_position_value: float = 0.0,
+        existing_symbol_exposure: float = 0.0,
     ) -> PositionSizeResult:
         """Calculate allowed position size given risk constraints.
 
@@ -202,6 +232,10 @@ class RiskManager:
                 this symbol. Used to enforce per-symbol concentration limit
                 (STOCK-26). If existing value already exceeds max_position_pct,
                 the buy is rejected.
+            existing_symbol_exposure: Existing position as a fraction of
+                portfolio (0.0–1.0). Complementary to existing_position_value;
+                when both are provided, the higher implied value is used
+                (STOCK-30).
         """
         portfolio_value, cash_available = self._apply_market_cap(
             portfolio_value,
@@ -210,8 +244,13 @@ class RiskManager:
             combined_portfolio_value,
         )
 
-        # STOCK-26: Per-symbol concentration check
-        rejection = self._check_concentration_limit(symbol, existing_position_value, portfolio_value)
+        # STOCK-26 + STOCK-30: Per-symbol concentration check
+        rejection = self._check_concentration_limit(
+            symbol,
+            existing_position_value,
+            portfolio_value,
+            existing_symbol_exposure,
+        )
         if rejection:
             return rejection
 
@@ -244,8 +283,13 @@ class RiskManager:
 
         # Max allocation per position (regime-adaptive), minus existing position value
         max_alloc = portfolio_value * self._get_regime_position_pct()
-        if existing_position_value > 0:
-            max_alloc = max(0.0, max_alloc - existing_position_value)
+        effective_existing = self._resolve_existing_value(
+            portfolio_value,
+            existing_position_value,
+            existing_symbol_exposure,
+        )
+        if effective_existing > 0:
+            max_alloc = max(0.0, max_alloc - effective_existing)
 
         # Respect cash available (with buffer) — also respect exposure headroom
         max_from_cash = cash_available * 0.95
@@ -296,6 +340,7 @@ class RiskManager:
         market: str | None = None,
         combined_portfolio_value: float | None = None,
         existing_position_value: float = 0.0,
+        existing_symbol_exposure: float = 0.0,
     ) -> PositionSizeResult:
         """Kelly-enhanced position sizing.
 
@@ -306,6 +351,9 @@ class RiskManager:
         Args:
             existing_position_value: Current value of any existing position in
                 this symbol (STOCK-26). Rejects if at/above max_position_pct.
+            existing_symbol_exposure: Existing position as a fraction of
+                portfolio (0.0–1.0). Complementary to existing_position_value
+                (STOCK-30).
         """
         portfolio_value, cash_available = self._apply_market_cap(
             portfolio_value,
@@ -314,8 +362,13 @@ class RiskManager:
             combined_portfolio_value,
         )
 
-        # STOCK-26: Per-symbol concentration check (shared helper)
-        rejection = self._check_concentration_limit(symbol, existing_position_value, portfolio_value)
+        # STOCK-26 + STOCK-30: Per-symbol concentration check (shared helper)
+        rejection = self._check_concentration_limit(
+            symbol,
+            existing_position_value,
+            portfolio_value,
+            existing_symbol_exposure,
+        )
         if rejection:
             return rejection
 
@@ -361,10 +414,15 @@ class RiskManager:
 
             if kelly_result.final_allocation_pct > 0:
                 allocation = portfolio_value * kelly_result.final_allocation_pct
-                # STOCK-26: Subtract existing position value so total
-                # concentration stays within max_position_pct.
-                if existing_position_value > 0:
-                    allocation = max(0.0, allocation - existing_position_value)
+                # STOCK-26 + STOCK-30: Subtract effective existing value so
+                # total concentration stays within max_position_pct.
+                effective_existing = self._resolve_existing_value(
+                    portfolio_value,
+                    existing_position_value,
+                    existing_symbol_exposure,
+                )
+                if effective_existing > 0:
+                    allocation = max(0.0, allocation - effective_existing)
                 allocation = min(allocation, cash_available * 0.95, exposure_headroom)
 
                 if allocation > 0 and price > 0:
@@ -403,10 +461,15 @@ class RiskManager:
         adjusted_pct = min(adjusted_pct, self._params.max_position_pct)
 
         allocation = portfolio_value * adjusted_pct
-        # STOCK-26: Subtract existing position value so total
+        # STOCK-26 + STOCK-30: Subtract effective existing value so total
         # concentration stays within max_position_pct.
-        if existing_position_value > 0:
-            allocation = max(0.0, allocation - existing_position_value)
+        effective_existing = self._resolve_existing_value(
+            portfolio_value,
+            existing_position_value,
+            existing_symbol_exposure,
+        )
+        if effective_existing > 0:
+            allocation = max(0.0, allocation - effective_existing)
         allocation = min(allocation, cash_available * 0.95, exposure_headroom)
 
         if allocation <= 0 or price <= 0:
