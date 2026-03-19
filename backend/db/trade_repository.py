@@ -122,14 +122,18 @@ class TradeRepository:
     async def get_trade_history(
         self,
         limit: int = 50,
+        offset: int = 0,
         symbol: str | None = None,
         exclude_paper: bool = False,
     ) -> list[Order]:
-        stmt = select(Order).order_by(desc(Order.created_at)).limit(limit)
+        stmt = select(Order).order_by(desc(Order.created_at))
         if symbol:
             stmt = stmt.where(Order.symbol == symbol)
         if exclude_paper:
             stmt = stmt.where(Order.is_paper == False)  # noqa: E712
+        if offset > 0:
+            stmt = stmt.offset(offset)
+        stmt = stmt.limit(limit)
         result = await self._session.execute(stmt)
         return list(result.scalars().all())
 

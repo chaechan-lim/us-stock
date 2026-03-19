@@ -29,10 +29,15 @@ def init_trades(session_factory) -> None:
 @router.get("/")
 async def get_trades(
     limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
     symbol: str | None = None,
     market: str | None = None,
 ):
-    """Get trade history (in-memory + DB fallback)."""
+    """Get trade history (in-memory + DB fallback).
+
+    Returns trades sorted newest-first (descending by created_at).
+    Supports offset-based pagination for browsing older trades.
+    """
     # If in-memory has data, use it (fast path)
     if _trade_log:
         trades = _trade_log
@@ -40,7 +45,9 @@ async def get_trades(
             trades = [t for t in trades if t.get("symbol") == symbol.upper()]
         if market:
             trades = [t for t in trades if t.get("market", "US") == market]
-        result = trades[-limit:]
+        # Reverse to newest-first, then apply offset+limit pagination
+        newest_first = list(reversed(trades))
+        result = newest_first[offset : offset + limit]
 
         # Batch-resolve missing names (fills cache for future calls)
         missing = [t for t in result if not t.get("name")]
@@ -66,7 +73,9 @@ async def get_trades(
 
             async with _session_factory() as session:
                 repo = TradeRepository(session)
-                orders = await repo.get_trade_history(limit=limit, symbol=symbol)
+                orders = await repo.get_trade_history(
+                    limit=limit, offset=offset, symbol=symbol,
+                )
                 return [
                     {
                         "symbol": o.symbol,

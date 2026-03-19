@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from api.trades import (
     _trade_log,
+    get_trades,
     record_trade,
     restore_trade_log,
     reconcile_pending_orders,
@@ -884,3 +885,214 @@ class TestTradeSummaryWithDedup:
         assert summary["total_trades"] == 1
         assert summary["wins"] == 1
         assert summary["total_pnl"] == 100.0
+
+
+# --- STOCK-36: Sort order + pagination tests ---
+
+
+class TestGetTradesNewestFirst:
+    """STOCK-36: get_trades returns newest trades first."""
+
+    @pytest.mark.asyncio
+    async def test_returns_newest_first_from_in_memory(self):
+        """In-memory trades should be returned newest-first (descending)."""
+        _trade_log.extend([
+            {
+                "symbol": "AAPL",
+                "side": "BUY",
+                "status": "filled",
+                "created_at": "2026-03-18 01:00:00",
+                "market": "US",
+            },
+            {
+                "symbol": "MSFT",
+                "side": "BUY",
+                "status": "filled",
+                "created_at": "2026-03-19 02:00:00",
+                "market": "US",
+            },
+            {
+                "symbol": "GOOGL",
+                "side": "SELL",
+                "status": "filled",
+                "created_at": "2026-03-20 03:00:00",
+                "market": "US",
+            },
+        ])
+
+        with patch("api.trades.get_name", return_value=""):
+            result = await get_trades(limit=10, offset=0)
+
+        assert len(result) == 3
+        # Newest first
+        assert result[0]["symbol"] == "GOOGL"
+        assert result[1]["symbol"] == "MSFT"
+        assert result[2]["symbol"] == "AAPL"
+
+    @pytest.mark.asyncio
+    async def test_limit_returns_newest_subset(self):
+        """With limit=2 on 3 trades, should return 2 newest."""
+        _trade_log.extend([
+            {
+                "symbol": "AAPL",
+                "side": "BUY",
+                "status": "filled",
+                "created_at": "2026-03-18 01:00:00",
+                "market": "US",
+            },
+            {
+                "symbol": "MSFT",
+                "side": "BUY",
+                "status": "filled",
+                "created_at": "2026-03-19 02:00:00",
+                "market": "US",
+            },
+            {
+                "symbol": "GOOGL",
+                "side": "SELL",
+                "status": "filled",
+                "created_at": "2026-03-20 03:00:00",
+                "market": "US",
+            },
+        ])
+
+        with patch("api.trades.get_name", return_value=""):
+            result = await get_trades(limit=2, offset=0)
+
+        assert len(result) == 2
+        assert result[0]["symbol"] == "GOOGL"
+        assert result[1]["symbol"] == "MSFT"
+
+    @pytest.mark.asyncio
+    async def test_offset_skips_newest(self):
+        """Offset=1 should skip the newest trade."""
+        _trade_log.extend([
+            {
+                "symbol": "AAPL",
+                "side": "BUY",
+                "status": "filled",
+                "created_at": "2026-03-18 01:00:00",
+                "market": "US",
+            },
+            {
+                "symbol": "MSFT",
+                "side": "BUY",
+                "status": "filled",
+                "created_at": "2026-03-19 02:00:00",
+                "market": "US",
+            },
+            {
+                "symbol": "GOOGL",
+                "side": "SELL",
+                "status": "filled",
+                "created_at": "2026-03-20 03:00:00",
+                "market": "US",
+            },
+        ])
+
+        with patch("api.trades.get_name", return_value=""):
+            result = await get_trades(limit=10, offset=1)
+
+        assert len(result) == 2
+        # Skipped GOOGL (newest), starts from MSFT
+        assert result[0]["symbol"] == "MSFT"
+        assert result[1]["symbol"] == "AAPL"
+
+    @pytest.mark.asyncio
+    async def test_offset_and_limit_pagination(self):
+        """Offset + limit should work together for page 2."""
+        _trade_log.extend([
+            {
+                "symbol": f"SYM{i}",
+                "side": "BUY",
+                "status": "filled",
+                "created_at": f"2026-03-{10+i:02d} 01:00:00",
+                "market": "US",
+            }
+            for i in range(5)
+        ])
+
+        with patch("api.trades.get_name", return_value=""):
+            # Page 1: offset=0, limit=2
+            page1 = await get_trades(limit=2, offset=0)
+            # Page 2: offset=2, limit=2
+            page2 = await get_trades(limit=2, offset=2)
+
+        assert len(page1) == 2
+        assert len(page2) == 2
+        # Page 1 = newest 2 (SYM4, SYM3)
+        assert page1[0]["symbol"] == "SYM4"
+        assert page1[1]["symbol"] == "SYM3"
+        # Page 2 = next 2 (SYM2, SYM1)
+        assert page2[0]["symbol"] == "SYM2"
+        assert page2[1]["symbol"] == "SYM1"
+
+    @pytest.mark.asyncio
+    async def test_market_filter_with_sort(self):
+        """Market filter should work with newest-first sort."""
+        _trade_log.extend([
+            {
+                "symbol": "005930",
+                "side": "BUY",
+                "status": "filled",
+                "created_at": "2026-03-20 01:00:00",
+                "market": "KR",
+            },
+            {
+                "symbol": "AAPL",
+                "side": "BUY",
+                "status": "filled",
+                "created_at": "2026-03-20 02:00:00",
+                "market": "US",
+            },
+            {
+                "symbol": "MSFT",
+                "side": "BUY",
+                "status": "filled",
+                "created_at": "2026-03-20 03:00:00",
+                "market": "US",
+            },
+        ])
+
+        with patch("api.trades.get_name", return_value=""):
+            result = await get_trades(limit=10, offset=0, market="US")
+
+        assert len(result) == 2
+        assert result[0]["symbol"] == "MSFT"  # Newest US trade
+        assert result[1]["symbol"] == "AAPL"
+
+    @pytest.mark.asyncio
+    async def test_offset_beyond_total_returns_empty(self):
+        """Offset beyond total trades returns empty list."""
+        _trade_log.append({
+            "symbol": "AAPL",
+            "side": "BUY",
+            "status": "filled",
+            "created_at": "2026-03-20 01:00:00",
+            "market": "US",
+        })
+
+        with patch("api.trades.get_name", return_value=""):
+            result = await get_trades(limit=10, offset=10)
+
+        assert result == []
+
+    @pytest.mark.asyncio
+    async def test_db_fallback_passes_offset(self):
+        """DB fallback path should pass offset parameter."""
+        mock_repo = AsyncMock()
+        mock_repo.get_trade_history = AsyncMock(return_value=[])
+
+        mock_session = AsyncMock()
+        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = AsyncMock(return_value=False)
+        mock_factory = MagicMock(return_value=mock_session)
+
+        # _trade_log is empty so it uses DB fallback
+        with patch("api.trades._session_factory", mock_factory):
+            with patch("db.trade_repository.TradeRepository", return_value=mock_repo):
+                await get_trades(limit=30, offset=30)
+
+        mock_repo.get_trade_history.assert_called_once_with(
+            limit=30, offset=30, symbol=None,
+        )
