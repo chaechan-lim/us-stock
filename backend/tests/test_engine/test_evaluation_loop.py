@@ -2818,3 +2818,171 @@ class TestSilentExceptionLogging:
             "Failed to fetch OHLCV for factor scoring" in r.message
             for r in caplog.records
         ), "Expected warning log for OHLCV fetch failure"
+
+
+# ── STOCK-34: Profit Protection Tests ─────────────────────────────────
+
+
+class TestProfitProtection:
+    """STOCK-34: Evaluation loop profit protection — sell on high profit.
+
+    When all strategies say HOLD but the held position has very high
+    unrealized gain (>= 15%), the loop should generate a SELL to secure gains.
+    This mirrors the 'sell on indifference' mechanism for losing positions.
+    """
+
+    @pytest.mark.asyncio
+    async def test_profit_protection_triggered_on_high_gain(
+        self,
+        mock_adapter,
+        mock_market_data,
+        mock_registry,
+    ):
+        """HOLD + P&L >= 15% on held position should trigger profit_protection SELL."""
+        from data.indicator_service import IndicatorService
+        from strategies.combiner import SignalCombiner
+
+        # All strategies return HOLD (no sell signal)
+        hold_strategy = AsyncMock()
+        hold_strategy.name = "trend_following"
+        hold_strategy.analyze = AsyncMock(
+            return_value=Signal(
+                signal_type=SignalType.HOLD,
+                confidence=0.5,
+                strategy_name="trend_following",
+                reason="neutral",
+            )
+        )
+        mock_registry.get_enabled.return_value = [hold_strategy]
+        mock_registry.get_profile_weights.return_value = {"trend_following": 1.0}
+        mock_registry.get_trailing_stop_config.return_value = None
+
+        risk = RiskManager()
+        order_mgr = OrderManager(adapter=mock_adapter, risk_manager=risk)
+        position_tracker = MagicMock()
+        position_tracker.tracked_symbols = ["VG"]
+        position_tracker.get_buy_strategy.return_value = "trend_following"
+
+        # VG held at +20% gain (simulating the STOCK-34 scenario)
+        mock_market_data.get_positions = AsyncMock(
+            return_value=[
+                Position(
+                    symbol="VG",
+                    exchange="NASD",
+                    quantity=5,
+                    avg_price=100.0,
+                    current_price=120.0,  # +20%
+                ),
+            ]
+        )
+
+        mock_adapter.create_sell_order = AsyncMock(
+            return_value=OrderResult(
+                order_id="S1",
+                symbol="VG",
+                side="SELL",
+                order_type="market",
+                quantity=5,
+                price=120.0,
+                status="filled",
+            )
+        )
+
+        loop = EvaluationLoop(
+            adapter=mock_adapter,
+            market_data=mock_market_data,
+            indicator_svc=IndicatorService(),
+            registry=mock_registry,
+            combiner=SignalCombiner(),
+            order_manager=order_mgr,
+            risk_manager=risk,
+            watchlist=[],
+            market_state="uptrend",
+            interval_sec=1,
+            position_tracker=position_tracker,
+        )
+
+        await loop._evaluate_all()
+
+        # Should have triggered a sell due to profit protection
+        mock_adapter.create_sell_order.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_profit_protection_not_triggered_below_threshold(
+        self,
+        mock_adapter,
+        mock_market_data,
+        mock_registry,
+    ):
+        """HOLD + P&L < 15% should NOT trigger profit protection SELL."""
+        from data.indicator_service import IndicatorService
+        from strategies.combiner import SignalCombiner
+
+        hold_strategy = AsyncMock()
+        hold_strategy.name = "trend_following"
+        hold_strategy.analyze = AsyncMock(
+            return_value=Signal(
+                signal_type=SignalType.HOLD,
+                confidence=0.5,
+                strategy_name="trend_following",
+                reason="neutral",
+            )
+        )
+        mock_registry.get_enabled.return_value = [hold_strategy]
+        mock_registry.get_profile_weights.return_value = {"trend_following": 1.0}
+
+        risk = RiskManager()
+        order_mgr = OrderManager(adapter=mock_adapter, risk_manager=risk)
+        position_tracker = MagicMock()
+        position_tracker.tracked_symbols = ["AAPL"]
+        position_tracker.get_buy_strategy.return_value = "trend_following"
+
+        # AAPL held at +5% gain (below 15% threshold)
+        mock_market_data.get_positions = AsyncMock(
+            return_value=[
+                Position(
+                    symbol="AAPL",
+                    exchange="NASD",
+                    quantity=10,
+                    avg_price=150.0,
+                    current_price=157.5,  # +5%
+                ),
+            ]
+        )
+
+        loop = EvaluationLoop(
+            adapter=mock_adapter,
+            market_data=mock_market_data,
+            indicator_svc=IndicatorService(),
+            registry=mock_registry,
+            combiner=SignalCombiner(),
+            order_manager=order_mgr,
+            risk_manager=risk,
+            watchlist=[],
+            market_state="uptrend",
+            interval_sec=1,
+            position_tracker=position_tracker,
+        )
+
+        await loop._evaluate_all()
+
+        # Should NOT sell — gain is below threshold
+        mock_adapter.create_sell_order.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_profit_protection_attribute_default(self):
+        """Profit protection threshold should default to 0.15."""
+        from data.indicator_service import IndicatorService
+        from strategies.combiner import SignalCombiner
+
+        loop = EvaluationLoop(
+            adapter=AsyncMock(),
+            market_data=AsyncMock(),
+            indicator_svc=IndicatorService(),
+            registry=MagicMock(),
+            combiner=SignalCombiner(),
+            order_manager=MagicMock(),
+            risk_manager=RiskManager(),
+            watchlist=[],
+        )
+        assert getattr(loop, "_profit_protection_pct", 0.15) == 0.15

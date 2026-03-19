@@ -505,7 +505,11 @@ class TestProfitExitParams:
         assert result is signal
 
     def test_custom_min_pnl_threshold(self, strategy):
-        BaseStrategy.set_profit_exit_params({"profit_take_min_pnl": 0.20})
+        # Raise both thresholds: auto-sell at 25% and profit-take at 20%
+        BaseStrategy.set_profit_exit_params({
+            "profit_take_min_pnl": 0.20,
+            "high_profit_auto_sell_pnl": 0.25,
+        })
 
         signal = Signal(
             signal_type=SignalType.HOLD,
@@ -513,7 +517,7 @@ class TestProfitExitParams:
             strategy_name="test_strategy",
             reason="neutral",
         )
-        ctx = _make_context(pnl_pct=0.15)  # Below new 20% threshold
+        ctx = _make_context(pnl_pct=0.15)  # Below both thresholds
         df = _make_df_with_indicators(rsi=80, macd_declining=True, volume_weak=True)
 
         result = strategy.evaluate_exit(signal, ctx, df)
@@ -561,3 +565,182 @@ class TestProfitExitParams:
         result = strategy.evaluate_exit(signal, ctx, df)
 
         assert result.confidence <= 1.0
+
+
+# --- STOCK-34: Scenario 2a — High-Profit Auto-Sell (no weakness required) ---
+
+
+class TestHighProfitAutoSell:
+    """STOCK-34: positions with very high PnL (15%+) should auto-sell
+    without requiring any technical weakness signals."""
+
+    def test_hold_very_high_profit_auto_sells_no_weakness(self, strategy):
+        """At 15%+ PnL, HOLD should become SELL even without weakness."""
+        signal = Signal(
+            signal_type=SignalType.HOLD,
+            confidence=0.50,
+            strategy_name="test_strategy",
+            reason="neutral",
+        )
+        ctx = _make_context(pnl_pct=0.20)  # 20% gain — well above 15% threshold
+        # NO technical weakness at all
+        df = _make_df_with_indicators(rsi=50, macd_declining=False, volume_weak=False)
+
+        result = strategy.evaluate_exit(signal, ctx, df)
+
+        assert result.signal_type == SignalType.SELL
+        assert "high_profit_auto_sell" in result.reason
+        assert result.confidence >= 0.70
+
+    def test_hold_at_exact_high_profit_threshold(self, strategy):
+        """At exactly 15% PnL (default), should trigger auto-sell."""
+        signal = Signal(
+            signal_type=SignalType.HOLD,
+            confidence=0.50,
+            strategy_name="test_strategy",
+            reason="neutral",
+        )
+        ctx = _make_context(pnl_pct=0.15)
+        df = _make_df_with_indicators(rsi=50, macd_declining=False, volume_weak=False)
+
+        result = strategy.evaluate_exit(signal, ctx, df)
+
+        assert result.signal_type == SignalType.SELL
+        assert "high_profit_auto_sell" in result.reason
+
+    def test_hold_below_high_profit_threshold_no_auto_sell(self, strategy):
+        """Below 15% PnL, auto-sell should NOT fire (falls back to weakness check)."""
+        signal = Signal(
+            signal_type=SignalType.HOLD,
+            confidence=0.50,
+            strategy_name="test_strategy",
+            reason="neutral",
+        )
+        ctx = _make_context(pnl_pct=0.14)  # Just below 15%
+        # No weakness → Scenario 2b won't fire either
+        df = _make_df_with_indicators(rsi=50, macd_declining=False, volume_weak=False)
+
+        result = strategy.evaluate_exit(signal, ctx, df)
+
+        assert result.signal_type == SignalType.HOLD
+        assert result is signal
+
+    def test_high_profit_auto_sell_confidence_scales_with_pnl(self, strategy):
+        """Higher PnL should give higher confidence."""
+        signal = Signal(
+            signal_type=SignalType.HOLD,
+            confidence=0.50,
+            strategy_name="test_strategy",
+            reason="neutral",
+        )
+        df = _make_df_with_indicators(rsi=50, macd_declining=False, volume_weak=False)
+
+        ctx_15 = _make_context(pnl_pct=0.15)
+        ctx_25 = _make_context(pnl_pct=0.25)
+
+        r_15 = strategy.evaluate_exit(signal, ctx_15, df)
+        r_25 = strategy.evaluate_exit(signal, ctx_25, df)
+
+        assert r_25.confidence > r_15.confidence
+
+    def test_high_profit_auto_sell_confidence_capped(self, strategy):
+        """Auto-sell confidence should never exceed 1.0."""
+        signal = Signal(
+            signal_type=SignalType.HOLD,
+            confidence=0.50,
+            strategy_name="test_strategy",
+            reason="neutral",
+        )
+        ctx = _make_context(pnl_pct=2.0)  # 200% gain (extreme)
+        df = _make_df_with_indicators(rsi=50, macd_declining=False, volume_weak=False)
+
+        result = strategy.evaluate_exit(signal, ctx, df)
+
+        assert result.signal_type == SignalType.SELL
+        assert result.confidence <= 1.0
+
+    def test_high_profit_auto_sell_preserves_strategy_name(self, strategy):
+        signal = Signal(
+            signal_type=SignalType.HOLD,
+            confidence=0.50,
+            strategy_name="test_strategy",
+            reason="neutral",
+        )
+        ctx = _make_context(pnl_pct=0.20)
+        df = _make_df_with_indicators(rsi=50, macd_declining=False, volume_weak=False)
+
+        result = strategy.evaluate_exit(signal, ctx, df)
+
+        assert result.strategy_name == "test_strategy"
+
+    def test_high_profit_takes_priority_over_weakness_based_sell(self, strategy):
+        """High-profit auto-sell (Scenario 2a) fires before weakness-based (2b)."""
+        signal = Signal(
+            signal_type=SignalType.HOLD,
+            confidence=0.50,
+            strategy_name="test_strategy",
+            reason="neutral",
+        )
+        ctx = _make_context(pnl_pct=0.20)  # Above both thresholds
+        # WITH weakness signals too
+        df = _make_df_with_indicators(rsi=80, macd_declining=True, volume_weak=True)
+
+        result = strategy.evaluate_exit(signal, ctx, df)
+
+        assert result.signal_type == SignalType.SELL
+        # Scenario 2a fires first (high_profit_auto_sell, not profit_take)
+        assert "high_profit_auto_sell" in result.reason
+
+    def test_sell_signal_not_affected_by_auto_sell(self, strategy):
+        """SELL signal should still go through Scenario 1, not auto-sell."""
+        signal = Signal(
+            signal_type=SignalType.SELL,
+            confidence=0.60,
+            strategy_name="test_strategy",
+            reason="bearish",
+        )
+        ctx = _make_context(pnl_pct=0.20)  # High profit + SELL
+        df = _make_df_with_indicators(rsi=50, macd_declining=False, volume_weak=False)
+
+        result = strategy.evaluate_exit(signal, ctx, df)
+
+        assert result.signal_type == SignalType.SELL
+        # Should use Scenario 1 (SELL + profitable → boost), not auto-sell
+        assert "profit_boost" in result.reason
+
+    def test_auto_sell_disabled_when_threshold_zero(self, strategy):
+        """Setting high_profit_auto_sell_pnl=0 disables auto-sell."""
+        BaseStrategy.set_profit_exit_params({"high_profit_auto_sell_pnl": 0})
+
+        signal = Signal(
+            signal_type=SignalType.HOLD,
+            confidence=0.50,
+            strategy_name="test_strategy",
+            reason="neutral",
+        )
+        ctx = _make_context(pnl_pct=0.25)
+        # No weakness
+        df = _make_df_with_indicators(rsi=50, macd_declining=False, volume_weak=False)
+
+        result = strategy.evaluate_exit(signal, ctx, df)
+
+        # Auto-sell disabled, and no weakness → stays HOLD
+        assert result.signal_type == SignalType.HOLD
+
+    def test_custom_auto_sell_threshold(self, strategy):
+        """Custom threshold from config should be respected."""
+        BaseStrategy.set_profit_exit_params({"high_profit_auto_sell_pnl": 0.10})
+
+        signal = Signal(
+            signal_type=SignalType.HOLD,
+            confidence=0.50,
+            strategy_name="test_strategy",
+            reason="neutral",
+        )
+        ctx = _make_context(pnl_pct=0.12)  # Above custom 10% threshold
+        df = _make_df_with_indicators(rsi=50, macd_declining=False, volume_weak=False)
+
+        result = strategy.evaluate_exit(signal, ctx, df)
+
+        assert result.signal_type == SignalType.SELL
+        assert "high_profit_auto_sell" in result.reason

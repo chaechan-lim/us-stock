@@ -1233,3 +1233,46 @@ async def test_lock_gain_protection_above_lock_ratio(adapter, risk_with_breakeve
     triggered = await tracker.check_all()
     assert len(triggered) == 1
     assert triggered[0]["reason"] == "breakeven_stop"
+
+
+# ── STOCK-34: Diagnostic Logging Tests ──────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_evaluate_logs_high_gain_positions(adapter, risk, order_mgr, caplog):
+    """STOCK-34: Positions with >= 10% gain should produce info-level log."""
+    import logging
+
+    adapter.fetch_positions = AsyncMock(
+        return_value=[
+            Position(
+                symbol="VG", exchange="NASD", quantity=5,
+                avg_price=100.0, current_price=125.0,  # +25%
+            ),
+        ]
+    )
+    from exchange.base import OrderResult
+
+    adapter.create_sell_order = AsyncMock(
+        return_value=OrderResult(
+            order_id="sell_vg",
+            symbol="VG",
+            side="SELL",
+            order_type="market",
+            quantity=5,
+            status="filled",
+            filled_price=125.0,
+        )
+    )
+
+    tracker = PositionTracker(adapter, risk, order_mgr)
+    tracker.track("VG", 100.0, 5, take_profit_pct=0.20)
+
+    with caplog.at_level(logging.INFO, logger="engine.position_tracker"):
+        await tracker.check_all()
+
+    # Should log diagnostic info for the +25% position
+    assert any(
+        "Evaluating VG" in r.message and "gain=25.0%" in r.message
+        for r in caplog.records
+    ), f"Expected diagnostic log for VG +25%. Records: {[r.message for r in caplog.records]}"

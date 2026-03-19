@@ -27,6 +27,13 @@ global:
     profit_take_weakness_required: 1      # min weakness indicators (0-3) needed
     rsi_overbought: 70.0                 # RSI threshold for technical weakness
     volume_weakness_ratio: 0.8           # volume/MA ratio below = weakness
+    # STOCK-34: High-profit auto-sell — sell without weakness at very high PnL
+    high_profit_auto_sell_pnl: 0.15      # 15%+ PnL → auto-SELL on HOLD (no weakness needed)
+    high_profit_auto_sell_confidence: 0.70  # base confidence for auto-sell
+  # STOCK-34: Profit protection — evaluation loop safety net
+  # When all strategies say HOLD but unrealized gain is very high,
+  # generate SELL to prevent unrealized gains from evaporating.
+  profit_protection_pct: 0.15             # 15%+ unrealized gain → force SELL
   # Default trailing stop for strategies without explicit config
   trailing_stop_defaults:
     activation_pct: 0.06   # activate after 6% gain

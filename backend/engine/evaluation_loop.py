@@ -254,7 +254,9 @@ class EvaluationLoop:
                             except Exception as e:
                                 logger.warning(
                                     "evaluate_exit failed for %s/%s, using original signal: %s",
-                                    symbol, sig.strategy_name, e,
+                                    symbol,
+                                    sig.strategy_name,
+                                    e,
                                 )
                                 evaluated.append(sig)
                         else:
@@ -337,7 +339,9 @@ class EvaluationLoop:
             held = held | exchange_held
             position_map = {p.symbol: p for p in exchange_positions if p.quantity > 0}
         except Exception as e:
-            logger.warning("Exchange position fetch failed, using tracker only: %s", e, exc_info=True)
+            logger.warning(
+                "Exchange position fetch failed, using tracker only: %s", e, exc_info=True
+            )
 
         recovery = set(self._recovery_watch.keys()) - held
         eval_symbols = list(dict.fromkeys(self._watchlist + sorted(held) + sorted(recovery)))
@@ -462,6 +466,34 @@ class EvaluationLoop:
                             )
                             logger.info(
                                 "Position cleanup SELL for %s: P&L=%.1f%%",
+                                symbol,
+                                pnl_pct * 100,
+                            )
+
+                # STOCK-34: Profit protection — sell on high profit when
+                # all strategies say HOLD. This is a defense-in-depth
+                # safety net: if position_tracker TP doesn't fire and
+                # evaluate_exit() doesn't convert to SELL, this ensures
+                # highly profitable positions are eventually exited.
+                _ppp = getattr(self, "_profit_protection_pct", 0.15)
+                if (
+                    is_held
+                    and combined.signal_type == SignalType.HOLD
+                    and symbol in position_map
+                    and _ppp > 0
+                ):
+                    pos = position_map[symbol]
+                    if hasattr(pos, "avg_price") and pos.avg_price > 0:
+                        pnl_pct = (pos.current_price - pos.avg_price) / pos.avg_price
+                        if pnl_pct >= _ppp:
+                            combined = Signal(
+                                signal_type=SignalType.SELL,
+                                confidence=0.60,
+                                strategy_name="profit_protection",
+                                reason=(f"Profit protection: P&L={pnl_pct:.1%}, securing gains"),
+                            )
+                            logger.info(
+                                "Profit protection SELL for %s: P&L=%.1f%%",
                                 symbol,
                                 pnl_pct * 100,
                             )

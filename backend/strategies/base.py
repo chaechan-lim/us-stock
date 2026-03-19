@@ -55,6 +55,9 @@ class BaseStrategy(ABC):
         "profit_take_weakness_required": 1,
         "rsi_overbought": 70.0,
         "volume_weakness_ratio": 0.8,
+        # STOCK-34: High-profit auto-sell — sell without weakness at very high PnL
+        "high_profit_auto_sell_pnl": 0.15,  # 15%+ PnL → auto-SELL on HOLD
+        "high_profit_auto_sell_confidence": 0.70,
     }
 
     @classmethod
@@ -73,8 +76,7 @@ class BaseStrategy(ABC):
 
     @property
     @abstractmethod
-    def display_name(self) -> str:
-        ...
+    def display_name(self) -> str: ...
 
     @property
     @abstractmethod
@@ -90,8 +92,7 @@ class BaseStrategy(ABC):
 
     @property
     @abstractmethod
-    def min_candles_required(self) -> int:
-        ...
+    def min_candles_required(self) -> int: ...
 
     @abstractmethod
     async def analyze(self, df: pd.DataFrame, symbol: str) -> Signal:
@@ -164,11 +165,27 @@ class BaseStrategy(ABC):
                 indicators=signal.indicators,
             )
 
-        # Scenario 2: HOLD + high profit + technical weakness → profit-take SELL
-        if (
-            signal.signal_type == SignalType.HOLD
-            and context.pnl_pct >= p["profit_take_min_pnl"]
-        ):
+        # Scenario 2a (STOCK-34): HOLD + very high profit → auto-SELL without weakness.
+        # Positions with large unrealized gains (e.g. +15%+) should be exited
+        # to lock in profit even when no technical weakness is detected.
+        high_pnl = p.get("high_profit_auto_sell_pnl", 0.15)
+        if signal.signal_type == SignalType.HOLD and high_pnl > 0 and context.pnl_pct >= high_pnl:
+            confidence = min(
+                1.0,
+                p.get("high_profit_auto_sell_confidence", 0.70)
+                + context.pnl_pct * p["sell_confidence_boost_factor"],
+            )
+            return Signal(
+                signal_type=SignalType.SELL,
+                confidence=confidence,
+                strategy_name=signal.strategy_name,
+                reason=(f"high_profit_auto_sell(pnl={context.pnl_pct:.1%})"),
+                suggested_price=signal.suggested_price,
+                indicators=signal.indicators,
+            )
+
+        # Scenario 2b: HOLD + moderate profit + technical weakness → profit-take SELL
+        if signal.signal_type == SignalType.HOLD and context.pnl_pct >= p["profit_take_min_pnl"]:
             weakness_count = self._detect_technical_weakness(df, p)
             if weakness_count >= p["profit_take_weakness_required"]:
                 confidence = min(
@@ -180,10 +197,7 @@ class BaseStrategy(ABC):
                     signal_type=SignalType.SELL,
                     confidence=confidence,
                     strategy_name=signal.strategy_name,
-                    reason=(
-                        f"profit_take(pnl={context.pnl_pct:.1%}, "
-                        f"weakness={weakness_count}/3)"
-                    ),
+                    reason=(f"profit_take(pnl={context.pnl_pct:.1%}, weakness={weakness_count}/3)"),
                     suggested_price=signal.suggested_price,
                     indicators=signal.indicators,
                 )
@@ -244,9 +258,7 @@ class BaseStrategy(ABC):
             try:
                 vol = float(last["volume"])
                 vol_ma = float(df["volume"].tail(20).mean())
-                if vol_ma > 0 and vol / vol_ma < params.get(
-                    "volume_weakness_ratio", 0.8
-                ):
+                if vol_ma > 0 and vol / vol_ma < params.get("volume_weakness_ratio", 0.8):
                     count += 1
             except (ValueError, TypeError):
                 pass

@@ -213,6 +213,27 @@ class PositionTracker:
         Tiered trailing and breakeven stops protect large unrealized gains
         without cutting early winners (STOCK-24).
         """
+        # STOCK-34: Diagnostic logging for TP/SL evaluation
+        gain_pct = (
+            (current_price - tracked.entry_price) / tracked.entry_price
+            if tracked.entry_price > 0
+            else 0.0
+        )
+        if abs(gain_pct) >= 0.10:  # Log positions with >= 10% gain/loss
+            logger.info(
+                "Evaluating %s: entry=$%.2f current=$%.2f highest=$%.2f "
+                "gain=%.1f%% tp=%.1f%% sl=%.1f%% trail=%.1f%%/%.1f%%",
+                tracked.symbol,
+                tracked.entry_price,
+                current_price,
+                tracked.highest_price,
+                gain_pct * 100,
+                (tracked.take_profit_pct or 0) * 100,
+                (tracked.stop_loss_pct or 0) * 100,
+                tracked.trailing_activation_pct * 100,
+                tracked.trailing_stop_pct * 100,
+            )
+
         # Widen SL if earnings are near
         sl_pct = tracked.stop_loss_pct
         if self._event_calendar and sl_pct:
@@ -759,7 +780,8 @@ class PositionTracker:
         return restored
 
     async def _load_positions_from_db(
-        self, session_factory: "async_sessionmaker[AsyncSession]",
+        self,
+        session_factory: "async_sessionmaker[AsyncSession]",
     ) -> list:
         """Load all position records for this market from DB."""
         from sqlalchemy import select
