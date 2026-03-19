@@ -887,6 +887,156 @@ class TestTradeSummaryWithDedup:
         assert summary["total_pnl"] == 100.0
 
 
+class TestUpdateOrderInDbNotFoundProtection:
+    """STOCK-37: update_order_in_db should protect orders with PnL from not_found."""
+
+    @pytest.mark.asyncio
+    async def test_not_found_overridden_to_filled_when_pnl_exists(self):
+        """Order with PnL should not be set to not_found — override to filled."""
+        _trade_log.append(
+            {
+                "order_id": "KIS_SELL_001",
+                "symbol": "AMPX",
+                "side": "SELL",
+                "status": "submitted",
+                "pnl": 19.26,
+                "filled_price": None,
+            }
+        )
+
+        mock_order = MagicMock()
+        mock_order.id = 1
+
+        mock_repo = AsyncMock()
+        mock_repo.find_by_kis_order_id = AsyncMock(return_value=mock_order)
+        mock_repo.update_order_status = AsyncMock()
+
+        mock_session = AsyncMock()
+        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = AsyncMock(return_value=False)
+        mock_factory = MagicMock(return_value=mock_session)
+
+        with patch("api.trades._session_factory", mock_factory):
+            with patch("db.trade_repository.TradeRepository", return_value=mock_repo):
+                ok = await update_order_in_db(
+                    "KIS_SELL_001", "not_found", filled_price=None, filled_quantity=None,
+                )
+
+        assert ok is True
+        # Status in trade log should be "filled", not "not_found"
+        assert _trade_log[0]["status"] == "filled"
+        # DB should also be updated with "filled"
+        mock_repo.update_order_status.assert_called_once_with(
+            1, "filled", filled_price=None, filled_quantity=None,
+        )
+
+    @pytest.mark.asyncio
+    async def test_not_found_allowed_when_no_pnl(self):
+        """Order without PnL can be set to not_found normally."""
+        _trade_log.append(
+            {
+                "order_id": "KIS_BUY_001",
+                "symbol": "AAPL",
+                "side": "BUY",
+                "status": "submitted",
+                "pnl": None,
+                "filled_price": None,
+            }
+        )
+
+        mock_order = MagicMock()
+        mock_order.id = 2
+
+        mock_repo = AsyncMock()
+        mock_repo.find_by_kis_order_id = AsyncMock(return_value=mock_order)
+        mock_repo.update_order_status = AsyncMock()
+
+        mock_session = AsyncMock()
+        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = AsyncMock(return_value=False)
+        mock_factory = MagicMock(return_value=mock_session)
+
+        with patch("api.trades._session_factory", mock_factory):
+            with patch("db.trade_repository.TradeRepository", return_value=mock_repo):
+                ok = await update_order_in_db(
+                    "KIS_BUY_001", "not_found", filled_price=None, filled_quantity=None,
+                )
+
+        assert ok is True
+        # No PnL → not_found is allowed
+        assert _trade_log[0]["status"] == "not_found"
+        mock_repo.update_order_status.assert_called_once_with(
+            2, "not_found", filled_price=None, filled_quantity=None,
+        )
+
+    @pytest.mark.asyncio
+    async def test_not_found_with_negative_pnl_also_overridden(self):
+        """Even negative PnL means the order was filled — protect it."""
+        _trade_log.append(
+            {
+                "order_id": "KIS_SELL_002",
+                "symbol": "LION",
+                "side": "SELL",
+                "status": "submitted",
+                "pnl": -51.62,
+                "filled_price": None,
+            }
+        )
+
+        mock_order = MagicMock()
+        mock_order.id = 3
+
+        mock_repo = AsyncMock()
+        mock_repo.find_by_kis_order_id = AsyncMock(return_value=mock_order)
+        mock_repo.update_order_status = AsyncMock()
+
+        mock_session = AsyncMock()
+        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = AsyncMock(return_value=False)
+        mock_factory = MagicMock(return_value=mock_session)
+
+        with patch("api.trades._session_factory", mock_factory):
+            with patch("db.trade_repository.TradeRepository", return_value=mock_repo):
+                ok = await update_order_in_db(
+                    "KIS_SELL_002", "not_found",
+                )
+
+        assert ok is True
+        assert _trade_log[0]["status"] == "filled"
+
+    @pytest.mark.asyncio
+    async def test_not_found_with_zero_pnl_also_overridden(self):
+        """PnL of 0.0 is not None — order was filled at breakeven."""
+        _trade_log.append(
+            {
+                "order_id": "KIS_SELL_003",
+                "symbol": "SPY",
+                "side": "SELL",
+                "status": "submitted",
+                "pnl": 0.0,
+            }
+        )
+
+        mock_order = MagicMock()
+        mock_order.id = 4
+
+        mock_repo = AsyncMock()
+        mock_repo.find_by_kis_order_id = AsyncMock(return_value=mock_order)
+        mock_repo.update_order_status = AsyncMock()
+
+        mock_session = AsyncMock()
+        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = AsyncMock(return_value=False)
+        mock_factory = MagicMock(return_value=mock_session)
+
+        with patch("api.trades._session_factory", mock_factory):
+            with patch("db.trade_repository.TradeRepository", return_value=mock_repo):
+                ok = await update_order_in_db("KIS_SELL_003", "not_found")
+
+        assert ok is True
+        assert _trade_log[0]["status"] == "filled"
+
+
 # --- STOCK-36: Sort order + pagination tests ---
 
 

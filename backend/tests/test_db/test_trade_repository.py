@@ -827,3 +827,161 @@ async def test_cleanup_ignores_empty_kis_order_id(session):
 
     history = await repo.get_trade_history(limit=100)
     assert len(history) == 3  # All preserved
+
+
+# --- STOCK-37: Protect orders with PnL from not_found ---
+
+
+@pytest.mark.asyncio
+async def test_save_order_upsert_prevents_not_found_when_pnl_exists(repo):
+    """STOCK-37: UPSERT should not downgrade to not_found when PnL exists."""
+    # Insert order with PnL (simulates place_sell recording)
+    order1 = await repo.save_order(
+        symbol="AMPX",
+        side="sell",
+        order_type="market",
+        quantity=10,
+        price=25.0,
+        status="submitted",
+        kis_order_id="US_SELL_001",
+        pnl=19.26,
+        market="US",
+    )
+    assert order1.status == "submitted"
+    assert order1.pnl == 19.26
+
+    # Reconciliation tries to set not_found
+    order2 = await repo.save_order(
+        symbol="AMPX",
+        side="sell",
+        order_type="market",
+        quantity=10,
+        price=25.0,
+        status="not_found",
+        kis_order_id="US_SELL_001",
+        market="US",
+    )
+
+    # Should be overridden to "filled" because PnL exists
+    assert order2.id == order1.id
+    assert order2.status == "filled"
+    assert order2.pnl == 19.26
+    assert order2.filled_at is not None
+
+
+@pytest.mark.asyncio
+async def test_save_order_upsert_allows_not_found_when_no_pnl(repo):
+    """STOCK-37: not_found is allowed when there's no PnL (order never filled)."""
+    order1 = await repo.save_order(
+        symbol="AAPL",
+        side="buy",
+        order_type="limit",
+        quantity=10,
+        price=150.0,
+        status="submitted",
+        kis_order_id="US_BUY_001",
+        market="US",
+    )
+    assert order1.pnl is None
+
+    order2 = await repo.save_order(
+        symbol="AAPL",
+        side="buy",
+        order_type="limit",
+        quantity=10,
+        price=150.0,
+        status="not_found",
+        kis_order_id="US_BUY_001",
+        market="US",
+    )
+
+    # No PnL → not_found is allowed
+    assert order2.id == order1.id
+    assert order2.status == "not_found"
+
+
+@pytest.mark.asyncio
+async def test_get_recent_trades_includes_not_found_with_pnl(repo):
+    """STOCK-37: get_recent_trades returns not_found orders with PnL."""
+    from datetime import datetime
+
+    # Create a filled order
+    filled = await repo.save_order(
+        symbol="AAPL",
+        side="sell",
+        order_type="market",
+        quantity=10,
+        price=180.0,
+        status="pending",
+        kis_order_id="FILLED_001",
+        pnl=50.0,
+        market="US",
+    )
+    await repo.update_order_status(filled.id, "filled", filled_price=180.0)
+
+    # Create a not_found order with PnL (STOCK-37 scenario)
+    not_found = await repo.save_order(
+        symbol="AMPX",
+        side="sell",
+        order_type="market",
+        quantity=10,
+        price=25.0,
+        status="not_found",
+        kis_order_id="NOTFOUND_001",
+        pnl=19.26,
+        market="US",
+    )
+
+    recent = await repo.get_recent_trades(hours=24)
+    symbols = {o.symbol for o in recent}
+    assert "AAPL" in symbols
+    assert "AMPX" in symbols  # not_found with PnL should be included
+
+
+@pytest.mark.asyncio
+async def test_get_recent_trades_excludes_not_found_without_pnl(repo):
+    """STOCK-37: not_found orders without PnL are still excluded."""
+    await repo.save_order(
+        symbol="TSLA",
+        side="buy",
+        order_type="limit",
+        quantity=5,
+        price=200.0,
+        status="not_found",
+        kis_order_id="NOTFOUND_002",
+        market="US",
+    )
+
+    recent = await repo.get_recent_trades(hours=24)
+    assert len(recent) == 0  # No PnL → not included
+
+
+@pytest.mark.asyncio
+async def test_save_order_upsert_not_found_with_negative_pnl(repo):
+    """STOCK-37: Negative PnL also protects from not_found (loss is still a fill)."""
+    order1 = await repo.save_order(
+        symbol="LION",
+        side="sell",
+        order_type="market",
+        quantity=10,
+        price=8.0,
+        status="submitted",
+        kis_order_id="US_SELL_LOSS",
+        pnl=-51.62,
+        market="US",
+    )
+
+    order2 = await repo.save_order(
+        symbol="LION",
+        side="sell",
+        order_type="market",
+        quantity=10,
+        price=8.0,
+        status="not_found",
+        kis_order_id="US_SELL_LOSS",
+        market="US",
+    )
+
+    assert order2.id == order1.id
+    assert order2.status == "filled"
+    assert order2.pnl == -51.62

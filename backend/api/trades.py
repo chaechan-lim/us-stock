@@ -355,9 +355,28 @@ async def update_order_in_db(
 
     Called by reconciliation task when exchange confirms status change.
     Also updates the in-memory trade log entry.
+
+    STOCK-37: When status is "not_found" but the order already has PnL
+    (indicating it was actually filled), overrides to "filled" to prevent
+    PnL data from being excluded from trade summaries.
     """
     if not _session_factory or not kis_order_id:
         return False
+
+    # STOCK-37: Check in-memory trade log — if order has PnL, it was filled
+    # even if KIS API can't find it (date boundary / API delay).
+    if status == "not_found":
+        for t in _trade_log:
+            if t.get("order_id") == kis_order_id and t.get("pnl") is not None:
+                logger.info(
+                    "STOCK-37: Order %s has PnL=%.2f but reconciliation returned "
+                    "not_found — overriding to filled",
+                    kis_order_id,
+                    t["pnl"],
+                )
+                status = "filled"
+                break
+
     try:
         from db.trade_repository import TradeRepository
 

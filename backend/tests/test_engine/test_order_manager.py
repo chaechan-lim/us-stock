@@ -1351,3 +1351,102 @@ class TestStock26FailSafePositionCheck:
 
         # Only 1 buy order should have been placed, not 17
         assert buy_count == 1
+
+
+class TestReconcileNotFoundPreservesData:
+    """STOCK-37: reconcile_all should preserve filled data when fetch_order returns not_found."""
+
+    @pytest.mark.asyncio
+    async def test_not_found_preserves_existing_filled_price(self, risk_manager):
+        """When fetch_order returns not_found, existing filled_price should be preserved."""
+        mock_adapter = AsyncMock()
+        # Place order with filled data
+        mock_adapter.create_sell_order = AsyncMock(
+            return_value=OrderResult(
+                order_id="SELL_001",
+                symbol="AMPX",
+                side="SELL",
+                order_type="market",
+                quantity=10,
+                price=25.0,
+                filled_quantity=10,
+                filled_price=24.50,
+                status="submitted",
+            )
+        )
+        # Reconciliation returns not_found
+        mock_adapter.fetch_order = AsyncMock(
+            return_value=OrderResult(
+                order_id="SELL_001",
+                symbol="AMPX",
+                side="unknown",
+                order_type="unknown",
+                quantity=0,
+                status="not_found",
+            )
+        )
+
+        om = OrderManager(adapter=mock_adapter, risk_manager=risk_manager)
+        await om.place_sell(
+            symbol="AMPX",
+            quantity=10,
+            price=25.0,
+            strategy_name="test",
+        )
+
+        # Verify initial state
+        managed = om.active_orders["SELL_001"]
+        assert managed.filled_price == 24.50
+        assert managed.filled_quantity == 10
+
+        changes = await om.reconcile_all()
+
+        # Status changes to not_found (we can't prevent that at this level)
+        assert len(changes) == 1
+        assert changes[0]["new_status"] == "not_found"
+        # But filled_price/filled_quantity should be preserved in the change
+        assert changes[0]["filled_price"] == 24.50
+        assert changes[0]["filled_quantity"] == 10
+
+    @pytest.mark.asyncio
+    async def test_not_found_without_prior_filled_data(self, risk_manager):
+        """When no prior filled data exists, not_found behaves normally."""
+        mock_adapter = AsyncMock()
+        mock_adapter.create_sell_order = AsyncMock(
+            return_value=OrderResult(
+                order_id="SELL_002",
+                symbol="AAPL",
+                side="SELL",
+                order_type="limit",
+                quantity=10,
+                price=150.0,
+                filled_quantity=0,
+                filled_price=None,
+                status="submitted",
+            )
+        )
+        mock_adapter.fetch_order = AsyncMock(
+            return_value=OrderResult(
+                order_id="SELL_002",
+                symbol="AAPL",
+                side="unknown",
+                order_type="unknown",
+                quantity=0,
+                status="not_found",
+            )
+        )
+
+        om = OrderManager(adapter=mock_adapter, risk_manager=risk_manager)
+        await om.place_sell(
+            symbol="AAPL",
+            quantity=10,
+            price=150.0,
+            strategy_name="test",
+        )
+
+        changes = await om.reconcile_all()
+        assert len(changes) == 1
+        assert changes[0]["new_status"] == "not_found"
+        # No prior filled data → filled_price stays None
+        assert changes[0]["filled_price"] is None
+        assert changes[0]["filled_quantity"] == 0

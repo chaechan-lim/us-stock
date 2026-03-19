@@ -326,9 +326,14 @@ async def trade_summary_periods(request: Request, market: str | None = None):
             if market:
                 all_orders = [o for o in all_orders if getattr(o, "market", "US") == market]
 
+            # STOCK-37: Include "not_found" orders that have PnL — these were
+            # actually filled but KIS API couldn't find them during reconciliation
+            # (date boundary / API delay). PnL existence proves the fill happened.
             sells = [
                 o for o in all_orders
-                if o.side == "SELL" and o.status == "filled" and o.pnl is not None
+                if o.side == "SELL"
+                and o.status in ("filled", "not_found")
+                and o.pnl is not None
             ]
 
             now = datetime.utcnow()
@@ -364,16 +369,24 @@ async def trade_summary_periods(request: Request, market: str | None = None):
                     "win_rate": round(len(wins) / len(trades) * 100, 1) if trades else 0,
                 }
 
-            today_sells = [s for s in sells if s.filled_at and s.filled_at >= today_start]
-            week_sells = [s for s in sells if s.filled_at and s.filled_at >= week_start]
-            month_sells = [s for s in sells if s.filled_at and s.filled_at >= month_start]
+            # STOCK-37: Use filled_at if available, fallback to created_at for
+            # orders where filled_at is NULL (e.g. not_found orders with PnL).
+            def _trade_time(s):
+                return s.filled_at or s.created_at
+
+            today_sells = [s for s in sells if _trade_time(s) and _trade_time(s) >= today_start]
+            week_sells = [s for s in sells if _trade_time(s) and _trade_time(s) >= week_start]
+            month_sells = [s for s in sells if _trade_time(s) and _trade_time(s) >= month_start]
 
             return {
                 "today": _calc(today_sells),
                 "week": _calc(week_sells),
                 "month": _calc(month_sells),
                 "all_time": _calc(sells),
-                "total_buys": sum(1 for o in all_orders if o.side == "BUY" and o.status == "filled"),
+                "total_buys": sum(
+                    1 for o in all_orders
+                    if o.side == "BUY" and o.status in ("filled", "not_found")
+                ),
                 "total_sells": len(sells),
             }
     except Exception as e:

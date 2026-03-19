@@ -442,6 +442,24 @@ class OrderManager:
             if result is None:
                 continue
             old_status = order.status
+
+            # STOCK-37: When fetch_order returns "not_found", don't overwrite
+            # existing filled_price/filled_quantity with None/0. The order may
+            # have been filled but KIS API can't find it (date boundary issue).
+            if result.status == "not_found":
+                # Preserve any existing fill data on the ManagedOrder
+                if result.filled_price is None and order.filled_price is not None:
+                    result = OrderResult(
+                        order_id=result.order_id,
+                        symbol=result.symbol,
+                        side=result.side,
+                        order_type=result.order_type,
+                        quantity=result.quantity,
+                        status=result.status,
+                        filled_price=order.filled_price,
+                        filled_quantity=order.filled_quantity,
+                    )
+
             order.status = result.status
             order.filled_price = result.filled_price
             order.filled_quantity = int(result.filled_quantity) if result.filled_quantity else 0

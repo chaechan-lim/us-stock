@@ -3,7 +3,7 @@
 import logging
 from datetime import datetime, timedelta
 
-from sqlalchemy import select, desc
+from sqlalchemy import and_, desc, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.models import Order, Watchlist
@@ -55,8 +55,14 @@ class TradeRepository:
                     if not existing.filled_at:
                         existing.filled_at = datetime.utcnow()
                 elif status and existing.status != "filled":
-                    # Don't downgrade from filled
-                    existing.status = status
+                    # STOCK-37: Don't set "not_found" when PnL exists —
+                    # the order was actually filled, KIS API just can't find it.
+                    if status == "not_found" and existing.pnl is not None:
+                        existing.status = "filled"
+                        if not existing.filled_at:
+                            existing.filled_at = existing.created_at or datetime.utcnow()
+                    else:
+                        existing.status = status
                 if pnl is not None:
                     existing.pnl = pnl
                 if pnl_pct is not None:
@@ -157,12 +163,29 @@ class TradeRepository:
         hours: int = 24,
         exclude_paper: bool = False,
     ) -> list[Order]:
-        """Get filled trades from the last N hours."""
+        """Get filled trades from the last N hours.
+
+        STOCK-37: Also includes 'not_found' orders that have PnL, since these
+        were actually filled but KIS API couldn't locate them during
+        reconciliation (date boundary / API delay).
+        """
         cutoff = datetime.utcnow() - timedelta(hours=hours)
         stmt = (
             select(Order)
-            .where(Order.status == "filled", Order.filled_at >= cutoff)
-            .order_by(desc(Order.filled_at))
+            .where(
+                or_(
+                    # Normal filled orders with filled_at timestamp
+                    and_(Order.status == "filled", Order.filled_at >= cutoff),
+                    # STOCK-37: not_found orders with PnL — use created_at as
+                    # fallback since filled_at is NULL for these
+                    and_(
+                        Order.status == "not_found",
+                        Order.pnl.isnot(None),
+                        Order.created_at >= cutoff,
+                    ),
+                )
+            )
+            .order_by(desc(Order.filled_at.isnot(None)), desc(Order.created_at))
         )
         if exclude_paper:
             stmt = stmt.where(Order.is_paper == False)  # noqa: E712
