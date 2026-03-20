@@ -225,7 +225,11 @@ class KISKRAdapter(ExchangeAdapter):
         elif not isinstance(output2, dict):
             output2 = {}
 
-        total = float(output2.get("tot_evlu_amt", 0))         # 총평가금액
+        # STOCK-53: Don't use tot_evlu_amt — in integrated margin (통합증거금)
+        # accounts it includes overseas assets, inflating KR portfolio value
+        # and causing 100% exposure calculation that blocks all KR buys.
+        # Use scts_evlu_amt (domestic stock evaluation only) instead.
+        stock_eval = float(output2.get("scts_evlu_amt", 0))   # 유가증권평가금액 (domestic only)
         invested = float(output2.get("pchs_amt_smtl_amt", 0)) # 매입금액합계
         deposit = float(output2.get("dnca_tot_amt", 0))       # 예수금총금액
 
@@ -235,16 +239,23 @@ class KISKRAdapter(ExchangeAdapter):
         if available is None:
             available = deposit  # fallback
 
-        logger.debug(
-            "KR balance: deposit=%.0f, orderable=%.0f, total=%.0f, invested=%.0f",
-            deposit, available, total, invested,
+        # Domestic-only total: orderable cash + domestic stock market value
+        total = available + stock_eval
+        if total <= 0:
+            # Fallback: use purchase cost if stock evaluation not available
+            total = available + invested
+
+        logger.info(
+            "KR balance: deposit=%.0f, orderable=%.0f, stock_eval=%.0f, "
+            "total=%.0f, invested=%.0f",
+            deposit, available, stock_eval, total, invested,
         )
 
         return Balance(
             currency="KRW",
-            total=total or (available + invested),
+            total=total,
             available=available,
-            locked=invested,
+            locked=stock_eval or invested,
         )
 
     async def _fetch_orderable_amount(self) -> float | None:

@@ -295,6 +295,18 @@ class KISAdapter(ExchangeAdapter):
         # 4. Total: use present-balance total if available, else fallback
         if tot_asst_krw > 0:
             total = tot_asst_krw / exrt  # Convert KRW total to USD
+            # STOCK-53: frcr_ord_psbl_amt1 can exceed tot_asst_amt/exrt because
+            # it includes KRW auto-conversion to USD. Cap available at total
+            # to prevent negative invested values in exposure calculations.
+            if available > total:
+                logger.info(
+                    "US available ($%.2f) exceeds total ($%.2f), "
+                    "capping to prevent negative exposure",
+                    available, total,
+                )
+                available = total - position_value
+                if available < 0:
+                    available = 0.0
             locked = total - available
             logger.info(
                 "US balance: total=₩%s ($%.2f), deposits=₩%s, available=$%.2f (rate=%.1f)",

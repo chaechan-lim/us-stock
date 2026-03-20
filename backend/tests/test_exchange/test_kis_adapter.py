@@ -241,3 +241,80 @@ class TestCreateOrder:
 
         result = await adapter.create_buy_order("AAPL", 1000, 185.50)
         assert result.status == "failed"
+
+
+def _mock_get_responses(adapter, responses):
+    """Helper to mock multiple sequential GET responses."""
+    ctxs = []
+    for resp_data in responses:
+        mock_resp = AsyncMock()
+        mock_resp.status = 200
+        mock_resp.json = AsyncMock(return_value=resp_data)
+        ctx = MagicMock()
+        ctx.__aenter__ = AsyncMock(return_value=mock_resp)
+        ctx.__aexit__ = AsyncMock(return_value=False)
+        ctxs.append(ctx)
+    adapter._session = MagicMock()
+    adapter._session.get = MagicMock(side_effect=ctxs)
+
+
+class TestFetchBalance:
+    @pytest.mark.asyncio
+    async def test_available_capped_when_exceeds_total(self, adapter):
+        """STOCK-53: available must not exceed total (KRW auto-conversion inflates buying power)."""
+        # present-balance response (tot_asst_amt in KRW)
+        pb_resp = {
+            "rt_cd": "0",
+            "output3": [{"tot_asst_amt": "10444011", "tot_dncl_amt": "4137401", "frst_bltn_exrt": "1450.0", "frcr_evlu_tota": "0"}],
+        }
+        # inquire-balance (positions)
+        bal_resp = {
+            "rt_cd": "0",
+            "output1": [
+                {"ovrs_cblc_qty": "10", "now_pric2": "180.50"},  # position worth $1805
+            ],
+        }
+        # buying power — exceeds total due to KRW auto-conversion
+        bp_resp = {
+            "rt_cd": "0",
+            "output": {"frcr_ord_psbl_amt1": "9188.26"},
+        }
+
+        _mock_get_responses(adapter, [pb_resp, bal_resp, bp_resp])
+
+        balance = await adapter.fetch_balance()
+        assert balance.currency == "USD"
+        total = 10444011 / 1450.0  # ~$7202.77
+        assert balance.total == pytest.approx(total, rel=1e-3)
+        # available must be capped: total - position_value
+        assert balance.available <= balance.total
+        assert balance.available == pytest.approx(total - 1805.0, rel=1e-3)
+        # invested should be positive (there are real positions)
+        invested = balance.total - balance.available
+        assert invested > 0
+
+    @pytest.mark.asyncio
+    async def test_normal_balance_not_capped(self, adapter):
+        """When available < total, no capping occurs."""
+        pb_resp = {
+            "rt_cd": "0",
+            "output3": [{"tot_asst_amt": "15000000", "tot_dncl_amt": "5000000", "frst_bltn_exrt": "1500.0", "frcr_evlu_tota": "0"}],
+        }
+        bal_resp = {
+            "rt_cd": "0",
+            "output1": [
+                {"ovrs_cblc_qty": "5", "now_pric2": "200.00"},
+            ],
+        }
+        bp_resp = {
+            "rt_cd": "0",
+            "output": {"frcr_ord_psbl_amt1": "5000.00"},
+        }
+
+        _mock_get_responses(adapter, [pb_resp, bal_resp, bp_resp])
+
+        balance = await adapter.fetch_balance()
+        total = 15000000 / 1500.0  # $10,000
+        assert balance.total == pytest.approx(total, rel=1e-3)
+        assert balance.available == 5000.0  # not capped
+        assert balance.available < balance.total

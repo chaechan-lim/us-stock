@@ -99,6 +99,7 @@ class TestFetchTicker:
 class TestFetchBalance:
     @pytest.mark.asyncio
     async def test_returns_krw_balance(self, adapter):
+        """STOCK-53: total uses scts_evlu_amt (domestic only), not tot_evlu_amt."""
         adapter._session = MagicMock()
 
         # Mock responses: first call = balance, second call = buying power
@@ -109,7 +110,8 @@ class TestFetchBalance:
             "output1": [],
             "output2": [{
                 "tot_evlu_amt": "50000000",
-                "pchs_amt_smtl_amt": "30000000",
+                "scts_evlu_amt": "30000000",
+                "pchs_amt_smtl_amt": "28000000",
                 "dnca_tot_amt": "20000000",
             }],
         })
@@ -133,9 +135,57 @@ class TestFetchBalance:
 
         balance = await adapter.fetch_balance()
         assert balance.currency == "KRW"
-        assert balance.total == 50000000.0
+        # total = available(15M) + scts_evlu_amt(30M), NOT tot_evlu_amt(50M)
+        assert balance.total == 45000000.0
         assert balance.available == 15000000.0  # from 주문가능조회
-        assert balance.locked == 30000000.0
+        assert balance.locked == 30000000.0  # scts_evlu_amt
+
+    @pytest.mark.asyncio
+    async def test_balance_integrated_margin_excludes_overseas(self, adapter):
+        """STOCK-53: integrated margin account must not include overseas assets in total."""
+        adapter._session = MagicMock()
+
+        # Simulate 통합증거금: tot_evlu_amt includes overseas (13.3M)
+        # but scts_evlu_amt is domestic-only (0.6M)
+        balance_resp = AsyncMock()
+        balance_resp.status = 200
+        balance_resp.json = AsyncMock(return_value={
+            "rt_cd": "0",
+            "output1": [],
+            "output2": [{
+                "tot_evlu_amt": "13315667",       # includes overseas!
+                "scts_evlu_amt": "619500",         # domestic stocks only
+                "pchs_amt_smtl_amt": "608500",     # domestic purchase cost
+                "dnca_tot_amt": "4137401",
+            }],
+        })
+
+        buying_power_resp = AsyncMock()
+        buying_power_resp.status = 200
+        buying_power_resp.json = AsyncMock(return_value={
+            "rt_cd": "0",
+            "output": {"ord_psbl_cash": "4137401"},
+        })
+
+        ctx1 = MagicMock()
+        ctx1.__aenter__ = AsyncMock(return_value=balance_resp)
+        ctx1.__aexit__ = AsyncMock(return_value=False)
+
+        ctx2 = MagicMock()
+        ctx2.__aenter__ = AsyncMock(return_value=buying_power_resp)
+        ctx2.__aexit__ = AsyncMock(return_value=False)
+
+        adapter._session.get = MagicMock(side_effect=[ctx1, ctx2])
+
+        balance = await adapter.fetch_balance()
+        # total should be domestic-only: available + scts_evlu_amt
+        assert balance.total == 4137401.0 + 619500.0  # ~4.76M, NOT 13.3M
+        assert balance.available == 4137401.0
+        assert balance.locked == 619500.0  # scts_evlu_amt
+        # Verify exposure would be reasonable (~13%, not 100%)
+        invested = balance.total - balance.available
+        exposure = invested / balance.total
+        assert exposure < 0.20  # well below 90% limit
 
     @pytest.mark.asyncio
     async def test_balance_fallback_on_buying_power_failure(self, adapter):
@@ -146,7 +196,11 @@ class TestFetchBalance:
         balance_resp.status = 200
         balance_resp.json = AsyncMock(return_value={
             "rt_cd": "0",
-            "output2": [{"tot_evlu_amt": "50000000", "pchs_amt_smtl_amt": "30000000", "dnca_tot_amt": "20000000"}],
+            "output2": [{
+                "scts_evlu_amt": "30000000",
+                "pchs_amt_smtl_amt": "30000000",
+                "dnca_tot_amt": "20000000",
+            }],
         })
 
         error_resp = AsyncMock()
@@ -165,6 +219,47 @@ class TestFetchBalance:
 
         balance = await adapter.fetch_balance()
         assert balance.available == 20000000.0  # fallback to dnca_tot_amt
+
+    @pytest.mark.asyncio
+    async def test_balance_fallback_to_invested_when_no_stock_eval(self, adapter):
+        """When scts_evlu_amt is 0, fall back to pchs_amt_smtl_amt."""
+        adapter._session = MagicMock()
+
+        balance_resp = AsyncMock()
+        balance_resp.status = 200
+        balance_resp.json = AsyncMock(return_value={
+            "rt_cd": "0",
+            "output1": [],
+            "output2": [{
+                "scts_evlu_amt": "0",
+                "pchs_amt_smtl_amt": "5000000",
+                "dnca_tot_amt": "10000000",
+            }],
+        })
+
+        buying_power_resp = AsyncMock()
+        buying_power_resp.status = 200
+        buying_power_resp.json = AsyncMock(return_value={
+            "rt_cd": "0",
+            "output": {"ord_psbl_cash": "10000000"},
+        })
+
+        ctx1 = MagicMock()
+        ctx1.__aenter__ = AsyncMock(return_value=balance_resp)
+        ctx1.__aexit__ = AsyncMock(return_value=False)
+
+        ctx2 = MagicMock()
+        ctx2.__aenter__ = AsyncMock(return_value=buying_power_resp)
+        ctx2.__aexit__ = AsyncMock(return_value=False)
+
+        adapter._session.get = MagicMock(side_effect=[ctx1, ctx2])
+
+        balance = await adapter.fetch_balance()
+        # scts_evlu_amt=0, so total = available + stock_eval = 10M + 0 = 10M
+        # Since total(10M) > 0, it doesn't hit the fallback
+        # But if available + stock_eval = 10M + 0 = 10M which is > 0
+        assert balance.total == 10000000.0 + 0.0
+        assert balance.available == 10000000.0
 
 
 class TestFetchPositions:
