@@ -8,6 +8,7 @@ On startup, the trade log is restored from DB so history survives restarts.
 import logging
 
 from data.stock_name_service import get_name
+from db.trade_repository import TradeRepository
 from fastapi import APIRouter, Query, Request
 
 router = APIRouter(prefix="/trades", tags=["trades"])
@@ -70,8 +71,6 @@ async def get_trades(
     # Fallback: read from DB if available
     if _session_factory:
         try:
-            from db.trade_repository import TradeRepository
-
             async with _session_factory() as session:
                 repo = TradeRepository(session)
                 # TODO(STOCK-36 follow-up): pass `market` to get_trade_history()
@@ -134,13 +133,19 @@ async def trade_summary(market: str | None = None):
     }
 
 
-def record_trade(trade: dict) -> None:
+def record_trade(trade: dict, skip_db_persist: bool = False) -> None:
     """Record a trade to in-memory log AND persist to DB.
 
     Idempotent: if an entry with the same non-empty order_id already exists
     in the trade log, merges new data into the existing entry (preserving
     PnL if already set). This prevents duplicate rows when both place_sell()
     and reconciliation record the same order (STOCK-33).
+
+    Args:
+        trade: Trade data dict.
+        skip_db_persist: If True, skip the fire-and-forget DB persist
+            (used when the caller already handles DB persistence via
+            the awaited _db_recorder path, avoiding duplicate writes).
     """
     order_id = trade.get("order_id", "")
 
@@ -150,7 +155,7 @@ def record_trade(trade: dict) -> None:
             if existing.get("order_id") == order_id:
                 _merge_trade_entry(existing, trade)
                 # Still persist to DB — save_order UPSERT handles DB-level dedup
-                if _session_factory:
+                if not skip_db_persist and _session_factory:
                     import asyncio
 
                     try:
@@ -163,7 +168,7 @@ def record_trade(trade: dict) -> None:
     _trade_log.append(trade)
 
     # Async DB persist (fire-and-forget via session factory)
-    if _session_factory:
+    if not skip_db_persist and _session_factory:
         import asyncio
 
         try:
@@ -189,34 +194,59 @@ def _merge_trade_entry(existing: dict, new: dict) -> None:
         existing[key] = value
 
 
-async def _persist_trade(trade: dict) -> None:
-    """Persist trade to orders table."""
-    try:
-        from db.trade_repository import TradeRepository
+async def _do_persist_trade(trade: dict) -> None:
+    """Core logic: persist trade dict to orders table via TradeRepository.
 
-        async with _session_factory() as session:
-            repo = TradeRepository(session)
-            await repo.save_order(
-                symbol=trade.get("symbol", ""),
-                side=trade.get("side", ""),
-                order_type="market",
-                quantity=trade.get("quantity", 0),
-                price=trade.get("price"),
-                filled_quantity=trade.get("filled_quantity", 0),
-                filled_price=trade.get("filled_price"),
-                status=trade.get("status", "filled"),
-                strategy_name=trade.get("strategy", ""),
-                buy_strategy=trade.get("buy_strategy", ""),
-                kis_order_id=trade.get("order_id", ""),
-                pnl=trade.get("pnl"),
-                pnl_pct=trade.get("pnl_pct"),
-                exchange=trade.get("exchange", "NASD"),
-                market=trade.get("market", "US"),
-                session=trade.get("session", "regular"),
-                is_paper=trade.get("is_paper", False),
-            )
+    Caller must verify that ``_session_factory`` is set before calling.
+    """
+    async with _session_factory() as session:
+        repo = TradeRepository(session)
+        await repo.save_order(
+            symbol=trade.get("symbol", ""),
+            side=trade.get("side", ""),
+            order_type="market",
+            quantity=trade.get("quantity", 0),
+            price=trade.get("price"),
+            filled_quantity=trade.get("filled_quantity", 0),
+            filled_price=trade.get("filled_price"),
+            status=trade.get("status", "filled"),
+            strategy_name=trade.get("strategy", ""),
+            buy_strategy=trade.get("buy_strategy", ""),
+            kis_order_id=trade.get("order_id", ""),
+            pnl=trade.get("pnl"),
+            pnl_pct=trade.get("pnl_pct"),
+            exchange=trade.get("exchange", "NASD"),
+            market=trade.get("market", "US"),
+            session=trade.get("session", "regular"),
+            is_paper=trade.get("is_paper", False),
+        )
+
+
+async def _persist_trade(trade: dict) -> None:
+    """Fire-and-forget wrapper: swallows errors for background task use."""
+    try:
+        await _do_persist_trade(trade)
     except Exception as e:
         logger.warning("Failed to persist trade to DB: %s", e)
+
+
+async def persist_trade_to_db(trade: dict) -> bool:
+    """Persist trade to DB immediately (awaited, not fire-and-forget).
+
+    STOCK-38: Called by order_manager to ensure filled_price, filled_quantity,
+    and status are saved to DB at order time, rather than relying solely on
+    the fire-and-forget path or reconciliation.
+
+    Returns True if persisted successfully, False otherwise.
+    """
+    if not _session_factory:
+        return False
+    try:
+        await _do_persist_trade(trade)
+        return True
+    except Exception as e:
+        logger.warning("Failed to persist trade to DB (awaited): %s", e)
+        return False
 
 
 def _order_to_dict(o) -> dict:
@@ -258,8 +288,6 @@ async def restore_trade_log(exclude_paper: bool = True) -> int:
     if not _session_factory:
         return 0
     try:
-        from db.trade_repository import TradeRepository
-
         async with _session_factory() as session:
             repo = TradeRepository(session)
             orders = await repo.get_trade_history(
@@ -305,8 +333,6 @@ async def reconcile_pending_orders(held_symbols: set[str]) -> int:
         return 0
     updated = 0
     try:
-        from db.trade_repository import TradeRepository
-
         async with _session_factory() as session:
             repo = TradeRepository(session)
             pending = await repo.get_open_orders(exclude_paper=True)
@@ -381,8 +407,6 @@ async def update_order_in_db(
                 break
 
     try:
-        from db.trade_repository import TradeRepository
-
         async with _session_factory() as session:
             repo = TradeRepository(session)
             order = await repo.find_by_kis_order_id(kis_order_id)
@@ -406,3 +430,36 @@ async def update_order_in_db(
     except Exception as e:
         logger.warning("Failed to update order %s in DB: %s", kis_order_id, e)
     return False
+
+
+async def recover_not_found_orders() -> int:
+    """STOCK-38: Recover orders stuck in 'not_found' that have PnL data.
+
+    When pnl is set (meaning place_sell recorded PnL), but status is 'not_found'
+    (reconciliation couldn't find it on exchange), we can safely mark it as
+    'filled' using the price as filled_price.
+
+    Called during startup to fix data from before the STOCK-38 fix.
+    Returns count of recovered orders.
+    """
+    if not _session_factory:
+        return 0
+    try:
+        async with _session_factory() as session:
+            repo = TradeRepository(session)
+            recovered_ids = await repo.recover_not_found_orders()
+            count = len(recovered_ids)
+            # Update in-memory trade log using recovered IDs from DB
+            if recovered_ids:
+                recovered_set = set(recovered_ids)
+                for t in _trade_log:
+                    if t.get("order_id") in recovered_set:
+                        t["status"] = "filled"
+                        if t.get("filled_price") is None:
+                            t["filled_price"] = t.get("price")
+                        if not t.get("filled_quantity"):
+                            t["filled_quantity"] = t.get("quantity")
+            return count
+    except Exception as e:
+        logger.warning("Failed to recover not_found orders: %s", e)
+        return 0

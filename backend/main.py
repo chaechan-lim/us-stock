@@ -19,7 +19,7 @@ from data.indicator_service import IndicatorService
 from strategies.registry import StrategyRegistry
 from strategies.combiner import SignalCombiner
 from engine.risk_manager import RiskManager
-from engine.order_manager import OrderManager, set_trade_recorder
+from engine.order_manager import OrderManager, set_trade_recorder, set_db_recorder
 from engine.position_tracker import PositionTracker
 from engine.scheduler import TradingScheduler, MarketPhase
 from engine.evaluation_loop import EvaluationLoop
@@ -195,8 +195,11 @@ async def lifespan(app: FastAPI):
     app.state.combiner = SignalCombiner(consensus_config=consensus_cfg)
 
     # Wire trade recording
-    from api.trades import record_trade
+    from api.trades import record_trade, persist_trade_to_db
     set_trade_recorder(record_trade)
+    # STOCK-38: Awaited DB persist ensures filled_price/status are saved
+    # at order time, not relying solely on fire-and-forget or reconciliation
+    set_db_recorder(persist_trade_to_db)
 
     # Health monitor
     health = HealthMonitor()
@@ -1691,7 +1694,18 @@ async def lifespan(app: FastAPI):
 
     # Reconcile pending DB orders + restore trade log
     try:
-        from api.trades import reconcile_pending_orders, restore_trade_log
+        from api.trades import (
+            reconcile_pending_orders,
+            restore_trade_log,
+            recover_not_found_orders,
+        )
+
+        # STOCK-38: Recover orders stuck in 'not_found' (from before the fix)
+        recovered = await recover_not_found_orders()
+        if recovered:
+            logger.info(
+                "STOCK-38: Recovered %d not_found orders on startup", recovered
+            )
 
         # Collect all currently held symbols (from position restore above)
         held_symbols: set[str] = set()

@@ -109,7 +109,7 @@ async def test_order_manager_calculates_pnl_pct_on_sell():
     from exchange.base import OrderResult
 
     recorded = []
-    set_trade_recorder(lambda t: recorded.append(t))
+    set_trade_recorder(lambda t, **kw: recorded.append(t))
 
     adapter = AsyncMock()
     adapter.create_sell_order.return_value = OrderResult(
@@ -144,7 +144,7 @@ async def test_order_manager_pnl_pct_negative():
     from exchange.base import OrderResult
 
     recorded = []
-    set_trade_recorder(lambda t: recorded.append(t))
+    set_trade_recorder(lambda t, **kw: recorded.append(t))
 
     adapter = AsyncMock()
     adapter.create_sell_order.return_value = OrderResult(
@@ -178,7 +178,7 @@ async def test_order_manager_pnl_pct_none_without_entry_price():
     from exchange.base import OrderResult
 
     recorded = []
-    set_trade_recorder(lambda t: recorded.append(t))
+    set_trade_recorder(lambda t, **kw: recorded.append(t))
 
     adapter = AsyncMock()
     adapter.create_sell_order.return_value = OrderResult(
@@ -212,7 +212,7 @@ async def test_order_manager_pnl_pct_zero_entry_price():
     from exchange.base import OrderResult
 
     recorded = []
-    set_trade_recorder(lambda t: recorded.append(t))
+    set_trade_recorder(lambda t, **kw: recorded.append(t))
 
     adapter = AsyncMock()
     adapter.create_sell_order.return_value = OrderResult(
@@ -309,7 +309,7 @@ async def test_persist_trade_passes_pnl_pct():
 
         trades._session_factory = MagicMock(return_value=ctx)
 
-        with patch("db.trade_repository.TradeRepository", return_value=mock_repo):
+        with patch("api.trades.TradeRepository", return_value=mock_repo):
             await trades._persist_trade({
                 "symbol": "AAPL",
                 "side": "SELL",

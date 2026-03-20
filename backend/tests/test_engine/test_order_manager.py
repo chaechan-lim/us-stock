@@ -722,7 +722,7 @@ class TestPaperFlag:
         from engine.order_manager import set_trade_recorder, _trade_recorder
 
         old_recorder = _trade_recorder
-        set_trade_recorder(lambda t: recorded.append(t))
+        set_trade_recorder(lambda t, **kw: recorded.append(t))
 
         try:
             om = OrderManager(
@@ -749,7 +749,7 @@ class TestPaperFlag:
         from engine.order_manager import set_trade_recorder, _trade_recorder
 
         old_recorder = _trade_recorder
-        set_trade_recorder(lambda t: recorded.append(t))
+        set_trade_recorder(lambda t, **kw: recorded.append(t))
 
         try:
             om = OrderManager(
@@ -774,7 +774,7 @@ class TestPaperFlag:
         from engine.order_manager import set_trade_recorder, _trade_recorder
 
         old_recorder = _trade_recorder
-        set_trade_recorder(lambda t: recorded.append(t))
+        set_trade_recorder(lambda t, **kw: recorded.append(t))
 
         try:
             om = OrderManager(
@@ -1008,7 +1008,7 @@ class TestExchangeFieldPropagation:
         from engine.order_manager import set_trade_recorder, _trade_recorder
 
         old_recorder = _trade_recorder
-        set_trade_recorder(lambda t: recorded.append(t))
+        set_trade_recorder(lambda t, **kw: recorded.append(t))
 
         try:
             om = OrderManager(
@@ -1037,7 +1037,7 @@ class TestExchangeFieldPropagation:
         from engine.order_manager import set_trade_recorder, _trade_recorder
 
         old_recorder = _trade_recorder
-        set_trade_recorder(lambda t: recorded.append(t))
+        set_trade_recorder(lambda t, **kw: recorded.append(t))
 
         try:
             om = OrderManager(
@@ -1064,7 +1064,7 @@ class TestExchangeFieldPropagation:
         from engine.order_manager import set_trade_recorder, _trade_recorder
 
         old_recorder = _trade_recorder
-        set_trade_recorder(lambda t: recorded.append(t))
+        set_trade_recorder(lambda t, **kw: recorded.append(t))
 
         try:
             om = OrderManager(
@@ -1105,7 +1105,7 @@ class TestExchangeFieldPropagation:
         from engine.order_manager import set_trade_recorder, _trade_recorder
 
         old_recorder = _trade_recorder
-        set_trade_recorder(lambda t: recorded.append(t))
+        set_trade_recorder(lambda t, **kw: recorded.append(t))
 
         try:
             om = OrderManager(
@@ -1450,3 +1450,258 @@ class TestReconcileNotFoundPreservesData:
         # No prior filled data → filled_price stays None
         assert changes[0]["filled_price"] is None
         assert changes[0]["filled_quantity"] == 0
+
+# --- STOCK-38: DB recorder callback for immediate DB persistence ---
+
+
+class TestDbRecorderCallback:
+    """STOCK-38: Verify _db_recorder is called with filled data on order placement."""
+
+    @pytest.mark.asyncio
+    async def test_buy_calls_db_recorder_with_filled_data(self, mock_adapter, risk_manager):
+        """place_buy awaits _db_recorder with filled_price/status."""
+        db_records = []
+        from engine.order_manager import set_db_recorder, _db_recorder
+
+        old_recorder = _db_recorder
+
+        async def mock_db_recorder(trade):
+            db_records.append(trade)
+
+        set_db_recorder(mock_db_recorder)
+
+        try:
+            om = OrderManager(adapter=mock_adapter, risk_manager=risk_manager)
+            order = await om.place_buy(
+                symbol="AAPL",
+                price=150.0,
+                portfolio_value=100_000,
+                cash_available=50_000,
+                current_positions=0,
+                strategy_name="trend_following",
+            )
+
+            assert order is not None
+            assert len(db_records) == 1
+            assert db_records[0]["symbol"] == "AAPL"
+            assert db_records[0]["side"] == "BUY"
+            assert db_records[0]["filled_price"] == 150.0
+            assert db_records[0]["filled_quantity"] == 10
+            assert db_records[0]["status"] == "filled"
+            assert db_records[0]["order_id"] == "ORD001"
+            assert db_records[0]["strategy"] == "trend_following"
+        finally:
+            set_db_recorder(old_recorder)
+
+    @pytest.mark.asyncio
+    async def test_sell_calls_db_recorder_with_filled_data(self, mock_adapter, risk_manager):
+        """place_sell awaits _db_recorder with filled_price/status/pnl."""
+        db_records = []
+        from engine.order_manager import set_db_recorder, _db_recorder
+
+        old_recorder = _db_recorder
+
+        async def mock_db_recorder(trade):
+            db_records.append(trade)
+
+        set_db_recorder(mock_db_recorder)
+
+        try:
+            om = OrderManager(adapter=mock_adapter, risk_manager=risk_manager)
+            order = await om.place_sell(
+                symbol="AAPL",
+                quantity=10,
+                price=160.0,
+                strategy_name="stop_loss",
+                entry_price=150.0,
+            )
+
+            assert order is not None
+            assert len(db_records) == 1
+            assert db_records[0]["symbol"] == "AAPL"
+            assert db_records[0]["side"] == "SELL"
+            assert db_records[0]["filled_price"] == 160.0
+            assert db_records[0]["filled_quantity"] == 10
+            assert db_records[0]["status"] == "filled"
+            assert db_records[0]["order_id"] == "ORD002"
+            assert db_records[0]["pnl"] is not None
+            assert db_records[0]["pnl"] == 100.0  # (160 - 150) * 10
+        finally:
+            set_db_recorder(old_recorder)
+
+    @pytest.mark.asyncio
+    async def test_db_recorder_not_called_when_none(self, mock_adapter, risk_manager):
+        """When _db_recorder is None, place_buy/sell still work without error."""
+        from engine.order_manager import set_db_recorder, _db_recorder
+
+        old_recorder = _db_recorder
+        set_db_recorder(None)
+
+        try:
+            om = OrderManager(adapter=mock_adapter, risk_manager=risk_manager)
+            order = await om.place_buy(
+                symbol="AAPL",
+                price=150.0,
+                portfolio_value=100_000,
+                cash_available=50_000,
+                current_positions=0,
+                strategy_name="test",
+            )
+            assert order is not None
+        finally:
+            set_db_recorder(old_recorder)
+
+    @pytest.mark.asyncio
+    async def test_db_recorder_called_for_kr_market(self, mock_adapter, risk_manager):
+        """place_buy for KR market passes correct exchange/market to _db_recorder."""
+        db_records = []
+        from engine.order_manager import set_db_recorder, _db_recorder
+
+        old_recorder = _db_recorder
+
+        async def mock_db_recorder(trade):
+            db_records.append(trade)
+
+        set_db_recorder(mock_db_recorder)
+
+        try:
+            om = OrderManager(
+                adapter=mock_adapter,
+                risk_manager=risk_manager,
+                market="KR",
+            )
+            order = await om.place_buy(
+                symbol="005930",
+                price=70000.0,
+                portfolio_value=10_000_000,
+                cash_available=5_000_000,
+                current_positions=0,
+                strategy_name="supertrend",
+                exchange="KRX",
+            )
+
+            assert order is not None
+            assert len(db_records) == 1
+            assert db_records[0]["market"] == "KR"
+            assert db_records[0]["exchange"] == "KRX"
+        finally:
+            set_db_recorder(old_recorder)
+
+    @pytest.mark.asyncio
+    async def test_db_recorder_called_alongside_trade_recorder(self, mock_adapter, risk_manager):
+        """Both _trade_recorder and _db_recorder are called on order placement."""
+        trade_records = []
+        db_records = []
+        from engine.order_manager import (
+            set_trade_recorder,
+            set_db_recorder,
+            _trade_recorder,
+            _db_recorder,
+        )
+
+        old_trade_recorder = _trade_recorder
+        old_db_recorder = _db_recorder
+
+        set_trade_recorder(lambda t, **kw: trade_records.append(t))
+
+        async def mock_db_recorder(trade):
+            db_records.append(trade)
+
+        set_db_recorder(mock_db_recorder)
+
+        try:
+            om = OrderManager(adapter=mock_adapter, risk_manager=risk_manager)
+            await om.place_buy(
+                symbol="AAPL",
+                price=150.0,
+                portfolio_value=100_000,
+                cash_available=50_000,
+                current_positions=0,
+                strategy_name="test",
+            )
+
+            # Both recorders called
+            assert len(trade_records) == 1
+            assert len(db_records) == 1
+            # Same data
+            assert trade_records[0]["order_id"] == db_records[0]["order_id"]
+            assert trade_records[0]["filled_price"] == db_records[0]["filled_price"]
+        finally:
+            set_trade_recorder(old_trade_recorder)
+            set_db_recorder(old_db_recorder)
+
+    @pytest.mark.asyncio
+    async def test_db_recorder_not_called_on_failed_order(self, risk_manager):
+        """_db_recorder is not called when order fails."""
+        db_records = []
+        from engine.order_manager import set_db_recorder, _db_recorder
+
+        old_recorder = _db_recorder
+
+        async def mock_db_recorder(trade):
+            db_records.append(trade)
+
+        set_db_recorder(mock_db_recorder)
+
+        # Adapter returns failed status
+        failed_adapter = AsyncMock()
+        failed_adapter.create_buy_order = AsyncMock(
+            return_value=OrderResult(
+                order_id="FAIL001",
+                symbol="AAPL",
+                side="BUY",
+                order_type="limit",
+                quantity=10,
+                price=150.0,
+                status="failed",
+            )
+        )
+
+        try:
+            om = OrderManager(adapter=failed_adapter, risk_manager=risk_manager)
+            order = await om.place_buy(
+                symbol="AAPL",
+                price=150.0,
+                portfolio_value=100_000,
+                cash_available=50_000,
+                current_positions=0,
+                strategy_name="test",
+            )
+            assert order is None
+            assert len(db_records) == 0  # No DB write for failed orders
+        finally:
+            set_db_recorder(old_recorder)
+
+    @pytest.mark.asyncio
+    async def test_sell_db_recorder_includes_pnl_data(self, mock_adapter, risk_manager):
+        """place_sell passes pnl and pnl_pct to _db_recorder."""
+        db_records = []
+        from engine.order_manager import set_db_recorder, _db_recorder
+
+        old_recorder = _db_recorder
+
+        async def mock_db_recorder(trade):
+            db_records.append(trade)
+
+        set_db_recorder(mock_db_recorder)
+
+        try:
+            om = OrderManager(adapter=mock_adapter, risk_manager=risk_manager)
+            await om.place_sell(
+                symbol="AAPL",
+                quantity=10,
+                price=160.0,
+                strategy_name="take_profit",
+                entry_price=150.0,
+                buy_strategy="momentum",
+            )
+
+            assert len(db_records) == 1
+            record = db_records[0]
+            # PnL: (160 - 150) * 10 = 100
+            assert record["pnl"] == 100.0
+            # PnL %: ((160 - 150) / 150) * 100 = 6.67%
+            assert record["pnl_pct"] == pytest.approx(6.67, abs=0.01)
+            assert record["buy_strategy"] == "momentum"
+        finally:
+            set_db_recorder(old_recorder)

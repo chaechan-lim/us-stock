@@ -11,14 +11,23 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.pool import StaticPool
 
 from core.models import Base, Order
 
 
 @pytest.fixture
 async def db_session():
-    """Create in-memory SQLite async session for testing."""
-    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    """Create in-memory SQLite async session for testing.
+
+    Uses StaticPool so all sessions share the same connection
+    (required for in-memory SQLite to share data across sessions).
+    """
+    engine = create_async_engine(
+        "sqlite+aiosqlite://",
+        poolclass=StaticPool,
+        connect_args={"check_same_thread": False},
+    )
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     factory = async_sessionmaker(engine, expire_on_commit=False)

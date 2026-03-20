@@ -240,6 +240,42 @@ class TradeRepository:
             logger.info("Cleaned up %d duplicate orders", deleted)
         return deleted
 
+    async def recover_not_found_orders(self) -> list[str]:
+        """STOCK-38: Recover orders stuck in 'not_found' that have PnL data.
+
+        Sets status to 'filled', filled_at to created_at, filled_price
+        to price (if not already set), and filled_quantity to quantity
+        (if not already set). Only recovers orders where pnl is set,
+        meaning the trade was recorded by place_sell with PnL calculation.
+
+        Returns list of recovered kis_order_ids (use len() for count).
+        """
+        stmt = select(Order).where(
+            Order.status == "not_found",
+            Order.pnl.isnot(None),
+        )
+        result = await self._session.execute(stmt)
+        orders = list(result.scalars().all())
+
+        recovered_ids: list[str] = []
+        for order in orders:
+            order.status = "filled"
+            order.filled_at = order.created_at
+            if order.filled_price is None:
+                order.filled_price = order.price
+            if order.filled_quantity is None or order.filled_quantity == 0:
+                order.filled_quantity = order.quantity
+            if order.kis_order_id:
+                recovered_ids.append(order.kis_order_id)
+
+        if orders:
+            await self._session.commit()
+            logger.info(
+                "Recovered %d not_found orders to filled status",
+                len(orders),
+            )
+        return recovered_ids
+
     # --- Watchlist ---
 
     async def get_watchlist(
