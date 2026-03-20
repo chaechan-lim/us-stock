@@ -18,8 +18,9 @@ class MockLLMConfig:
     model: str = "claude-haiku-4-5-20251001"
     fallback_model: str = "claude-sonnet-4-6"
     gemini_api_key: str = ""
-    gemini_fallback_model: str = "gemini-3-flash-preview"
+    gemini_fallback_model: str = "gemini-2.5-flash"
     max_tokens: int = 4096
+    cooldown_seconds: int = 300
 
 
 def _make_anthropic_response(text="Hello", stop_reason="end_turn", tool_blocks=None):
@@ -97,7 +98,7 @@ class TestLLMClientFallbackChain:
         chain = client._build_fallback_chain()
         assert len(chain) == 3
         # Cost-aware order: Haiku → Gemini (free) → Sonnet (expensive)
-        assert chain[1][0] == "gemini-3-flash-preview"
+        assert chain[1][0] == "gemini-2.5-flash"
         assert chain[2][0] == "claude-sonnet-4-6"
 
     def test_chain_with_model_override(self):
@@ -189,7 +190,7 @@ class TestLLMClientGenerate:
         anthropic_provider.create = AsyncMock(side_effect=Exception("Anthropic down"))
 
         # Gemini succeeds
-        gemini_response = LLMResponse(text="Gemini response", model="gemini-3-flash-preview")
+        gemini_response = LLMResponse(text="Gemini response", model="gemini-2.5-flash")
         gemini_provider = MagicMock()
         gemini_provider.create = AsyncMock(return_value=gemini_response)
         client._gemini = gemini_provider
@@ -199,7 +200,7 @@ class TestLLMClientGenerate:
             retries=1,
         )
         assert result.text == "Gemini response"
-        assert result.model == "gemini-3-flash-preview"
+        assert result.model == "gemini-2.5-flash"
 
 
 class TestLLMClientToolUse:

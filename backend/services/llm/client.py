@@ -31,8 +31,8 @@ _RATE_LIMIT_PATTERNS = (
     "too many requests",
 )
 
-# Default cooldown for quota-exceeded providers (1 hour in seconds)
-_DEFAULT_COOLDOWN_SECONDS = 3600
+# Default cooldown for quota-exceeded providers (5 minutes — Ultra tier recovers fast)
+_DEFAULT_COOLDOWN_SECONDS = 300
 
 
 def _is_rate_limit_error(error: Exception) -> bool:
@@ -73,6 +73,11 @@ class LLMClient:
         self._daily_calls = 0
         self._daily_reset_date = ""
         self._max_daily_calls = getattr(config, "max_daily_calls", 0)
+
+        # Configurable cooldown (env: LLM_COOLDOWN_SECONDS, default 300s)
+        self._cooldown_seconds: float = float(
+            getattr(config, "cooldown_seconds", _DEFAULT_COOLDOWN_SECONDS)
+        )
 
         # Per-provider cooldown tracking: model -> expiry timestamp
         self._provider_cooldowns: dict[str, float] = {}
@@ -135,9 +140,11 @@ class LLMClient:
     def _set_provider_cooldown(
         self,
         model: str,
-        seconds: float = _DEFAULT_COOLDOWN_SECONDS,
+        seconds: float | None = None,
     ) -> None:
         """Set cooldown for a provider after quota-exceeded error."""
+        if seconds is None:
+            seconds = self._cooldown_seconds
         self._provider_cooldowns[model] = time.monotonic() + seconds
         logger.warning(
             "llm_provider_cooldown_set",

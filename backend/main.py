@@ -291,14 +291,17 @@ async def lifespan(app: FastAPI):
         news_model = None
         if config.llm.news_use_gemini and config.llm.gemini_fallback_model:
             news_model = config.llm.gemini_fallback_model
+        news_batch_size = config.llm.news_batch_size
         news_sentiment_agent = NewsSentimentAgent(
             llm_client=llm_client, context_service=agent_ctx,
             model_override=news_model,
+            batch_size=news_batch_size,
         )
         # KR agent: also use Gemini to save costs (Korean supported by Gemini)
         kr_news_sentiment_agent = NewsSentimentAgent(
             llm_client=llm_client,
             model_override=news_model,
+            batch_size=news_batch_size,
         )
         logger.info("AI agents enabled (analyst, risk, trade_review, news_sentiment)")
     app.state.risk_agent = risk_agent

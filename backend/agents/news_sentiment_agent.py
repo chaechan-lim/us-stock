@@ -119,15 +119,20 @@ class NewsSentimentSummary:
 class NewsSentimentAgent:
     """LLM-based news sentiment analysis agent."""
 
+    # Default articles per LLM call (25 reduces calls by ~60% vs old default of 10)
+    DEFAULT_BATCH_SIZE = 25
+
     def __init__(
         self,
         llm_client: LLMClient | None = None,
         context_service: AgentContextService | None = None,
         model_override: str | None = None,
+        batch_size: int | None = None,
     ):
         self._llm_client = llm_client
         self._ctx = context_service
-        self._model_override = model_override  # e.g. "gemini-3-flash-preview"
+        self._model_override = model_override  # e.g. "gemini-2.5-flash"
+        self._batch_size = batch_size or self.DEFAULT_BATCH_SIZE
 
     async def analyze_batch(
         self, articles: list[NewsArticle],
@@ -145,8 +150,8 @@ class NewsSentimentAgent:
         if not self._llm_client or not articles:
             return NewsSentimentSummary()
 
-        # Chunk articles (10 per chunk — keeps LLM output within token limits)
-        chunk_size = 10
+        # Chunk articles to stay within token limits (configurable, default 25)
+        chunk_size = self._batch_size
         all_results: list[SentimentResult] = []
 
         for i in range(0, len(articles), chunk_size):

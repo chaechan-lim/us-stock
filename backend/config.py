@@ -78,12 +78,16 @@ class LLMConfig(BaseSettings):
     model: str = "claude-haiku-4-5-20251001"
     fallback_model: str = "claude-sonnet-4-6"
     gemini_api_key: str = ""
-    gemini_fallback_model: str = "gemini-3-flash-preview"
+    gemini_fallback_model: str = "gemini-2.5-flash"
     max_tokens: int = 4096
     # Cost control
     max_daily_calls: int = 100  # Daily LLM call budget (0=unlimited)
     pre_trade_risk_enabled: bool = False  # AI pre-trade risk check (expensive)
     news_use_gemini: bool = True  # Use Gemini (free tier) for news sentiment
+    # Cooldown after 429/quota errors (seconds). Ultra tier recovers fast → 5 min default
+    cooldown_seconds: int = 300
+    # Articles per LLM call for news sentiment (larger = fewer calls)
+    news_batch_size: int = 25
 
     model_config = {"env_prefix": "LLM_"}
 

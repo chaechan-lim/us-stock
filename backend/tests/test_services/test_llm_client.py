@@ -16,7 +16,7 @@ def llm_config():
     cfg.model = "claude-haiku-4-5-20251001"
     cfg.fallback_model = "claude-sonnet-4-6"
     cfg.gemini_api_key = "gemini-key"
-    cfg.gemini_fallback_model = "gemini-3-flash-preview"
+    cfg.gemini_fallback_model = "gemini-2.5-flash"
     cfg.max_daily_calls = 10
     return cfg
 
@@ -134,7 +134,7 @@ class TestFallbackChain:
 
             models = [model for model, _ in chain]
             assert models[0] == "claude-haiku-4-5-20251001"
-            assert models[1] == "gemini-3-flash-preview"
+            assert models[1] == "gemini-2.5-flash"
             assert models[2] == "claude-sonnet-4-6"
 
     def test_model_override_gemini_includes_haiku_fallback(self, llm_config):
@@ -144,11 +144,11 @@ class TestFallbackChain:
             patch("services.llm.client.GeminiProvider"),
         ):
             client = LLMClient(llm_config)
-            chain = client._build_fallback_chain(model_override="gemini-3-flash-preview")
+            chain = client._build_fallback_chain(model_override="gemini-2.5-flash")
 
             models = [model for model, _ in chain]
             # Gemini primary → Haiku fallback → Sonnet last resort
-            assert models[0] == "gemini-3-flash-preview"
+            assert models[0] == "gemini-2.5-flash"
             assert models[1] == "claude-haiku-4-5-20251001"
             assert models[2] == "claude-sonnet-4-6"
             # No duplicates
@@ -161,7 +161,7 @@ class TestFallbackChain:
             patch("services.llm.client.GeminiProvider"),
         ):
             client = LLMClient(llm_config)
-            chain = client._build_fallback_chain(model_override="gemini-3-flash-preview")
+            chain = client._build_fallback_chain(model_override="gemini-2.5-flash")
 
             models = [model for model, _ in chain]
             assert len(models) == len(set(models)), f"Duplicate models in chain: {models}"
@@ -207,7 +207,7 @@ class TestRateLimitDetection:
 
     def test_detects_quota_message(self):
         assert (
-            _is_rate_limit_error(Exception("Quota exceeded for model gemini-3-flash-preview"))
+            _is_rate_limit_error(Exception("Quota exceeded for model gemini-2.5-flash"))
             is True
         )
 
@@ -233,7 +233,7 @@ class TestProviderCooldown:
             patch("services.llm.client.GeminiProvider"),
         ):
             client = LLMClient(llm_config)
-            assert client._is_provider_cooled_down("gemini-3-flash-preview") is False
+            assert client._is_provider_cooled_down("gemini-2.5-flash") is False
 
     def test_cooldown_set_marks_provider_unavailable(self, llm_config):
         with (
@@ -241,8 +241,8 @@ class TestProviderCooldown:
             patch("services.llm.client.GeminiProvider"),
         ):
             client = LLMClient(llm_config)
-            client._set_provider_cooldown("gemini-3-flash-preview", seconds=3600)
-            assert client._is_provider_cooled_down("gemini-3-flash-preview") is True
+            client._set_provider_cooldown("gemini-2.5-flash", seconds=3600)
+            assert client._is_provider_cooled_down("gemini-2.5-flash") is True
 
     def test_cooldown_expires(self, llm_config):
         with (
@@ -251,10 +251,10 @@ class TestProviderCooldown:
         ):
             client = LLMClient(llm_config)
             # Set cooldown that already expired
-            client._provider_cooldowns["gemini-3-flash-preview"] = time.monotonic() - 1.0
-            assert client._is_provider_cooled_down("gemini-3-flash-preview") is False
+            client._provider_cooldowns["gemini-2.5-flash"] = time.monotonic() - 1.0
+            assert client._is_provider_cooled_down("gemini-2.5-flash") is False
             # Should be removed after expiry check
-            assert "gemini-3-flash-preview" not in client._provider_cooldowns
+            assert "gemini-2.5-flash" not in client._provider_cooldowns
 
     def test_cooldown_does_not_affect_other_providers(self, llm_config):
         with (
@@ -262,7 +262,7 @@ class TestProviderCooldown:
             patch("services.llm.client.GeminiProvider"),
         ):
             client = LLMClient(llm_config)
-            client._set_provider_cooldown("gemini-3-flash-preview", seconds=3600)
+            client._set_provider_cooldown("gemini-2.5-flash", seconds=3600)
             assert client._is_provider_cooled_down("claude-haiku-4-5-20251001") is False
 
     @pytest.mark.asyncio
@@ -284,7 +284,7 @@ class TestProviderCooldown:
             gemini_provider = MockG.return_value
             gemini_response = LLMResponse(
                 text="gemini ok",
-                model="gemini-3-flash-preview",
+                model="gemini-2.5-flash",
             )
             gemini_provider.create = AsyncMock(return_value=gemini_response)
 
@@ -313,7 +313,7 @@ class TestProviderCooldown:
 
             gemini_response = LLMResponse(
                 text="gemini ok",
-                model="gemini-3-flash-preview",
+                model="gemini-2.5-flash",
             )
             gemini_provider = MockG.return_value
             gemini_provider.create = AsyncMock(return_value=gemini_response)
@@ -337,7 +337,7 @@ class TestProviderCooldown:
 
             # Pre-set Haiku and Gemini cooldown
             client._set_provider_cooldown("claude-haiku-4-5-20251001", seconds=3600)
-            client._set_provider_cooldown("gemini-3-flash-preview", seconds=3600)
+            client._set_provider_cooldown("gemini-2.5-flash", seconds=3600)
 
             # Sonnet succeeds
             sonnet_response = LLMResponse(
@@ -380,7 +380,7 @@ class TestProviderCooldown:
             # Use model_override like news_sentiment_agent does
             result = await client.generate(
                 messages=[{"role": "user", "content": "analyze news"}],
-                model="gemini-3-flash-preview",
+                model="gemini-2.5-flash",
                 retries=3,
             )
 
@@ -388,3 +388,95 @@ class TestProviderCooldown:
             assert result.text == "haiku fallback"
             # Gemini only tried once (rate limit → no retry)
             assert gemini_provider.create.call_count == 1
+
+
+class TestConfigurableCooldown:
+    """Tests for configurable cooldown_seconds (STOCK-39)."""
+
+    def test_default_cooldown_from_constant(self, llm_config):
+        """Without config attr, uses module-level _DEFAULT_COOLDOWN_SECONDS."""
+        # Remove cooldown_seconds attr if present
+        if hasattr(llm_config, "cooldown_seconds"):
+            del llm_config.cooldown_seconds
+        with (
+            patch("services.llm.client.AnthropicProvider"),
+            patch("services.llm.client.GeminiProvider"),
+        ):
+            from services.llm.client import _DEFAULT_COOLDOWN_SECONDS
+
+            client = LLMClient(llm_config)
+            assert client._cooldown_seconds == _DEFAULT_COOLDOWN_SECONDS
+
+    def test_cooldown_from_config(self, llm_config):
+        """cooldown_seconds from config overrides default."""
+        llm_config.cooldown_seconds = 120
+        with (
+            patch("services.llm.client.AnthropicProvider"),
+            patch("services.llm.client.GeminiProvider"),
+        ):
+            client = LLMClient(llm_config)
+            assert client._cooldown_seconds == 120
+
+    def test_set_cooldown_uses_config_value(self, llm_config):
+        """_set_provider_cooldown uses config cooldown_seconds by default."""
+        llm_config.cooldown_seconds = 60
+        with (
+            patch("services.llm.client.AnthropicProvider"),
+            patch("services.llm.client.GeminiProvider"),
+        ):
+            client = LLMClient(llm_config)
+            before = time.monotonic()
+            client._set_provider_cooldown("gemini-2.5-flash")
+            after = time.monotonic()
+
+            expiry = client._provider_cooldowns["gemini-2.5-flash"]
+            # Expiry should be ~60s from now (not 3600s or 300s)
+            assert expiry >= before + 60
+            assert expiry <= after + 60
+
+    def test_set_cooldown_explicit_override(self, llm_config):
+        """Explicit seconds argument overrides config value."""
+        llm_config.cooldown_seconds = 60
+        with (
+            patch("services.llm.client.AnthropicProvider"),
+            patch("services.llm.client.GeminiProvider"),
+        ):
+            client = LLMClient(llm_config)
+            before = time.monotonic()
+            client._set_provider_cooldown("gemini-2.5-flash", seconds=10)
+            after = time.monotonic()
+
+            expiry = client._provider_cooldowns["gemini-2.5-flash"]
+            assert expiry >= before + 10
+            assert expiry <= after + 10
+
+    @pytest.mark.asyncio
+    async def test_rate_limit_uses_configured_cooldown(self, llm_config):
+        """429 errors should use configured cooldown, not hardcoded 3600s."""
+        llm_config.cooldown_seconds = 180  # 3 minutes
+        with (
+            patch("services.llm.client.AnthropicProvider") as MockA,
+            patch("services.llm.client.GeminiProvider") as MockG,
+        ):
+            client = LLMClient(llm_config)
+
+            haiku_provider = MockA.return_value
+            haiku_provider.create = AsyncMock(
+                side_effect=Exception("429 Too Many Requests"),
+            )
+
+            gemini_response = LLMResponse(
+                text="gemini ok", model="gemini-2.5-flash",
+            )
+            gemini_provider = MockG.return_value
+            gemini_provider.create = AsyncMock(return_value=gemini_response)
+
+            await client.generate(
+                messages=[{"role": "user", "content": "test"}],
+            )
+
+            # Verify cooldown was set with configured value (180s)
+            expiry = client._provider_cooldowns["claude-haiku-4-5-20251001"]
+            expected_min = time.monotonic() + 180 - 5  # tolerance
+            assert expiry >= expected_min - 180  # sanity
+            assert client._cooldown_seconds == 180

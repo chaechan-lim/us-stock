@@ -221,13 +221,58 @@ class TestNewsSentimentAgent:
         client = _make_llm_client(response)
         agent = NewsSentimentAgent(llm_client=client)
 
-        # 25 articles > chunk_size of 10
-        articles = _make_articles(25)
+        # 50 articles > default batch_size of 25
+        articles = _make_articles(50)
         result = await agent.analyze_batch(articles)
 
-        # Should have made 3 LLM calls (10 + 10 + 5)
+        # Should have made 2 LLM calls (25 + 25)
+        assert client.generate.call_count == 2
+        assert result.analyzed_count == 50
+
+    async def test_custom_batch_size(self):
+        """Custom batch_size should control chunk splitting."""
+        response = json.dumps([
+            {"symbol": "X", "sentiment": 0.1, "impact": "LOW", "category": "other", "trading_signal": "NEUTRAL"},
+        ])
+        client = _make_llm_client(response)
+        agent = NewsSentimentAgent(llm_client=client, batch_size=5)
+
+        articles = _make_articles(12)
+        result = await agent.analyze_batch(articles)
+
+        # Should have made 3 LLM calls (5 + 5 + 2)
         assert client.generate.call_count == 3
-        assert result.analyzed_count == 25
+        assert result.analyzed_count == 12
+
+    async def test_default_batch_size(self):
+        """Default batch_size should be 25."""
+        agent = NewsSentimentAgent(llm_client=None)
+        assert agent._batch_size == 25
+
+    async def test_batch_size_reduces_calls(self):
+        """Larger batch_size (25 vs old 10) reduces LLM call count."""
+        response = json.dumps([
+            {"symbol": "X", "sentiment": 0.1, "impact": "LOW", "category": "other", "trading_signal": "NEUTRAL"},
+        ])
+        client = _make_llm_client(response)
+
+        # With old batch_size=10, 45 articles = 5 calls
+        agent_old = NewsSentimentAgent(llm_client=client, batch_size=10)
+        await agent_old.analyze_batch(_make_articles(45))
+        old_calls = client.generate.call_count
+
+        # Reset
+        client.generate.reset_mock()
+
+        # With new default batch_size=25, 45 articles = 2 calls
+        agent_new = NewsSentimentAgent(llm_client=client, batch_size=25)
+        await agent_new.analyze_batch(_make_articles(45))
+        new_calls = client.generate.call_count
+
+        assert old_calls == 5
+        assert new_calls == 2
+        # 60% reduction in calls
+        assert new_calls < old_calls
 
 
 class TestBuildPrompt:
