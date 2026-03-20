@@ -195,7 +195,10 @@ def _merge_trade_entry(existing: dict, new: dict) -> None:
 
 
 async def _do_persist_trade(trade: dict) -> None:
-    """Core logic: persist trade dict to orders table via TradeRepository."""
+    """Core logic: persist trade dict to orders table via TradeRepository.
+
+    Caller must verify that ``_session_factory`` is set before calling.
+    """
     async with _session_factory() as session:
         repo = TradeRepository(session)
         await repo.save_order(

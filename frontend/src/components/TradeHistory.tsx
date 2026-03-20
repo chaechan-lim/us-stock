@@ -97,9 +97,9 @@ export default function TradeHistory() {
     }))
   }, [trades])
 
-  // NOTE: hasMore is based on pre-filter count (rawTrades includes pending).
-  // If many pending trades exist, the displayed page may show fewer than PAGE_SIZE items.
-  // Pagination offsets remain correct — only the visual density is slightly inconsistent.
+  // Use pre-filter count for pagination: offset-based pagination is driven by
+  // rawTrades length (which includes pending). If post-filter trades are fewer,
+  // the next page may be sparser but pagination remains correct.
   const hasMore = rawTrades?.length === PAGE_SIZE
   const hasPrev = page > 0
 

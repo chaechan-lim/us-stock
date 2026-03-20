@@ -1138,3 +1138,39 @@ async def test_recover_not_found_kr_market(repo, session):
     await session.refresh(order)
     assert order.status == "filled"
     assert order.filled_price == 70000.0
+
+
+@pytest.mark.asyncio
+async def test_recover_not_found_commits_orders_without_kis_order_id(repo, session):
+    """Orders without kis_order_id are still committed to DB.
+
+    Regression test: previously the commit was gated on `if recovered_ids`,
+    but recovered_ids only includes orders with non-empty kis_order_id.
+    Orders without kis_order_id had their ORM mutations silently discarded.
+    """
+    from core.models import Order
+
+    order = Order(
+        symbol="AAPL",
+        exchange="NASD",
+        side="SELL",
+        order_type="market",
+        quantity=10,
+        price=155.0,
+        status="not_found",
+        pnl=50.0,
+        kis_order_id="",  # Empty kis_order_id
+        market="US",
+    )
+    session.add(order)
+    await session.commit()
+
+    recovered_ids = await repo.recover_not_found_orders()
+    # No kis_order_id → not in recovered_ids, but still committed
+    assert len(recovered_ids) == 0
+
+    await session.refresh(order)
+    assert order.status == "filled"
+    assert order.filled_at == order.created_at
+    assert order.filled_price == 155.0
+    assert order.filled_quantity == 10

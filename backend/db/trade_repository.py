@@ -268,11 +268,11 @@ class TradeRepository:
             if order.kis_order_id:
                 recovered_ids.append(order.kis_order_id)
 
-        if recovered_ids:
+        if orders:
             await self._session.commit()
             logger.info(
                 "Recovered %d not_found orders to filled status",
-                len(recovered_ids),
+                len(orders),
             )
         return recovered_ids
 

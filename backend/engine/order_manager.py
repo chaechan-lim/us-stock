@@ -273,7 +273,7 @@ class OrderManager:
                     await _db_recorder(trade_data)
                 except Exception:
                     logger.warning(
-                        "DB persist failed for %s, fire-and-forget will retry",
+                        "DB persist failed for %s BUY, will be recovered by reconciliation",
                         symbol,
                     )
             return order
@@ -404,7 +404,7 @@ class OrderManager:
                     await _db_recorder(trade_data)
                 except Exception:
                     logger.warning(
-                        "DB persist failed for %s, fire-and-forget will retry",
+                        "DB persist failed for %s SELL, will be recovered by reconciliation",
                         symbol,
                     )
             return order
