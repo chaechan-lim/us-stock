@@ -1342,6 +1342,7 @@ class TestRecordTradeSkipDbPersist:
         assert len(_trade_log) == 1
 
 
+
 # --- STOCK-36: Sort order + pagination tests ---
 
 
