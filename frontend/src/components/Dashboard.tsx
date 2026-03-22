@@ -1,8 +1,9 @@
-import { useMemo } from 'react'
+import { useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { usePortfolioSummary, usePositions, useEngineStatus } from '../hooks/useApi'
+import { usePortfolioSummary, usePositions, useEngineStatus, usePortfolioReturns } from '../hooks/useApi'
 import { usePriceStream } from '../hooks/usePriceStream'
 import { fetchMacroIndicators, fetchMarketState, fetchTradeSummaryPeriods } from '../api/client'
+import type { PeriodReturn } from '../api/client'
 import { formatCurrency } from '../utils/format'
 
 function PnLText({ value, currency }: { value: number; currency: string }) {
@@ -21,6 +22,7 @@ export default function Dashboard() {
   const { data: summary, isLoading } = usePortfolioSummary()
   const { data: positions } = usePositions()
   const { data: engineStatus } = useEngineStatus()
+  const { data: returns } = usePortfolioReturns()
   const { data: usTradeSummary } = useQuery({
     queryKey: ['portfolio', 'trade-summary', 'US'],
     queryFn: () => fetchTradeSummaryPeriods('US'),
@@ -72,13 +74,13 @@ export default function Dashboard() {
     <div className="space-y-6">
       {/* Summary Cards */}
       <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-        <Card
-          title="Total Equity"
-          value={formatCurrency(totalEquity, 'KRW')}
-          sub={hasUsd
-            ? `KRW ${formatCurrency(summary.balance.total, 'KRW')} + USD ${formatCurrency(summary.usd_balance!.total, 'USD')} (₩${rate.toFixed(0)})`
-            : undefined
-          }
+        <EquityCard
+          totalEquity={totalEquity}
+          hasUsd={!!hasUsd}
+          krwTotal={summary.balance.total}
+          usdTotal={summary.usd_balance?.total ?? 0}
+          rate={rate}
+          returns={returns}
         />
         <Card
           title="Available Cash"
@@ -218,6 +220,71 @@ export default function Dashboard() {
         <MarketStateCard />
         <MacroIndicatorsCard />
       </div>
+    </div>
+  )
+}
+
+type ReturnPeriod = 'daily' | 'weekly' | 'monthly'
+
+function EquityCard({
+  totalEquity,
+  hasUsd,
+  krwTotal,
+  usdTotal,
+  rate,
+  returns,
+}: {
+  totalEquity: number
+  hasUsd: boolean
+  krwTotal: number
+  usdTotal: number
+  rate: number
+  returns?: { daily: PeriodReturn | null; weekly: PeriodReturn | null; monthly: PeriodReturn | null }
+}) {
+  const [period, setPeriod] = useState<ReturnPeriod>('daily')
+  const periodLabels: Record<ReturnPeriod, string> = { daily: '1D', weekly: '1W', monthly: '1M' }
+  const currentReturn = returns?.[period] ?? null
+
+  return (
+    <div className="bg-gray-900 rounded-lg p-4">
+      <div className="text-xs text-gray-400 uppercase tracking-wide">Total Equity</div>
+      <div className="text-2xl font-bold mt-1">{formatCurrency(totalEquity, 'KRW')}</div>
+      {hasUsd && (
+        <div className="text-xs mt-0.5 text-gray-500">
+          KRW {formatCurrency(krwTotal, 'KRW')} + USD {formatCurrency(usdTotal, 'USD')} ({'\u20A9'}{rate.toFixed(0)})
+        </div>
+      )}
+      {returns && (
+        <div className="mt-2 pt-2 border-t border-gray-800">
+          <div className="flex items-center gap-1 mb-1">
+            {(['daily', 'weekly', 'monthly'] as ReturnPeriod[]).map(p => (
+              <button
+                key={p}
+                onClick={() => setPeriod(p)}
+                className={`px-1.5 py-0.5 text-[10px] rounded ${
+                  period === p
+                    ? 'bg-gray-700 text-white'
+                    : 'text-gray-500 hover:text-gray-300'
+                }`}
+              >
+                {periodLabels[p]}
+              </button>
+            ))}
+          </div>
+          {currentReturn ? (
+            <div className="flex items-baseline gap-2">
+              <span className={`text-sm font-semibold ${currentReturn.change >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                {currentReturn.change >= 0 ? '+' : ''}{formatCurrency(currentReturn.change, 'KRW')}
+              </span>
+              <span className={`text-xs ${currentReturn.pct >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                {currentReturn.pct >= 0 ? '+' : ''}{currentReturn.pct.toFixed(2)}%
+              </span>
+            </div>
+          ) : (
+            <div className="text-xs text-gray-600">No data</div>
+          )}
+        </div>
+      )}
     </div>
   )
 }
