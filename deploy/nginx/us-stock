@@ -1,6 +1,7 @@
 # US Stock Trading - nginx reverse proxy configuration
-# Install: sudo cp deploy/nginx/us-stock /etc/nginx/sites-enabled/us-stock
-# Reload: sudo nginx -t && sudo systemctl reload nginx
+# Install: sudo cp deploy/nginx/us-stock /etc/nginx/sites-available/us-stock
+#          sudo ln -sf /etc/nginx/sites-available/us-stock /etc/nginx/sites-enabled/us-stock
+# Reload:  sudo nginx -t && sudo systemctl reload nginx
 #
 # Port 8443: HTTPS reverse proxy (shared SSL cert with coin project)
 # Backend:  localhost:8001 (FastAPI/uvicorn)
@@ -17,7 +18,7 @@ server {
     # --- HTTP -> HTTPS auto-redirect on SSL port ---
     # When a plain HTTP request hits an SSL port, nginx returns status 497.
     # This directive catches that error and redirects to HTTPS.
-    error_page 497 301 =301 https://$host:$server_port$request_uri;
+    error_page 497 =301 https://$host:$server_port$request_uri;
 
     # Frontend (React SPA)
     location / {

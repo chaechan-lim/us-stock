@@ -24,17 +24,20 @@ sudo systemctl enable usstock-frontend.service
 if command -v nginx &> /dev/null; then
     echo ""
     echo "Installing nginx config..."
-    sudo cp "$SCRIPT_DIR/nginx/us-stock" /etc/nginx/sites-enabled/us-stock
-    if sudo nginx -t 2>/dev/null; then
+    sudo cp "$SCRIPT_DIR/nginx/us-stock" /etc/nginx/sites-available/us-stock
+    sudo ln -sf /etc/nginx/sites-available/us-stock /etc/nginx/sites-enabled/us-stock
+    if sudo nginx -t; then
         sudo systemctl reload nginx
         echo "  nginx config installed and reloaded."
     else
-        echo "  WARNING: nginx config test failed. Check: sudo nginx -t"
+        echo "  WARNING: nginx config test failed. Config copied but NOT reloaded."
     fi
 else
     echo ""
     echo "nginx not found — skipping nginx config install."
-    echo "  To install manually: sudo cp deploy/nginx/us-stock /etc/nginx/sites-enabled/us-stock"
+    echo "  To install manually:"
+    echo "    sudo cp deploy/nginx/us-stock /etc/nginx/sites-available/us-stock"
+    echo "    sudo ln -sf /etc/nginx/sites-available/us-stock /etc/nginx/sites-enabled/us-stock"
 fi
 
 echo ""
@@ -49,4 +52,4 @@ echo ""
 echo "Ports:"
 echo "  Backend:  http://localhost:8001"
 echo "  Frontend: http://localhost:3001"
-echo "  HTTPS:    https://rpi-server:8443"
+echo "  HTTPS:    https://$(hostname):8443"

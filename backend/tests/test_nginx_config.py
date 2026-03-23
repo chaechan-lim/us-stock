@@ -4,6 +4,7 @@ Validates that the deploy/nginx/us-stock config contains required directives
 for HTTPS, HTTP→HTTPS redirect, and reverse proxy routing.
 """
 
+import re
 from pathlib import Path
 
 import pytest
@@ -42,10 +43,18 @@ class TestNginxConfig:
         When a plain HTTP request hits an SSL-only port, nginx returns
         status 497. This directive redirects to HTTPS automatically.
         This is the core fix for STOCK-44.
+
+        The directive must be exactly `error_page 497 =301 https://...`
+        — no extra status codes between 497 and =301, otherwise nginx
+        would also intercept legitimate backend 301 responses.
         """
-        assert "error_page 497" in nginx_config
-        # Verify it's a 301 redirect to https
-        assert "https://$host:$server_port$request_uri" in nginx_config
+        # Regex validates: only 497 before =301, no extra codes
+        assert re.search(
+            r"error_page\s+497\s+=301\s+https://\$host:\$server_port\$request_uri",
+            nginx_config,
+        ), (
+            "error_page directive must be: error_page 497 =301 https://$host:$server_port$request_uri"
+        )
 
     def test_frontend_proxy(self, nginx_config: str) -> None:
         """Must proxy root location to frontend (port 3001)."""
