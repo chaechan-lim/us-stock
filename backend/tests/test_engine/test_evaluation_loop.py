@@ -2784,7 +2784,10 @@ class TestSilentExceptionLogging:
 
     @pytest.mark.asyncio
     async def test_exchange_position_fetch_failure_logs_warning(
-        self, eval_loop, mock_market_data, caplog,
+        self,
+        eval_loop,
+        mock_market_data,
+        caplog,
     ):
         """When get_positions raises in _evaluate_all, should log warning."""
         # First call to get_positions (in _evaluate_all) fails,
@@ -2797,26 +2800,26 @@ class TestSilentExceptionLogging:
         with caplog.at_level(logging.WARNING, logger="engine.evaluation_loop"):
             await eval_loop._evaluate_all()
 
-        assert any(
-            "Exchange position fetch failed" in r.message for r in caplog.records
-        ), "Expected warning log for position fetch failure"
+        assert any("Exchange position fetch failed" in r.message for r in caplog.records), (
+            "Expected warning log for position fetch failure"
+        )
 
     @pytest.mark.asyncio
     async def test_factor_score_ohlcv_failure_logs_warning(
-        self, eval_loop, mock_market_data, caplog,
+        self,
+        eval_loop,
+        mock_market_data,
+        caplog,
     ):
         """When OHLCV fetch for factor scoring fails, should log warning."""
-        mock_market_data.get_ohlcv = AsyncMock(
-            side_effect=RuntimeError("Network timeout")
-        )
+        mock_market_data.get_ohlcv = AsyncMock(side_effect=RuntimeError("Network timeout"))
         eval_loop.set_watchlist(["AAPL", "MSFT", "GOOG"])
 
         with caplog.at_level(logging.WARNING, logger="engine.evaluation_loop"):
             await eval_loop._update_factor_scores()
 
         assert any(
-            "Failed to fetch OHLCV for factor scoring" in r.message
-            for r in caplog.records
+            "Failed to fetch OHLCV for factor scoring" in r.message for r in caplog.records
         ), "Expected warning log for OHLCV fetch failure"
 
 
@@ -2986,3 +2989,524 @@ class TestProfitProtection:
             watchlist=[],
         )
         assert getattr(loop, "_profit_protection_pct", 0.15) == 0.15
+
+
+# ------------------------------------------------------------------
+# STOCK-43: Sell cooldown bypass fix tests
+# ------------------------------------------------------------------
+
+
+class TestSellCooldownFromPositionTracker:
+    """STOCK-43: PositionTracker stop-loss/TP sells must update cooldown.
+
+    When PositionTracker triggers a sell (stop-loss, take-profit, trailing),
+    the on_sell callback must update EvaluationLoop._recovery_watch so the
+    same symbol is not immediately re-bought.
+    """
+
+    @pytest.fixture
+    def loop_with_callback(self, mock_adapter, mock_market_data, mock_registry):
+        """EvaluationLoop + real PositionTracker with callback wired."""
+        from data.indicator_service import IndicatorService
+        from strategies.combiner import SignalCombiner
+        from engine.position_tracker import PositionTracker
+
+        risk = RiskManager()
+        order_mgr = OrderManager(adapter=mock_adapter, risk_manager=risk)
+        tracker = PositionTracker(
+            adapter=mock_adapter,
+            risk_manager=risk,
+            order_manager=order_mgr,
+            market="US",
+        )
+
+        loop = EvaluationLoop(
+            adapter=mock_adapter,
+            market_data=mock_market_data,
+            indicator_svc=IndicatorService(),
+            registry=mock_registry,
+            combiner=SignalCombiner(),
+            order_manager=order_mgr,
+            risk_manager=risk,
+            watchlist=["AAPL"],
+            position_tracker=tracker,
+        )
+
+        # Wire the callback (as done in main.py)
+        tracker.register_on_sell(loop.register_sell_cooldown)
+        return loop, tracker
+
+    async def test_position_tracker_sell_updates_recovery_watch(
+        self, loop_with_callback, mock_adapter
+    ):
+        """Stop-loss sell via PositionTracker should update _recovery_watch."""
+        loop, tracker = loop_with_callback
+
+        # Track a position
+        tracker.track("AAPL", entry_price=150.0, quantity=10, stop_loss_pct=0.05)
+
+        # Mock exchange returning position with price below stop-loss
+        mock_adapter.fetch_positions = AsyncMock(
+            return_value=[
+                Position(
+                    symbol="AAPL",
+                    exchange="NASD",
+                    quantity=10,
+                    avg_price=150.0,
+                    current_price=140.0,  # 6.7% drop > 5% SL
+                ),
+            ]
+        )
+        mock_adapter.create_sell_order = AsyncMock(
+            return_value=OrderResult(
+                order_id="SL1",
+                symbol="AAPL",
+                side="SELL",
+                order_type="market",
+                quantity=10,
+                price=140.0,
+                status="filled",
+                filled_price=140.0,
+            )
+        )
+
+        # check_all should trigger stop-loss
+        triggered = await tracker.check_all()
+        assert len(triggered) >= 1
+        assert triggered[0]["reason"] == "stop_loss"
+
+        # Recovery watch should be updated via callback
+        assert "AAPL" in loop._recovery_watch
+
+    async def test_cooldown_blocks_rebuy_after_tracker_sell(
+        self, loop_with_callback, mock_adapter, mock_market_data, mock_registry
+    ):
+        """After PositionTracker stop-loss, evaluation loop should block rebuy."""
+        loop, tracker = loop_with_callback
+        loop._sell_cooldown_secs = 14400  # 4 hours
+
+        # Simulate: PositionTracker just sold AAPL (via callback)
+        import time
+
+        loop.register_sell_cooldown("AAPL", time.time())
+
+        # Now strategies say BUY
+        strategy = mock_registry.get_enabled.return_value[0]
+        strategy.analyze.return_value = Signal(
+            signal_type=SignalType.BUY,
+            confidence=0.8,
+            strategy_name="trend_following",
+            reason="momentum detected",
+        )
+        mock_market_data.get_positions.return_value = []
+
+        # BUY should be blocked
+        await loop.evaluate_symbol("AAPL")
+        mock_adapter.create_buy_order.assert_not_called()
+
+    async def test_on_sell_callback_error_does_not_crash_tracker(self, mock_adapter):
+        """Callback errors should be caught, not crash PositionTracker."""
+        from engine.position_tracker import PositionTracker
+
+        risk = RiskManager()
+        order_mgr = OrderManager(adapter=mock_adapter, risk_manager=risk)
+        tracker = PositionTracker(
+            adapter=mock_adapter,
+            risk_manager=risk,
+            order_manager=order_mgr,
+        )
+
+        # Register a broken callback
+        def bad_callback(symbol: str, ts: float) -> None:
+            raise RuntimeError("callback exploded")
+
+        tracker.register_on_sell(bad_callback)
+        tracker.track("AAPL", entry_price=150.0, quantity=10, stop_loss_pct=0.05)
+
+        mock_adapter.fetch_positions = AsyncMock(
+            return_value=[
+                Position(
+                    symbol="AAPL",
+                    exchange="NASD",
+                    quantity=10,
+                    avg_price=150.0,
+                    current_price=140.0,
+                ),
+            ]
+        )
+        mock_adapter.create_sell_order = AsyncMock(
+            return_value=OrderResult(
+                order_id="SL2",
+                symbol="AAPL",
+                side="SELL",
+                order_type="market",
+                quantity=10,
+                price=140.0,
+                status="filled",
+                filled_price=140.0,
+            )
+        )
+
+        # Should NOT raise despite broken callback
+        triggered = await tracker.check_all()
+        assert len(triggered) >= 1
+
+
+class TestSellCooldownConfigApplied:
+    """STOCK-43: config.cooldown_after_sell_sec should be applied."""
+
+    async def test_sell_cooldown_configurable(self):
+        """_sell_cooldown_secs should be settable from config."""
+        from data.indicator_service import IndicatorService
+        from strategies.combiner import SignalCombiner
+
+        loop = EvaluationLoop(
+            adapter=AsyncMock(),
+            market_data=AsyncMock(),
+            indicator_svc=IndicatorService(),
+            registry=MagicMock(),
+            combiner=SignalCombiner(),
+            order_manager=MagicMock(),
+            risk_manager=RiskManager(),
+            watchlist=[],
+        )
+        # Default is 24h
+        assert loop._sell_cooldown_secs == 24 * 3600
+
+        # Simulate what main.py does with config
+        loop._sell_cooldown_secs = 14400  # 4 hours from config
+        assert loop._sell_cooldown_secs == 14400
+
+    async def test_cooldown_uses_configured_value(
+        self, mock_adapter, mock_market_data, mock_registry
+    ):
+        """BUY should be blocked/allowed based on configured cooldown, not hardcoded 24h."""
+        import time
+        from data.indicator_service import IndicatorService
+        from strategies.combiner import SignalCombiner
+        from engine.position_tracker import PositionTracker
+
+        risk = RiskManager()
+        order_mgr = OrderManager(adapter=mock_adapter, risk_manager=risk)
+        tracker = MagicMock(spec=PositionTracker)
+        tracker.tracked_symbols = []
+
+        loop = EvaluationLoop(
+            adapter=mock_adapter,
+            market_data=mock_market_data,
+            indicator_svc=IndicatorService(),
+            registry=mock_registry,
+            combiner=SignalCombiner(),
+            order_manager=order_mgr,
+            risk_manager=risk,
+            watchlist=["AAPL"],
+            position_tracker=tracker,
+        )
+        loop._sell_cooldown_secs = 14400  # 4 hours
+
+        # Sold 5 hours ago — should be past 4h cooldown
+        loop._recovery_watch["AAPL"] = time.time() - 5 * 3600
+
+        await loop.evaluate_symbol("AAPL")
+        mock_adapter.create_buy_order.assert_called_once()
+
+    async def test_cooldown_blocks_within_configured_period(
+        self, mock_adapter, mock_market_data, mock_registry
+    ):
+        """BUY should be blocked within configured cooldown period."""
+        import time
+        from data.indicator_service import IndicatorService
+        from strategies.combiner import SignalCombiner
+        from engine.position_tracker import PositionTracker
+
+        risk = RiskManager()
+        order_mgr = OrderManager(adapter=mock_adapter, risk_manager=risk)
+        tracker = MagicMock(spec=PositionTracker)
+        tracker.tracked_symbols = []
+
+        loop = EvaluationLoop(
+            adapter=mock_adapter,
+            market_data=mock_market_data,
+            indicator_svc=IndicatorService(),
+            registry=mock_registry,
+            combiner=SignalCombiner(),
+            order_manager=order_mgr,
+            risk_manager=risk,
+            watchlist=["AAPL"],
+            position_tracker=tracker,
+        )
+        loop._sell_cooldown_secs = 14400  # 4 hours
+
+        # Sold 2 hours ago — still within 4h cooldown
+        loop._recovery_watch["AAPL"] = time.time() - 2 * 3600
+
+        await loop.evaluate_symbol("AAPL")
+        mock_adapter.create_buy_order.assert_not_called()
+
+
+class TestSellCooldownRedis:
+    """STOCK-43: sell cooldown persistence via Redis."""
+
+    async def test_register_sell_cooldown_updates_memory(self):
+        """register_sell_cooldown should update _recovery_watch in memory."""
+        from data.indicator_service import IndicatorService
+        from strategies.combiner import SignalCombiner
+
+        loop = EvaluationLoop(
+            adapter=AsyncMock(),
+            market_data=AsyncMock(),
+            indicator_svc=IndicatorService(),
+            registry=MagicMock(),
+            combiner=SignalCombiner(),
+            order_manager=MagicMock(),
+            risk_manager=RiskManager(),
+            watchlist=[],
+        )
+        import time
+
+        ts = time.time()
+        loop.register_sell_cooldown("AAPL", ts)
+        assert loop._recovery_watch["AAPL"] == ts
+
+    async def test_register_sell_cooldown_persists_to_redis(self):
+        """register_sell_cooldown should persist to Redis when cache is set."""
+        from data.indicator_service import IndicatorService
+        from strategies.combiner import SignalCombiner
+
+        mock_cache = MagicMock()
+        mock_cache.available = True
+        mock_cache.set = AsyncMock(return_value=True)
+
+        loop = EvaluationLoop(
+            adapter=AsyncMock(),
+            market_data=AsyncMock(),
+            indicator_svc=IndicatorService(),
+            registry=MagicMock(),
+            combiner=SignalCombiner(),
+            order_manager=MagicMock(),
+            risk_manager=RiskManager(),
+            watchlist=[],
+            market="US",
+        )
+        loop.set_cache(mock_cache)
+
+        import time
+
+        ts = time.time()
+
+        # register_sell_cooldown fires task, test _persist directly
+        await loop._persist_sell_cooldown("AAPL", ts)
+        mock_cache.set.assert_called_once_with(
+            "sell_cooldown:US:AAPL",
+            str(ts),
+            ex=loop._recovery_watch_secs,
+        )
+
+    async def test_load_sell_cooldowns_from_redis(self):
+        """load_sell_cooldowns should restore from Redis keys."""
+        from data.indicator_service import IndicatorService
+        from strategies.combiner import SignalCombiner
+        import time
+
+        now = time.time()
+
+        # Build a mock Redis that simulates scan_iter + get
+        mock_redis = AsyncMock()
+
+        async def fake_scan_iter(match=None, count=None):
+            yield "sell_cooldown:US:AAPL"
+            yield "sell_cooldown:US:MSFT"
+
+        mock_redis.scan_iter = fake_scan_iter
+
+        async def fake_get(key):
+            if "AAPL" in key:
+                return str(now - 3600)  # 1h ago
+            if "MSFT" in key:
+                return str(now - 7200)  # 2h ago
+            return None
+
+        mock_redis.get = fake_get
+
+        mock_cache = MagicMock()
+        mock_cache.available = True
+        mock_cache._redis = mock_redis
+
+        loop = EvaluationLoop(
+            adapter=AsyncMock(),
+            market_data=AsyncMock(),
+            indicator_svc=IndicatorService(),
+            registry=MagicMock(),
+            combiner=SignalCombiner(),
+            order_manager=MagicMock(),
+            risk_manager=RiskManager(),
+            watchlist=[],
+            market="US",
+        )
+        loop.set_cache(mock_cache)
+
+        loaded = await loop.load_sell_cooldowns()
+        assert loaded == 2
+        assert "AAPL" in loop._recovery_watch
+        assert "MSFT" in loop._recovery_watch
+
+    async def test_load_skips_expired_entries(self):
+        """Expired entries beyond recovery window should not be loaded."""
+        from data.indicator_service import IndicatorService
+        from strategies.combiner import SignalCombiner
+        import time
+
+        now = time.time()
+        old_ts = now - 8 * 86400  # 8 days ago (> 7 day window)
+
+        mock_redis = AsyncMock()
+
+        async def fake_scan_iter(match=None, count=None):
+            yield "sell_cooldown:US:OLD_STOCK"
+
+        mock_redis.scan_iter = fake_scan_iter
+        mock_redis.get = AsyncMock(return_value=str(old_ts))
+
+        mock_cache = MagicMock()
+        mock_cache.available = True
+        mock_cache._redis = mock_redis
+
+        loop = EvaluationLoop(
+            adapter=AsyncMock(),
+            market_data=AsyncMock(),
+            indicator_svc=IndicatorService(),
+            registry=MagicMock(),
+            combiner=SignalCombiner(),
+            order_manager=MagicMock(),
+            risk_manager=RiskManager(),
+            watchlist=[],
+            market="US",
+        )
+        loop.set_cache(mock_cache)
+
+        loaded = await loop.load_sell_cooldowns()
+        assert loaded == 0
+        assert "OLD_STOCK" not in loop._recovery_watch
+
+    async def test_load_without_cache_returns_zero(self):
+        """Should return 0 when no cache is configured."""
+        from data.indicator_service import IndicatorService
+        from strategies.combiner import SignalCombiner
+
+        loop = EvaluationLoop(
+            adapter=AsyncMock(),
+            market_data=AsyncMock(),
+            indicator_svc=IndicatorService(),
+            registry=MagicMock(),
+            combiner=SignalCombiner(),
+            order_manager=MagicMock(),
+            risk_manager=RiskManager(),
+            watchlist=[],
+        )
+        loaded = await loop.load_sell_cooldowns()
+        assert loaded == 0
+
+    async def test_cache_key_includes_market(self):
+        """Cache key should be market-specific (US vs KR)."""
+        from data.indicator_service import IndicatorService
+        from strategies.combiner import SignalCombiner
+
+        us_loop = EvaluationLoop(
+            adapter=AsyncMock(),
+            market_data=AsyncMock(),
+            indicator_svc=IndicatorService(),
+            registry=MagicMock(),
+            combiner=SignalCombiner(),
+            order_manager=MagicMock(),
+            risk_manager=RiskManager(),
+            market="US",
+        )
+        kr_loop = EvaluationLoop(
+            adapter=AsyncMock(),
+            market_data=AsyncMock(),
+            indicator_svc=IndicatorService(),
+            registry=MagicMock(),
+            combiner=SignalCombiner(),
+            order_manager=MagicMock(),
+            risk_manager=RiskManager(),
+            market="KR",
+        )
+        assert us_loop._cache_key == "sell_cooldown:US"
+        assert kr_loop._cache_key == "sell_cooldown:KR"
+
+
+class TestSellCooldownKRMarket:
+    """STOCK-43: Verify fix works for KR market (009150, 005935, 034020)."""
+
+    async def test_kr_tracker_sell_updates_cooldown(
+        self, mock_adapter, mock_market_data, mock_registry
+    ):
+        """KR PositionTracker sell should update KR eval loop cooldown."""
+        from data.indicator_service import IndicatorService
+        from strategies.combiner import SignalCombiner
+        from engine.position_tracker import PositionTracker
+
+        risk = RiskManager()
+        order_mgr = OrderManager(adapter=mock_adapter, risk_manager=risk, market="KR")
+        tracker = PositionTracker(
+            adapter=mock_adapter,
+            risk_manager=risk,
+            order_manager=order_mgr,
+            market="KR",
+        )
+
+        loop = EvaluationLoop(
+            adapter=mock_adapter,
+            market_data=mock_market_data,
+            indicator_svc=IndicatorService(),
+            registry=mock_registry,
+            combiner=SignalCombiner(),
+            order_manager=order_mgr,
+            risk_manager=risk,
+            watchlist=["009150"],
+            market="KR",
+        )
+        loop._sell_cooldown_secs = 14400  # 4h from config
+
+        # Wire callback
+        tracker.register_on_sell(loop.register_sell_cooldown)
+
+        # Track SK하이닉스
+        tracker.track("009150", entry_price=180000, quantity=5, stop_loss_pct=0.05)
+
+        # Price drops below stop-loss
+        mock_adapter.fetch_positions = AsyncMock(
+            return_value=[
+                Position(
+                    symbol="009150",
+                    exchange="KRX",
+                    quantity=5,
+                    avg_price=180000,
+                    current_price=168000,  # -6.7%
+                ),
+            ]
+        )
+        mock_adapter.create_sell_order = AsyncMock(
+            return_value=OrderResult(
+                order_id="KR_SL1",
+                symbol="009150",
+                side="SELL",
+                order_type="market",
+                quantity=5,
+                price=168000,
+                status="filled",
+                filled_price=168000,
+            )
+        )
+
+        await tracker.check_all()
+        assert "009150" in loop._recovery_watch
+
+        # Try to rebuy 1h later — should be blocked
+        import time
+
+        loop._recovery_watch["009150"] = time.time() - 3600  # 1h ago
+        mock_market_data.get_positions.return_value = []
+
+        await loop.evaluate_symbol("009150")
+        mock_adapter.create_buy_order.assert_not_called()

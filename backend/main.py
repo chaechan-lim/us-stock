@@ -372,6 +372,10 @@ async def lifespan(app: FastAPI):
         event_calendar=event_calendar,
     )
     evaluation_loop._daily_buy_limit = config.trading.daily_buy_limit
+    # STOCK-43: Apply config cooldown + Redis persistence + PositionTracker callback
+    evaluation_loop._sell_cooldown_secs = config.trading.cooldown_after_sell_sec
+    evaluation_loop.set_cache(cache)
+    position_tracker.register_on_sell(evaluation_loop.register_sell_cooldown)
     app.state.evaluation_loop = evaluation_loop
 
     # Stock scanner & sector analyzer
@@ -1332,6 +1336,10 @@ async def lifespan(app: FastAPI):
         market="KR",
     )
     kr_evaluation_loop._daily_buy_limit = config.trading.daily_buy_limit
+    # STOCK-43: Apply config cooldown + Redis persistence + PositionTracker callback
+    kr_evaluation_loop._sell_cooldown_secs = config.trading.cooldown_after_sell_sec
+    kr_evaluation_loop.set_cache(cache)
+    kr_position_tracker.register_on_sell(kr_evaluation_loop.register_sell_cooldown)
     app.state.kr_evaluation_loop = kr_evaluation_loop
 
     # Cross-link market data for combined portfolio allocation (통합증거금)
@@ -1601,6 +1609,17 @@ async def lifespan(app: FastAPI):
                 logger.info("KR watchlist loaded: %d symbols", len(kr_symbols))
     except Exception as e:
         logger.warning("Failed to load watchlist: %s", e)
+
+    # STOCK-43: Restore sell cooldowns from Redis so they survive restarts
+    try:
+        us_cooldowns = await evaluation_loop.load_sell_cooldowns()
+        kr_cooldowns = await kr_evaluation_loop.load_sell_cooldowns()
+        if us_cooldowns or kr_cooldowns:
+            logger.info(
+                "Sell cooldowns restored: US=%d, KR=%d", us_cooldowns, kr_cooldowns
+            )
+    except Exception as e:
+        logger.warning("Failed to load sell cooldowns: %s", e)
 
     # Startup position reconciliation — restore tracking from exchange
     # Falls back to DB restore if exchange API fails (STOCK-7)
