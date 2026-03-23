@@ -318,6 +318,33 @@ async def _get_latest_snapshot(session, market: str):
     return result.scalar_one_or_none()
 
 
+@router.delete("/snapshots")
+async def delete_snapshots(request: Request, ids: str = "", market: str = "KR"):
+    """Delete anomalous portfolio snapshots by ID.
+
+    Admin endpoint for correcting bad data (STOCK-45).
+    Pass comma-separated IDs, e.g. ?ids=196,197,198,199,200&market=KR
+    """
+    if not ids:
+        return {"deleted": 0, "error": "No IDs provided"}
+
+    try:
+        id_list = [int(x.strip()) for x in ids.split(",") if x.strip()]
+    except ValueError:
+        return {"deleted": 0, "error": "Invalid ID format — use comma-separated integers"}
+
+    if market == "KR":
+        pm = getattr(request.app.state, "kr_portfolio_manager", None)
+    else:
+        pm = getattr(request.app.state, "portfolio_manager", None)
+
+    if not pm:
+        return {"deleted": 0, "error": f"Portfolio manager not configured for {market}"}
+
+    deleted = await pm.delete_snapshots_by_ids(id_list)
+    return {"deleted": deleted, "ids": id_list, "market": market}
+
+
 @router.get("/equity-history")
 async def equity_history(request: Request, days: int = 30, market: str = "US"):
     """Get portfolio equity history for charting."""
