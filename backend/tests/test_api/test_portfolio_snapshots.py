@@ -2,16 +2,18 @@
 
 Validates:
 - DELETE /portfolio/snapshots removes anomalous snapshots by ID
-- Only deletes snapshots for the specified market
-- Error handling for invalid input
+- Proper HTTP status codes for error cases
+- Market parameter validation
+- Both US and KR market paths
 """
 
 from datetime import datetime, timedelta
 from unittest.mock import AsyncMock
 
-import pytest
+import pytest_asyncio
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from api.router import api_router
@@ -20,79 +22,57 @@ from engine.portfolio_manager import PortfolioManager
 from exchange.base import Balance
 
 
-@pytest.fixture
-def app_with_portfolio_manager(tmp_path):
-    """Create test app with a real PortfolioManager backed by in-memory SQLite."""
-    import asyncio
-
+@pytest_asyncio.fixture
+async def db_factory():
+    """Create in-memory SQLite engine and session factory."""
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
     factory = async_sessionmaker(engine, expire_on_commit=False)
+    yield factory
+    await engine.dispose()
 
-    async def _setup():
-        async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
 
-    asyncio.get_event_loop_policy()
-    loop = asyncio.new_event_loop()
-    loop.run_until_complete(_setup())
-
+def _make_portfolio_manager(factory, market: str = "KR") -> PortfolioManager:
     mock_md = AsyncMock()
     mock_md.get_balance = AsyncMock(
-        return_value=Balance(
-            currency="KRW",
-            total=10_000_000,
-            available=10_000_000,
-        )
+        return_value=Balance(currency="KRW", total=10_000_000, available=10_000_000)
     )
     mock_md.get_positions = AsyncMock(return_value=[])
-
-    kr_pm = PortfolioManager(market_data=mock_md, session_factory=factory, market="KR")
-
-    app = FastAPI()
-    app.include_router(api_router, prefix="/api/v1")
-    app.state.kr_portfolio_manager = kr_pm
-    app.state.portfolio_manager = None
-
-    yield app, factory, loop, engine
-
-    loop.run_until_complete(engine.dispose())
-    loop.close()
+    return PortfolioManager(market_data=mock_md, session_factory=factory, market=market)
 
 
 class TestDeleteSnapshotsEndpoint:
     """STOCK-45: DELETE /portfolio/snapshots endpoint."""
 
-    def test_deletes_by_ids(self, app_with_portfolio_manager):
-        app, factory, loop, _ = app_with_portfolio_manager
+    async def test_deletes_by_ids(self, db_factory):
+        kr_pm = _make_portfolio_manager(db_factory, "KR")
+        app = FastAPI()
+        app.include_router(api_router, prefix="/api/v1")
+        app.state.kr_portfolio_manager = kr_pm
+        app.state.portfolio_manager = None
 
         # Seed snapshots
-        async def seed():
-            async with factory() as session:
-                for i in range(5):
-                    session.add(
-                        PortfolioSnapshot(
-                            market="KR",
-                            total_value_usd=float(10_000_000 + i),
-                            cash_usd=5_000_000,
-                            invested_usd=5_000_000,
-                            unrealized_pnl=0,
-                            recorded_at=datetime.utcnow() - timedelta(hours=5 - i),
-                        )
+        async with db_factory() as session:
+            for i in range(5):
+                session.add(
+                    PortfolioSnapshot(
+                        market="KR",
+                        total_value_usd=float(10_000_000 + i),
+                        cash_usd=5_000_000,
+                        invested_usd=5_000_000,
+                        unrealized_pnl=0,
+                        recorded_at=datetime.utcnow() - timedelta(hours=5 - i),
                     )
-                await session.commit()
-
-        loop.run_until_complete(seed())
+                )
+            await session.commit()
 
         # Get IDs
-        async def get_ids():
-            from sqlalchemy import select
+        async with db_factory() as session:
+            stmt = select(PortfolioSnapshot).order_by(PortfolioSnapshot.id)
+            result = await session.execute(stmt)
+            all_ids = [s.id for s in result.scalars().all()]
 
-            async with factory() as session:
-                stmt = select(PortfolioSnapshot).order_by(PortfolioSnapshot.id)
-                result = await session.execute(stmt)
-                return [s.id for s in result.scalars().all()]
-
-        all_ids = loop.run_until_complete(get_ids())
         delete_ids = all_ids[1:4]  # Delete 3 of 5
 
         client = TestClient(app)
@@ -104,28 +84,72 @@ class TestDeleteSnapshotsEndpoint:
         assert data["deleted"] == 3
         assert data["market"] == "KR"
 
-    def test_empty_ids(self, app_with_portfolio_manager):
-        app, _, _, _ = app_with_portfolio_manager
+    async def test_deletes_us_market(self, db_factory):
+        """US market path uses portfolio_manager (not kr_portfolio_manager)."""
+        us_pm = _make_portfolio_manager(db_factory, "US")
+        app = FastAPI()
+        app.include_router(api_router, prefix="/api/v1")
+        app.state.kr_portfolio_manager = None
+        app.state.portfolio_manager = us_pm
+
+        # Seed US snapshots
+        async with db_factory() as session:
+            for i in range(3):
+                session.add(
+                    PortfolioSnapshot(
+                        market="US",
+                        total_value_usd=float(50_000 + i),
+                        cash_usd=30_000,
+                        invested_usd=20_000,
+                        unrealized_pnl=0,
+                        recorded_at=datetime.utcnow() - timedelta(hours=3 - i),
+                    )
+                )
+            await session.commit()
+
+        async with db_factory() as session:
+            stmt = select(PortfolioSnapshot).order_by(PortfolioSnapshot.id)
+            result = await session.execute(stmt)
+            all_ids = [s.id for s in result.scalars().all()]
+
+        client = TestClient(app)
+        ids_str = ",".join(str(i) for i in all_ids[:2])
+        resp = client.delete(f"/api/v1/portfolio/snapshots?ids={ids_str}&market=US")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["deleted"] == 2
+        assert data["market"] == "US"
+
+    def test_empty_ids_returns_400(self):
+        app = FastAPI()
+        app.include_router(api_router, prefix="/api/v1")
         client = TestClient(app)
 
         resp = client.delete("/api/v1/portfolio/snapshots?ids=&market=KR")
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["deleted"] == 0
-        assert "error" in data
+        assert resp.status_code == 400
+        assert "error" in resp.json()
 
-    def test_invalid_ids_format(self, app_with_portfolio_manager):
-        app, _, _, _ = app_with_portfolio_manager
+    def test_invalid_ids_format_returns_400(self):
+        app = FastAPI()
+        app.include_router(api_router, prefix="/api/v1")
         client = TestClient(app)
 
         resp = client.delete("/api/v1/portfolio/snapshots?ids=abc,def&market=KR")
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["deleted"] == 0
-        assert "error" in data
+        assert resp.status_code == 400
+        assert "error" in resp.json()
 
-    def test_no_portfolio_manager(self):
-        """Returns error when portfolio manager not configured."""
+    def test_invalid_market_returns_400(self):
+        app = FastAPI()
+        app.include_router(api_router, prefix="/api/v1")
+        client = TestClient(app)
+
+        resp = client.delete("/api/v1/portfolio/snapshots?ids=1,2,3&market=JP")
+        assert resp.status_code == 400
+        assert "Invalid market" in resp.json()["error"]
+
+    def test_no_portfolio_manager_returns_503(self):
+        """Returns 503 when portfolio manager not configured."""
         app = FastAPI()
         app.include_router(api_router, prefix="/api/v1")
         app.state.kr_portfolio_manager = None
@@ -133,7 +157,5 @@ class TestDeleteSnapshotsEndpoint:
 
         client = TestClient(app)
         resp = client.delete("/api/v1/portfolio/snapshots?ids=1,2,3&market=KR")
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["deleted"] == 0
-        assert "error" in data
+        assert resp.status_code == 503
+        assert "error" in resp.json()

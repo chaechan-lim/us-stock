@@ -9,7 +9,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from core.models import Base, PortfolioSnapshot
-from engine.portfolio_manager import ANOMALY_DROP_THRESHOLD, PortfolioManager
+from engine.portfolio_manager import PortfolioManager
 from exchange.base import Balance, Position
 
 
@@ -391,9 +391,38 @@ class TestSnapshotAnomalyDetection:
             result = await session.execute(stmt)
             assert result.scalar() == 1
 
-    async def test_anomaly_threshold_constant(self):
-        """Verify threshold is set to 50%."""
-        assert ANOMALY_DROP_THRESHOLD == 0.5
+    async def test_warns_on_zero_price_positions(self, db_setup, caplog):
+        """Positions with current_price<=0 should trigger a warning log."""
+        import logging
+
+        svc = AsyncMock()
+        svc.get_balance = AsyncMock(
+            return_value=Balance(
+                currency="KRW",
+                total=10_000_000,
+                available=10_000_000,
+            )
+        )
+        svc.get_positions = AsyncMock(
+            return_value=[
+                Position(
+                    symbol="005930",
+                    exchange="KRX",
+                    quantity=50,
+                    avg_price=75_000,
+                    current_price=0,  # stale/missing price
+                    unrealized_pnl=0,
+                    unrealized_pnl_pct=0,
+                ),
+            ]
+        )
+        mgr = PortfolioManager(market_data=svc, session_factory=db_setup, market="KR")
+
+        with caplog.at_level(logging.WARNING):
+            await mgr.save_snapshot()
+
+        assert any("current_price<=0" in r.message for r in caplog.records)
+        assert any("005930" in r.message for r in caplog.records)
 
 
 class TestDeleteSnapshotsByIds:

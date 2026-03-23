@@ -81,6 +81,16 @@ class PortfolioManager:
         unrealized_pnl = sum(p.unrealized_pnl for p in positions)
         total_equity = balance.total  # already includes position market value
 
+        # STOCK-45: Warn about positions with stale/missing price data.
+        zero_price = [p.symbol for p in positions if p.quantity > 0 and p.current_price <= 0]
+        if zero_price:
+            logger.warning(
+                "[%s] %d positions with current_price<=0: %s",
+                self._market,
+                len(zero_price),
+                zero_price,
+            )
+
         # STOCK-45: Detect when balance.total excludes position value.
         # If balance.total < cash + 50% of position market value,
         # positions are likely missing from the total.

@@ -325,13 +325,24 @@ async def delete_snapshots(request: Request, ids: str = "", market: str = "KR"):
     Admin endpoint for correcting bad data (STOCK-45).
     Pass comma-separated IDs, e.g. ?ids=196,197,198,199,200&market=KR
     """
+    from fastapi.responses import JSONResponse
+
+    if market not in ("US", "KR"):
+        return JSONResponse(
+            status_code=400,
+            content={"error": f"Invalid market: {market}. Use 'US' or 'KR'."},
+        )
+
     if not ids:
-        return {"deleted": 0, "error": "No IDs provided"}
+        return JSONResponse(status_code=400, content={"error": "No IDs provided"})
 
     try:
         id_list = [int(x.strip()) for x in ids.split(",") if x.strip()]
     except ValueError:
-        return {"deleted": 0, "error": "Invalid ID format — use comma-separated integers"}
+        return JSONResponse(
+            status_code=400,
+            content={"error": "Invalid ID format — use comma-separated integers"},
+        )
 
     if market == "KR":
         pm = getattr(request.app.state, "kr_portfolio_manager", None)
@@ -339,7 +350,10 @@ async def delete_snapshots(request: Request, ids: str = "", market: str = "KR"):
         pm = getattr(request.app.state, "portfolio_manager", None)
 
     if not pm:
-        return {"deleted": 0, "error": f"Portfolio manager not configured for {market}"}
+        return JSONResponse(
+            status_code=503,
+            content={"error": f"Portfolio manager not configured for {market}"},
+        )
 
     deleted = await pm.delete_snapshots_by_ids(id_list)
     return {"deleted": deleted, "ids": id_list, "market": market}
@@ -361,11 +375,13 @@ async def equity_history(request: Request, days: int = 30, market: str = "US"):
 async def trade_summary_periods(request: Request, market: str | None = None):
     """Get trade P&L summary by period: today, this week, this month, all-time."""
     from api.trades import _session_factory
+
     if not _session_factory:
         return _empty_summary()
 
     try:
         from db.trade_repository import TradeRepository
+
         async with _session_factory() as session:
             repo = TradeRepository(session)
             all_orders = await repo.get_trade_history(limit=500)
@@ -378,10 +394,9 @@ async def trade_summary_periods(request: Request, market: str | None = None):
             # actually filled but KIS API couldn't find them during reconciliation
             # (date boundary / API delay). PnL existence proves the fill happened.
             sells = [
-                o for o in all_orders
-                if o.side == "SELL"
-                and o.status in ("filled", "not_found")
-                and o.pnl is not None
+                o
+                for o in all_orders
+                if o.side == "SELL" and o.status in ("filled", "not_found") and o.pnl is not None
             ]
 
             now = datetime.utcnow()
@@ -402,7 +417,9 @@ async def trade_summary_periods(request: Request, market: str | None = None):
                         # Infer entry from pnl and pnl_pct: entry = price - pnl/qty
                         # or from pnl_pct: entry = sell_price / (1 + pnl_pct/100)
                         pct = getattr(t, "pnl_pct", None)
-                        sell_price = getattr(t, "filled_price", None) or getattr(t, "price", None) or 0
+                        sell_price = (
+                            getattr(t, "filled_price", None) or getattr(t, "price", None) or 0
+                        )
                         if pct and sell_price and pct != -100:
                             entry = sell_price / (1 + pct / 100)
                     if entry and qty:
@@ -432,8 +449,7 @@ async def trade_summary_periods(request: Request, market: str | None = None):
                 "month": _calc(month_sells),
                 "all_time": _calc(sells),
                 "total_buys": sum(
-                    1 for o in all_orders
-                    if o.side == "BUY" and o.status in ("filled", "not_found")
+                    1 for o in all_orders if o.side == "BUY" and o.status in ("filled", "not_found")
                 ),
                 "total_sells": len(sells),
             }
