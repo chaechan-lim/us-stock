@@ -35,6 +35,7 @@ from core.enums import SignalType
 
 if TYPE_CHECKING:
     from agents.risk_assessment import RiskAssessmentAgent
+    from services.cache import CacheService
 
 logger = logging.getLogger(__name__)
 
@@ -99,6 +100,9 @@ class EvaluationLoop:
         self._recovery_watch_secs = 7 * 86400  # 7 days
         # Sell cooldown: block BUY for recently-sold symbols (STOCK-20)
         self._sell_cooldown_secs: int = 24 * 3600  # 24 hours
+        # Redis cache for persisting _recovery_watch across restarts (STOCK-43)
+        self._cache: CacheService | None = None
+        self._cache_key: str = f"sell_cooldown:{market}"
         # Per-symbol maximum position weight (% of portfolio) (STOCK-20)
         self._max_per_symbol_pct: float = 0.10  # 10% max per symbol
         # Daily buy counter (resets at midnight)
@@ -155,6 +159,89 @@ class EvaluationLoop:
         """Update USD/KRW exchange rate for cross-market value conversion."""
         if rate > 0:
             self._exchange_rate = rate
+
+    def set_cache(self, cache: CacheService) -> None:
+        """Set Redis cache for persisting sell cooldown data (STOCK-43)."""
+        self._cache = cache
+
+    def register_sell_cooldown(self, symbol: str, sell_ts: float) -> None:
+        """Record a sell event for cooldown enforcement (STOCK-43).
+
+        Called as a callback from PositionTracker after stop-loss/take-profit/
+        trailing stop sells, ensuring the evaluation loop blocks immediate
+        re-buy of the same symbol.
+
+        Also persists to Redis so cooldowns survive service restarts.
+        """
+        self._recovery_watch[symbol] = sell_ts
+        logger.info(
+            "Sell cooldown registered for %s (%s market, cooldown=%dh)",
+            symbol,
+            self._market,
+            self._sell_cooldown_secs // 3600,
+        )
+        # Fire-and-forget Redis persistence (non-blocking from sync callback)
+        if self._cache:
+            import asyncio
+
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(self._persist_sell_cooldown(symbol, sell_ts))
+            except RuntimeError:
+                pass  # No running loop (e.g. in tests)
+
+    async def _persist_sell_cooldown(self, symbol: str, sell_ts: float) -> None:
+        """Persist a single sell cooldown entry to Redis."""
+        if not self._cache:
+            return
+        try:
+            # Use recovery_watch_secs as TTL (entries expire after 7 days)
+            await self._cache.set(
+                f"{self._cache_key}:{symbol}",
+                str(sell_ts),
+                ex=self._recovery_watch_secs,
+            )
+        except Exception as e:
+            logger.warning("Failed to persist sell cooldown for %s: %s", symbol, e)
+
+    async def load_sell_cooldowns(self) -> int:
+        """Load persisted sell cooldowns from Redis on startup (STOCK-43).
+
+        Returns the number of cooldowns loaded.
+        """
+        if not self._cache or not self._cache.available:
+            return 0
+        try:
+            import redis.asyncio as aioredis
+
+            r: aioredis.Redis | None = self._cache._redis
+            if r is None:
+                return 0
+            pattern = f"{self._cache_key}:*"
+            loaded = 0
+            now = time.time()
+            async for key in r.scan_iter(match=pattern, count=100):
+                raw = await r.get(key)
+                if raw is None:
+                    continue
+                try:
+                    sell_ts = float(raw)
+                except (ValueError, TypeError):
+                    continue
+                # Only load entries still within recovery window
+                if now - sell_ts > self._recovery_watch_secs:
+                    continue
+                # Extract symbol from key "sell_cooldown:{market}:{symbol}"
+                symbol = str(key).split(":", 2)[-1] if ":" in str(key) else ""
+                if symbol:
+                    self._recovery_watch[symbol] = sell_ts
+                    loaded += 1
+            if loaded:
+                logger.info("Loaded %d sell cooldowns from Redis (%s market)", loaded, self._market)
+            return loaded
+        except Exception as e:
+            logger.warning("Failed to load sell cooldowns from Redis: %s", e)
+            return 0
 
     def set_watchlist(self, symbols: list[str]) -> None:
         self._watchlist = [s for s in symbols if s not in self._ETF_ONLY]
@@ -662,7 +749,7 @@ class EvaluationLoop:
                 )
                 if sell_order and self._position_tracker:
                     self._position_tracker.untrack(symbol)
-                    self._recovery_watch[symbol] = time.time()
+                    self.register_sell_cooldown(symbol, time.time())
 
         # Clear processed sentiments to avoid re-selling
         for symbol in held:
@@ -1024,7 +1111,7 @@ class EvaluationLoop:
                 if sell_order and self._position_tracker:
                     self._position_tracker.untrack(symbol)
                     # Add to recovery watch for re-entry evaluation
-                    self._recovery_watch[symbol] = time.time()
+                    self.register_sell_cooldown(symbol, time.time())
 
     def _build_position_context(self, symbol: str, current_price: float) -> PositionContext | None:
         """Build a PositionContext for a held symbol.

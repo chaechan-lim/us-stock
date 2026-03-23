@@ -1085,49 +1085,62 @@ def test_calculate_profit_take_qty():
 @pytest.fixture
 def risk_with_tiered():
     """RiskManager with tiered trailing stop enabled."""
-    return RiskManager(RiskParams(
-        default_stop_loss_pct=0.15,
-        default_take_profit_pct=0.30,
-        default_trailing_activation_pct=0.06,
-        default_trailing_stop_pct=0.03,
-        tiered_trailing_tiers=[(0.10, 0.05), (0.15, 0.04), (0.20, 0.03)],
-        breakeven_stop_enabled=True,
-        breakeven_stop_activation_ratio=0.50,
-        breakeven_stop_lock_ratio=0.75,
-        breakeven_stop_lock_pct=0.50,
-    ))
+    return RiskManager(
+        RiskParams(
+            default_stop_loss_pct=0.15,
+            default_take_profit_pct=0.30,
+            default_trailing_activation_pct=0.06,
+            default_trailing_stop_pct=0.03,
+            tiered_trailing_tiers=[(0.10, 0.05), (0.15, 0.04), (0.20, 0.03)],
+            breakeven_stop_enabled=True,
+            breakeven_stop_activation_ratio=0.50,
+            breakeven_stop_lock_ratio=0.75,
+            breakeven_stop_lock_pct=0.50,
+        )
+    )
 
 
 @pytest.fixture
 def risk_with_breakeven_only():
     """RiskManager with breakeven stop only (no tiered trailing)."""
-    return RiskManager(RiskParams(
-        default_stop_loss_pct=0.15,
-        default_take_profit_pct=0.30,
-        default_trailing_activation_pct=0.0,
-        default_trailing_stop_pct=0.0,
-        tiered_trailing_tiers=None,
-        breakeven_stop_enabled=True,
-        breakeven_stop_activation_ratio=0.50,
-        breakeven_stop_lock_ratio=0.75,
-        breakeven_stop_lock_pct=0.50,
-    ))
+    return RiskManager(
+        RiskParams(
+            default_stop_loss_pct=0.15,
+            default_take_profit_pct=0.30,
+            default_trailing_activation_pct=0.0,
+            default_trailing_stop_pct=0.0,
+            tiered_trailing_tiers=None,
+            breakeven_stop_enabled=True,
+            breakeven_stop_activation_ratio=0.50,
+            breakeven_stop_lock_ratio=0.75,
+            breakeven_stop_lock_pct=0.50,
+        )
+    )
 
 
 def _mock_positions(adapter, positions_list):
     """Helper to mock adapter.fetch_positions with Position objects."""
     from exchange.base import OrderResult
 
-    adapter.fetch_positions = AsyncMock(return_value=[
-        Position(symbol=s, exchange="NASD", quantity=q, avg_price=ap, current_price=cp)
-        for s, q, ap, cp in positions_list
-    ])
+    adapter.fetch_positions = AsyncMock(
+        return_value=[
+            Position(symbol=s, exchange="NASD", quantity=q, avg_price=ap, current_price=cp)
+            for s, q, ap, cp in positions_list
+        ]
+    )
     # Mock sell orders for all symbols
     for s, q, ap, cp in positions_list:
-        adapter.create_sell_order = AsyncMock(return_value=OrderResult(
-            order_id=f"sell-{s}", symbol=s, side="SELL",
-            order_type="market", quantity=q, status="filled", filled_price=cp,
-        ))
+        adapter.create_sell_order = AsyncMock(
+            return_value=OrderResult(
+                order_id=f"sell-{s}",
+                symbol=s,
+                side="SELL",
+                order_type="market",
+                quantity=q,
+                status="filled",
+                filled_price=cp,
+            )
+        )
 
 
 @pytest.mark.asyncio
@@ -1138,8 +1151,15 @@ async def test_tiered_trailing_triggers_before_tp(adapter, risk_with_tiered):
 
     # Entry=100, peak was 120 (+20%), now dropped to 116 → 3.33% drop > 3% tier3 trail
     # Disable flat trailing so tiered trailing fires instead
-    tracker.track("DOCN", 100.0, 10, stop_loss_pct=0.15, take_profit_pct=0.30,
-                  trailing_activation_pct=0.0, trailing_stop_pct=0.0)
+    tracker.track(
+        "DOCN",
+        100.0,
+        10,
+        stop_loss_pct=0.15,
+        take_profit_pct=0.30,
+        trailing_activation_pct=0.0,
+        trailing_stop_pct=0.0,
+    )
     tracker._tracked["DOCN"].highest_price = 120.0
     tracker._tracked["DOCN"].partial_profit_taken = True  # already took partial profit
 
@@ -1157,8 +1177,15 @@ async def test_tiered_trailing_not_triggered_small_drop(adapter, risk_with_tiere
     tracker = PositionTracker(adapter, risk_with_tiered, order_mgr)
 
     # Entry=100, peak=115 (+15%), current=113 → drop=1.74% < 4% tier2 trail
-    tracker.track("HPSP", 100.0, 10, stop_loss_pct=0.15, take_profit_pct=0.30,
-                  trailing_activation_pct=0.0, trailing_stop_pct=0.0)
+    tracker.track(
+        "HPSP",
+        100.0,
+        10,
+        stop_loss_pct=0.15,
+        take_profit_pct=0.30,
+        trailing_activation_pct=0.0,
+        trailing_stop_pct=0.0,
+    )
     tracker._tracked["HPSP"].highest_price = 115.0
     tracker._tracked["HPSP"].partial_profit_taken = True
 
@@ -1246,8 +1273,11 @@ async def test_evaluate_logs_high_gain_positions(adapter, risk, order_mgr, caplo
     adapter.fetch_positions = AsyncMock(
         return_value=[
             Position(
-                symbol="VG", exchange="NASD", quantity=5,
-                avg_price=100.0, current_price=125.0,  # +25%
+                symbol="VG",
+                exchange="NASD",
+                quantity=5,
+                avg_price=100.0,
+                current_price=125.0,  # +25%
             ),
         ]
     )
@@ -1273,6 +1303,207 @@ async def test_evaluate_logs_high_gain_positions(adapter, risk, order_mgr, caplo
 
     # Should log diagnostic info for the +25% position
     assert any(
-        "Evaluating VG" in r.message and "gain=25.0%" in r.message
-        for r in caplog.records
+        "Evaluating VG" in r.message and "gain=25.0%" in r.message for r in caplog.records
     ), f"Expected diagnostic log for VG +25%. Records: {[r.message for r in caplog.records]}"
+
+
+# ------------------------------------------------------------------
+# STOCK-43: on_sell callback tests
+# ------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_on_sell_callback_invoked_on_stop_loss(adapter, risk, order_mgr):
+    """on_sell callback should be called when stop-loss triggers a sell."""
+    from exchange.base import OrderResult
+
+    adapter.fetch_positions = AsyncMock(
+        return_value=[
+            Position(
+                symbol="AAPL",
+                exchange="NASD",
+                quantity=10,
+                avg_price=150.0,
+                current_price=140.0,
+            ),
+        ]
+    )
+    adapter.create_sell_order = AsyncMock(
+        return_value=OrderResult(
+            order_id="SL1",
+            symbol="AAPL",
+            side="SELL",
+            order_type="market",
+            quantity=10,
+            price=140.0,
+            status="filled",
+            filled_price=140.0,
+        )
+    )
+
+    callback_calls = []
+
+    def on_sell(symbol: str, ts: float) -> None:
+        callback_calls.append((symbol, ts))
+
+    tracker = PositionTracker(adapter, risk, order_mgr)
+    tracker.register_on_sell(on_sell)
+    tracker.track("AAPL", entry_price=150.0, quantity=10, stop_loss_pct=0.05)
+
+    await tracker.check_all()
+
+    assert len(callback_calls) == 1
+    assert callback_calls[0][0] == "AAPL"
+    assert isinstance(callback_calls[0][1], float)
+
+
+@pytest.mark.asyncio
+async def test_on_sell_callback_invoked_on_take_profit(adapter, risk, order_mgr):
+    """on_sell callback should be called when take-profit triggers a sell."""
+    from exchange.base import OrderResult
+
+    adapter.fetch_positions = AsyncMock(
+        return_value=[
+            Position(
+                symbol="MSFT",
+                exchange="NASD",
+                quantity=10,
+                avg_price=100.0,
+                current_price=125.0,  # +25% > 20% TP
+            ),
+        ]
+    )
+    adapter.create_sell_order = AsyncMock(
+        return_value=OrderResult(
+            order_id="TP1",
+            symbol="MSFT",
+            side="SELL",
+            order_type="market",
+            quantity=10,
+            price=125.0,
+            status="filled",
+            filled_price=125.0,
+        )
+    )
+
+    callback_calls = []
+    tracker = PositionTracker(adapter, risk, order_mgr)
+    tracker.register_on_sell(lambda s, t: callback_calls.append((s, t)))
+    tracker.track("MSFT", entry_price=100.0, quantity=10, take_profit_pct=0.20)
+
+    await tracker.check_all()
+
+    assert len(callback_calls) == 1
+    assert callback_calls[0][0] == "MSFT"
+
+
+@pytest.mark.asyncio
+async def test_on_sell_callback_not_called_when_no_trigger(adapter, risk, order_mgr):
+    """Callback should NOT be called when no exit condition is met."""
+    adapter.fetch_positions = AsyncMock(
+        return_value=[
+            Position(
+                symbol="AAPL",
+                exchange="NASD",
+                quantity=10,
+                avg_price=150.0,
+                current_price=152.0,  # +1.3%, no trigger
+            ),
+        ]
+    )
+
+    callback_calls = []
+    tracker = PositionTracker(adapter, risk, order_mgr)
+    tracker.register_on_sell(lambda s, t: callback_calls.append((s, t)))
+    tracker.track("AAPL", entry_price=150.0, quantity=10, stop_loss_pct=0.08, take_profit_pct=0.20)
+
+    await tracker.check_all()
+
+    assert len(callback_calls) == 0
+
+
+@pytest.mark.asyncio
+async def test_multiple_on_sell_callbacks(adapter, risk, order_mgr):
+    """Multiple callbacks should all be invoked."""
+    from exchange.base import OrderResult
+
+    adapter.fetch_positions = AsyncMock(
+        return_value=[
+            Position(
+                symbol="AAPL",
+                exchange="NASD",
+                quantity=10,
+                avg_price=150.0,
+                current_price=140.0,
+            ),
+        ]
+    )
+    adapter.create_sell_order = AsyncMock(
+        return_value=OrderResult(
+            order_id="SL2",
+            symbol="AAPL",
+            side="SELL",
+            order_type="market",
+            quantity=10,
+            price=140.0,
+            status="filled",
+            filled_price=140.0,
+        )
+    )
+
+    calls_a = []
+    calls_b = []
+    tracker = PositionTracker(adapter, risk, order_mgr)
+    tracker.register_on_sell(lambda s, t: calls_a.append(s))
+    tracker.register_on_sell(lambda s, t: calls_b.append(s))
+    tracker.track("AAPL", entry_price=150.0, quantity=10, stop_loss_pct=0.05)
+
+    await tracker.check_all()
+
+    assert calls_a == ["AAPL"]
+    assert calls_b == ["AAPL"]
+
+
+@pytest.mark.asyncio
+async def test_on_sell_callback_error_does_not_block_other_callbacks(adapter, risk, order_mgr):
+    """One failing callback should not prevent others from running."""
+    from exchange.base import OrderResult
+
+    adapter.fetch_positions = AsyncMock(
+        return_value=[
+            Position(
+                symbol="AAPL",
+                exchange="NASD",
+                quantity=10,
+                avg_price=150.0,
+                current_price=140.0,
+            ),
+        ]
+    )
+    adapter.create_sell_order = AsyncMock(
+        return_value=OrderResult(
+            order_id="SL3",
+            symbol="AAPL",
+            side="SELL",
+            order_type="market",
+            quantity=10,
+            price=140.0,
+            status="filled",
+            filled_price=140.0,
+        )
+    )
+
+    calls = []
+    tracker = PositionTracker(adapter, risk, order_mgr)
+
+    def bad_callback(s: str, t: float) -> None:
+        raise ValueError("boom")
+
+    tracker.register_on_sell(bad_callback)
+    tracker.register_on_sell(lambda s, t: calls.append(s))
+    tracker.track("AAPL", entry_price=150.0, quantity=10, stop_loss_pct=0.05)
+
+    await tracker.check_all()
+
+    # Second callback should still run despite first one raising
+    assert calls == ["AAPL"]

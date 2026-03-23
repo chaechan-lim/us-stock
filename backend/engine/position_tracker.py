@@ -16,7 +16,7 @@ import logging
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
 from data.market_data_service import MarketDataService
 from engine.order_manager import OrderManager
@@ -70,10 +70,27 @@ class PositionTracker:
         self._session_factory = session_factory
         self._market = market
         self._tracked: dict[str, TrackedPosition] = {}
+        # Callbacks invoked after a sell is executed (STOCK-43).
+        # Signature: callback(symbol: str, sell_timestamp: float) -> None
+        # Used by EvaluationLoop to update sell cooldown on PositionTracker-
+        # triggered sells (stop-loss, take-profit, trailing stop).
+        self._on_sell_callbacks: list[Callable[[str, float], None]] = []
         # Initialize to negative cooldown so the first call always passes,
         # regardless of system uptime (time.monotonic() can be < cooldown
         # on fresh VMs or right after reboot).
         self._last_auto_recover: float = -self._AUTO_RECOVER_COOLDOWN
+
+    def register_on_sell(self, callback: Callable[[str, float], None]) -> None:
+        """Register a callback invoked after any sell execution.
+
+        STOCK-43: Allows EvaluationLoop to update its sell cooldown
+        when PositionTracker triggers a stop-loss / take-profit / trailing
+        stop sell, preventing immediate re-buy of the same symbol.
+
+        Args:
+            callback: Called with (symbol, sell_timestamp) after each sell.
+        """
+        self._on_sell_callbacks.append(callback)
 
     def track(
         self,
@@ -496,6 +513,14 @@ class PositionTracker:
             pnl = (fill_price - tracked.entry_price) * fill_qty
             self._risk.update_daily_pnl(pnl)
             self.untrack(tracked.symbol)
+
+            # STOCK-43: Notify listeners (e.g. EvaluationLoop sell cooldown)
+            sell_ts = time.time()
+            for cb in self._on_sell_callbacks:
+                try:
+                    cb(tracked.symbol, sell_ts)
+                except Exception as e:
+                    logger.warning("on_sell callback failed for %s: %s", tracked.symbol, e)
 
             if self._notification:
                 try:
