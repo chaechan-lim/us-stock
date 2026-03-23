@@ -117,8 +117,21 @@ async def _combined_summary(request: Request) -> dict:
     else:
         total_equity = krw_total + usd_total * _cached_usd_krw
 
-    # Available cash: KRW + USD converted to KRW
-    available_cash = krw_available + usd_available * _cached_usd_krw
+    # STOCK-42: Available cash — prevent double-counting in 통합증거금 accounts.
+    # In 통합증거금, US adapter's frcr_ord_psbl_amt1 (stored as _full_available_usd)
+    # already includes KRW auto-conversion. Adding krw_available on top would
+    # double-count the same cash pool. Use _full_available_usd * rate directly.
+    full_available_usd = getattr(adapter, "_full_available_usd", 0) if adapter else 0
+    if full_available_usd > 0 and full_us_usd > 0:
+        # 통합증거금 mode: US available already includes KRW conversion
+        available_cash = full_available_usd * _cached_usd_krw
+    else:
+        # Fallback: separate accounts, sum KRW + USD
+        available_cash = krw_available + usd_available * _cached_usd_krw
+
+    # Safety cap: available_cash should never exceed total_equity
+    if available_cash > total_equity:
+        available_cash = total_equity
 
     all_positions = kr_positions + us_positions
     total_unrealized_pnl_krw = sum(p.unrealized_pnl for p in kr_positions)

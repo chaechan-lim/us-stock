@@ -28,6 +28,8 @@ def _make_app(
     tot_asst_krw: float | None = None,
     last_exchange_rate: float = 1400.0,
     adapter_exchange_rate: float = 0.0,  # from _fetch_exchange_rate
+    full_account_usd: float = 0,
+    full_available_usd: float = 0,
 ) -> FastAPI:
     """Create test app with configurable mock state."""
     app = FastAPI()
@@ -41,7 +43,8 @@ def _make_app(
     us_adapter.fetch_positions = AsyncMock(return_value=us_positions or [])
     us_adapter._tot_asst_krw = tot_asst_krw
     us_adapter._last_exchange_rate = last_exchange_rate
-    us_adapter._full_account_usd = 0
+    us_adapter._full_account_usd = full_account_usd
+    us_adapter._full_available_usd = full_available_usd
 
     async def _mock_rate():
         return adapter_exchange_rate
@@ -298,6 +301,7 @@ class TestResponseStructure:
         us_adapter._tot_asst_krw = None
         us_adapter._last_exchange_rate = 1400.0
         us_adapter._full_account_usd = 0
+        us_adapter._full_available_usd = 0
 
         async def _mock_rate():
             return 1400.0
@@ -313,3 +317,103 @@ class TestResponseStructure:
         data = client.get("/api/v1/portfolio/summary").json()
         # total_equity = 0 (kr) + 5000 * 1400 = 7_000_000
         assert data["total_equity"] == 5000 * 1400
+
+
+class TestUnifiedMarginAvailableCash:
+    """STOCK-42: available_cash must not double-count KRW in 통합증거금 accounts.
+
+    In 통합증거금 mode, frcr_ord_psbl_amt1 already includes KRW auto-conversion.
+    Adding krw_available on top would double-count the same cash pool.
+    """
+
+    def test_unified_margin_uses_full_available_usd(self):
+        """통합증거금: available_cash = _full_available_usd * rate (no KR double-count)."""
+        kr_bal = Balance(currency="KRW", total=10_000_000, available=8_000_000, locked=2_000_000)
+        us_bal = Balance(currency="USD", total=5000, available=3000, locked=2000)
+        # full_available_usd=9000 means frcr_ord_psbl_amt1 includes KRW conversion
+        # full_account_usd=11000 triggers 통합증거금 path for total_equity
+        app = _make_app(
+            kr_balance=kr_bal,
+            us_balance=us_bal,
+            last_exchange_rate=1400.0,
+            full_account_usd=11000,
+            full_available_usd=9000,
+        )
+        client = TestClient(app)
+        data = client.get("/api/v1/portfolio/summary").json()
+        # available_cash = 9000 * 1400 = 12_600_000
+        # NOT: 8_000_000 + 3000 * 1400 = 12_200_000 (double-counting)
+        expected = 9000 * 1400
+        assert data["available_cash"] == expected
+
+    def test_unified_margin_no_double_count(self):
+        """Simulates the reported bug: available_cash should NOT exceed total_equity."""
+        # Real-world scenario from bug report:
+        # total_equity: ~18.8M, available_cash was ~20.8M (double-counted)
+        kr_bal = Balance(currency="KRW", total=6_000_000, available=5_000_000, locked=1_000_000)
+        us_bal = Balance(currency="USD", total=9000, available=7000, locked=2000)
+        # US adapter's frcr_ord_psbl_amt1 already includes KRW auto-conversion
+        # full_available_usd = 10 (uncapped buying power in USD)
+        # full_account_usd = 12 (buying power + positions)
+        app = _make_app(
+            kr_balance=kr_bal,
+            us_balance=us_bal,
+            last_exchange_rate=1450.0,
+            full_account_usd=12000,
+            full_available_usd=10000,
+        )
+        client = TestClient(app)
+        data = client.get("/api/v1/portfolio/summary").json()
+        assert data["available_cash"] <= data["total_equity"]
+
+    def test_available_cash_capped_at_total_equity(self):
+        """Safety cap: available_cash must never exceed total_equity."""
+        kr_bal = Balance(currency="KRW", total=1_000_000, available=500_000, locked=500_000)
+        us_bal = Balance(currency="USD", total=2000, available=1500, locked=500)
+        # Extreme case: full_available_usd is very large
+        app = _make_app(
+            kr_balance=kr_bal,
+            us_balance=us_bal,
+            last_exchange_rate=1400.0,
+            full_account_usd=5000,
+            full_available_usd=15000,  # artificially high
+        )
+        client = TestClient(app)
+        data = client.get("/api/v1/portfolio/summary").json()
+        assert data["available_cash"] <= data["total_equity"]
+
+    def test_fallback_path_unchanged(self):
+        """When full_available_usd=0, fallback to krw_available + usd_available * rate."""
+        kr_bal = Balance(currency="KRW", total=5_000_000, available=3_000_000, locked=2_000_000)
+        us_bal = Balance(currency="USD", total=5000, available=3000, locked=2000)
+        app = _make_app(
+            kr_balance=kr_bal,
+            us_balance=us_bal,
+            last_exchange_rate=1400.0,
+            full_account_usd=0,
+            full_available_usd=0,
+        )
+        client = TestClient(app)
+        data = client.get("/api/v1/portfolio/summary").json()
+        # Fallback: 3_000_000 + 3000 * 1400 = 7_200_000
+        expected = 3_000_000 + 3000 * 1400
+        assert data["available_cash"] == expected
+
+    def test_fallback_when_no_full_us_usd(self):
+        """When full_account_usd=0 but full_available_usd>0, still use fallback."""
+        kr_bal = Balance(currency="KRW", total=5_000_000, available=3_000_000, locked=2_000_000)
+        us_bal = Balance(currency="USD", total=5000, available=3000, locked=2000)
+        # full_available_usd is set but full_account_usd (full_us_usd) is 0
+        # => not in 통합증거금 mode, so fallback path should be used
+        app = _make_app(
+            kr_balance=kr_bal,
+            us_balance=us_bal,
+            last_exchange_rate=1400.0,
+            full_account_usd=0,
+            full_available_usd=9000,
+        )
+        client = TestClient(app)
+        data = client.get("/api/v1/portfolio/summary").json()
+        # Fallback: 3_000_000 + 3000 * 1400 = 7_200_000
+        expected = 3_000_000 + 3000 * 1400
+        assert data["available_cash"] == expected

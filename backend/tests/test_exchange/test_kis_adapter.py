@@ -292,6 +292,8 @@ class TestFetchBalance:
         # invested should be positive (there are real positions)
         invested = balance.total - balance.available
         assert invested > 0
+        # STOCK-42: _full_available_usd stores uncapped frcr_ord_psbl_amt1
+        assert adapter._full_available_usd == pytest.approx(9188.26, rel=1e-3)
 
     @pytest.mark.asyncio
     async def test_normal_balance_not_capped(self, adapter):
@@ -318,3 +320,5 @@ class TestFetchBalance:
         assert balance.total == pytest.approx(total, rel=1e-3)
         assert balance.available == 5000.0  # not capped
         assert balance.available < balance.total
+        # STOCK-42: _full_available_usd stores uncapped frcr_ord_psbl_amt1
+        assert adapter._full_available_usd == 5000.0

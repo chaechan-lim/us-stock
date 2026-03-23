@@ -295,6 +295,10 @@ class KISAdapter(ExchangeAdapter):
         # frcr_ord_psbl_amt1 includes KRW auto-conversion, reflecting the full
         # account capacity (통합증거금). Used by portfolio summary for accurate total.
         self._full_account_usd = available + position_value
+        # STOCK-42: Store uncapped frcr_ord_psbl_amt1 for available_cash calc.
+        # In 통합증거금 accounts, this already includes KRW auto-conversion,
+        # so portfolio.py should use this directly instead of summing KR+US available.
+        self._full_available_usd = available
 
         # 4. Total: use present-balance total if available, else fallback
         if tot_asst_krw > 0:
