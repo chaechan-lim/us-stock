@@ -1,0 +1,71 @@
+# US Stock Trading - nginx reverse proxy configuration
+# Install: sudo cp deploy/nginx/us-stock /etc/nginx/sites-available/us-stock
+#          sudo ln -sf /etc/nginx/sites-available/us-stock /etc/nginx/sites-enabled/us-stock
+# Reload:  sudo nginx -t && sudo systemctl reload nginx
+#
+# Port 8443: HTTPS reverse proxy (shared SSL cert with coin project)
+# Backend:  localhost:8001 (FastAPI/uvicorn)
+# Frontend: localhost:3001 (npx serve)
+
+server {
+    listen 8443 ssl;
+    server_name _;
+
+    # SSL certificates (shared with coin project)
+    ssl_certificate     /etc/nginx/ssl/selfsigned.crt;
+    ssl_certificate_key /etc/nginx/ssl/selfsigned.key;
+
+    # --- HTTP -> HTTPS auto-redirect on SSL port ---
+    # When a plain HTTP request hits an SSL port, nginx returns status 497.
+    # This directive catches that error and redirects to HTTPS.
+    error_page 497 =301 https://$host:$server_port$request_uri;
+
+    # Frontend (React SPA)
+    location / {
+        proxy_pass http://127.0.0.1:3001;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    # Backend API
+    location /api/ {
+        proxy_pass http://127.0.0.1:8001;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # WebSocket support for API endpoints
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+    }
+
+    # WebSocket endpoints
+    location /ws/ {
+        proxy_pass http://127.0.0.1:8001;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_read_timeout 86400;
+    }
+
+    # Health check (direct to backend)
+    location /health {
+        proxy_pass http://127.0.0.1:8001;
+    }
+
+    # MCP server endpoint
+    location /mcp/ {
+        proxy_pass http://127.0.0.1:8001;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
