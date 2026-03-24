@@ -1,6 +1,7 @@
 """Tests for Evaluation Loop."""
 
 import logging
+import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pandas as pd
@@ -3517,7 +3518,16 @@ class TestSellCooldownKRMarket:
 # ---------------------------------------------------------------------------
 
 class TestAntiWhipsawDefaults:
-    """STOCK-47: Verify default values for anti-whipsaw parameters."""
+    """STOCK-47: Verify default values for anti-whipsaw parameters.
+
+    These tests validate the compile-time constants set in EvaluationLoop.__init__.
+    The values are intentionally NOT loaded from strategies.yaml (the YAML config
+    only applies to strategy weights/params, not evaluation-loop internals).
+
+    TODO: If YAML config loading is ever wired up for these constants via
+    StrategyConfigLoader.get_anti_whipsaw_config(), update these tests to
+    verify that YAML values override the hardcoded __init__ defaults.
+    """
 
     def test_min_hold_secs_default(self, eval_loop):
         """_min_hold_secs should be 4 hours (14400 seconds)."""
@@ -3555,7 +3565,6 @@ class TestAntiWhipsawDefaults:
 
     def test_check_min_hold_disabled_when_zero(self, eval_loop):
         """_check_min_hold returns True when _min_hold_secs=0 (disabled)."""
-        import time
 
         eval_loop._min_hold_secs = 0
         tracked = MagicMock()
@@ -3567,7 +3576,6 @@ class TestAntiWhipsawDefaults:
 
     def test_check_min_hold_held_long_enough(self, eval_loop):
         """_check_min_hold returns True when position held > 4 hours."""
-        import time
 
         tracked = MagicMock()
         tracked.tracked_at = time.time() - 5 * 3600  # 5h ago
@@ -3578,7 +3586,6 @@ class TestAntiWhipsawDefaults:
 
     def test_check_min_hold_too_short(self, eval_loop):
         """_check_min_hold returns False when position held < 4 hours."""
-        import time
 
         tracked = MagicMock()
         tracked.tracked_at = time.time() - 2 * 3600  # 2h ago
@@ -3603,14 +3610,12 @@ class TestStopLossCounter:
 
     def test_register_sell_cooldown_is_loss_false_no_history(self, eval_loop):
         """register_sell_cooldown with is_loss=False should NOT record loss history."""
-        import time
 
         eval_loop.register_sell_cooldown("AAPL", time.time(), is_loss=False)
         assert "AAPL" not in eval_loop._loss_sell_history
 
     def test_register_sell_cooldown_is_loss_true_records(self, eval_loop):
         """register_sell_cooldown with is_loss=True should record in _loss_sell_history."""
-        import time
 
         ts = time.time()
         eval_loop.register_sell_cooldown("AAPL", ts, is_loss=True)
@@ -3620,7 +3625,6 @@ class TestStopLossCounter:
 
     def test_multiple_loss_sells_accumulated(self, eval_loop):
         """Multiple loss sells for same symbol should accumulate in history."""
-        import time
 
         now = time.time()
         eval_loop.register_sell_cooldown("AAPL", now - 86400, is_loss=True)
@@ -3630,7 +3634,6 @@ class TestStopLossCounter:
 
     def test_loss_history_prunes_old_entries(self, eval_loop):
         """Entries older than 7 days should be pruned when new loss is recorded."""
-        import time
 
         now = time.time()
         old_ts = now - 8 * 86400  # 8 days ago
@@ -3642,9 +3645,26 @@ class TestStopLossCounter:
         assert len(history) == 1
         assert history[0] == now
 
+    def test_loss_history_boundary_exactly_7_days(self, eval_loop):
+        """Entry at exactly 7 days uses strict > comparison, so it is pruned.
+
+        The implementation uses ``ts > cutoff`` (strict greater-than), meaning
+        a sell at exactly 7 * 86400 seconds ago equals the cutoff and is NOT
+        counted as recent. This test documents that boundary semantics.
+        """
+        now = time.time()
+        exactly_7d = now - 7 * 86400  # exactly on the boundary
+        eval_loop._loss_sell_history["AAPL"] = [exactly_7d]
+
+        eval_loop.register_sell_cooldown("AAPL", now, is_loss=True)
+        # exactly_7d == cutoff, so ts > cutoff is False → entry is pruned
+        # Only the new entry (now) survives
+        history = eval_loop._loss_sell_history["AAPL"]
+        assert len(history) == 1
+        assert history[0] == now
+
     def test_loss_history_default_is_not_loss(self, eval_loop):
         """register_sell_cooldown without is_loss kwarg defaults to False."""
-        import time
 
         # Call without keyword to verify default is False
         eval_loop.register_sell_cooldown("MSFT", time.time())
@@ -3652,7 +3672,6 @@ class TestStopLossCounter:
 
     def test_loss_history_kr_market(self):
         """KR market symbols should track loss sells correctly."""
-        import time
         from data.indicator_service import IndicatorService
         from strategies.combiner import SignalCombiner
 
@@ -3673,7 +3692,6 @@ class TestStopLossCounter:
 
     def test_different_symbols_independent(self, eval_loop):
         """Loss sells on one symbol should not affect another symbol's counter."""
-        import time
 
         now = time.time()
         eval_loop.register_sell_cooldown("AAPL", now, is_loss=True)
@@ -3684,7 +3702,6 @@ class TestStopLossCounter:
 
     def test_cooldown_still_registered_when_is_loss_true(self, eval_loop):
         """is_loss=True should ALSO register the normal sell cooldown."""
-        import time
 
         ts = time.time()
         eval_loop.register_sell_cooldown("AAPL", ts, is_loss=True)
@@ -3778,7 +3795,6 @@ class TestMinimumHoldPeriod:
         self, mock_adapter, mock_market_data
     ):
         """position_cleanup SELL blocked if held < 4h (not hard SL)."""
-        import time
 
         loop = self._make_full_loop(
             mock_adapter, mock_market_data,
@@ -3797,7 +3813,6 @@ class TestMinimumHoldPeriod:
         self, mock_adapter, mock_market_data
     ):
         """position_cleanup SELL fires after 4h min hold period."""
-        import time
 
         loop = self._make_full_loop(
             mock_adapter, mock_market_data,
@@ -3816,7 +3831,6 @@ class TestMinimumHoldPeriod:
         self, mock_adapter, mock_market_data
     ):
         """Hard SL (-7%+) bypasses min hold in position_cleanup path."""
-        import time
 
         loop = self._make_full_loop(
             mock_adapter, mock_market_data,
@@ -3835,7 +3849,6 @@ class TestMinimumHoldPeriod:
         self, mock_adapter, mock_market_data
     ):
         """Strategy SELL blocked if held < 4h and loss not hard SL."""
-        import time
 
         loop = self._make_full_loop(
             mock_adapter, mock_market_data,
@@ -3854,7 +3867,6 @@ class TestMinimumHoldPeriod:
         self, mock_adapter, mock_market_data
     ):
         """Strategy SELL executes after 4h min hold period."""
-        import time
 
         loop = self._make_full_loop(
             mock_adapter, mock_market_data,
@@ -3873,7 +3885,6 @@ class TestMinimumHoldPeriod:
         self, mock_adapter, mock_market_data
     ):
         """Strategy SELL with hard SL (-7%+) bypasses min hold check."""
-        import time
 
         loop = self._make_full_loop(
             mock_adapter, mock_market_data,
@@ -3892,7 +3903,6 @@ class TestMinimumHoldPeriod:
         self, mock_adapter, mock_market_data
     ):
         """profit_protection sells bypass min hold check (profit_protection exempt)."""
-        import time
 
         loop = self._make_full_loop(
             mock_adapter, mock_market_data,
@@ -3980,7 +3990,6 @@ class TestWhipsawCounter:
         self, mock_adapter, mock_market_data, mock_registry
     ):
         """BUY should be blocked after 2 loss sells in 7 days."""
-        import time
 
         loop = self._make_loop(mock_adapter, mock_market_data, mock_registry)
         now = time.time()
@@ -4003,7 +4012,6 @@ class TestWhipsawCounter:
         self, mock_adapter, mock_market_data, mock_registry
     ):
         """BUY should be allowed when only 1 loss sell in 7 days (below max=2)."""
-        import time
 
         loop = self._make_loop(mock_adapter, mock_market_data, mock_registry)
         now = time.time()
@@ -4030,7 +4038,6 @@ class TestWhipsawCounter:
         self, mock_adapter, mock_market_data, mock_registry
     ):
         """BUY should be allowed when all loss sells are older than 7 days."""
-        import time
 
         loop = self._make_loop(mock_adapter, mock_market_data, mock_registry)
         now = time.time()
@@ -4055,7 +4062,6 @@ class TestWhipsawCounter:
 
     async def test_buy_blocked_kr_market(self):
         """Whipsaw counter should work for KR market symbols."""
-        import time
         from data.indicator_service import IndicatorService
         from strategies.combiner import SignalCombiner
 
@@ -4113,7 +4119,6 @@ class TestWhipsawCounter:
         self, mock_adapter, mock_market_data, mock_registry
     ):
         """_max_loss_sells should be configurable per loop instance."""
-        import time
 
         loop = self._make_loop(mock_adapter, mock_market_data, mock_registry)
         loop._max_loss_sells = 3  # Raise threshold to 3
@@ -4142,7 +4147,6 @@ class TestWhipsawCounter:
         self, mock_adapter, mock_market_data, mock_registry
     ):
         """Loss sells on TSLA should not block BUY on AAPL."""
-        import time
 
         loop = self._make_loop(mock_adapter, mock_market_data, mock_registry)
         now = time.time()
