@@ -101,7 +101,7 @@ class KRScreener:
         self,
         max_per_source: int = 20,
         max_total: int = 60,
-        min_market_cap: int = 500_000_000_000,  # 5000억원
+        min_market_cap: int = 500_000_000_000,  # 5000억원 (configurable)
         min_avg_volume: int = 100_000,
     ):
         self._max_per_source = max_per_source
@@ -109,24 +109,43 @@ class KRScreener:
         self._min_market_cap = min_market_cap
         self._min_avg_volume = min_avg_volume
 
-    def screen(self, **kwargs) -> KRScreenResult:
+    def screen(
+        self,
+        dynamic_symbols: list[str] | None = None,
+        **kwargs,
+    ) -> KRScreenResult:
         """Screen Korean stocks from curated universe using yfinance data.
 
-        Accepts **kwargs for backward compatibility (date, markets are ignored).
+        Args:
+            dynamic_symbols: Optional list of dynamically discovered symbols
+                (e.g. from KRUniverseExpander / KIS ranking APIs) to include
+                alongside the curated seed list.
+            **kwargs: Accepted for backward compatibility (date, markets ignored).
+
+        The curated list serves as a seed/baseline. Dynamic symbols from
+        KRUniverseExpander are merged in so the scanner benefits from both
+        the curated large-caps and newly discovered opportunities.
         """
         result = KRScreenResult()
 
-        # Source 1: Curated large-caps (always included)
+        # Source 1: Curated large-caps (seed / baseline — always included)
         curated = [s[0] for s in _KR_UNIVERSE]
         result.sources["curated"] = curated
 
-        # Source 2: yfinance screening (filter by market cap + volume)
-        screened = self._screen_by_yfinance(curated)
+        # Source 2: Dynamic symbols from KRUniverseExpander / KIS ranking
+        dynamic = list(dynamic_symbols) if dynamic_symbols else []
+        if dynamic:
+            result.sources["dynamic"] = dynamic
+
+        # Source 3: yfinance screening (filter by market cap + volume)
+        # Screen over union of seed + dynamic to apply quality filter
+        all_candidates = list(dict.fromkeys(curated + dynamic))
+        screened = self._screen_by_yfinance(all_candidates)
         result.sources["yfinance_filtered"] = screened
 
-        # Combine: screened first (quality-filtered), then remaining curated
-        seen = set()
-        combined = []
+        # Combine: screened first (quality-filtered), then curated, then dynamic
+        seen: set[str] = set()
+        combined: list[str] = []
         for s in screened:
             if s not in seen:
                 seen.add(s)
@@ -135,8 +154,12 @@ class KRScreener:
             if s not in seen:
                 seen.add(s)
                 combined.append(s)
+        for s in dynamic:
+            if s not in seen:
+                seen.add(s)
+                combined.append(s)
 
-        result.symbols = combined[:self._max_total]
+        result.symbols = combined[: self._max_total]
         result.total_discovered = len(combined)
         return result
 

@@ -1,9 +1,8 @@
 """Tests for Korean stock screener (yfinance-based)."""
 
-import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
-from scanner.kr_screener import KRScreener, _KR_UNIVERSE, KRScreenResult
+from scanner.kr_screener import _KR_UNIVERSE, KRScreener, KRScreenResult
 
 
 class TestKRScreener:
@@ -87,3 +86,50 @@ class TestKRScreener:
         with patch.object(s, "_screen_by_yfinance", return_value=[]):
             result = s.screen(date="20260309", markets=["KOSPI"])
             assert isinstance(result, KRScreenResult)
+
+    def test_screen_with_dynamic_symbols(self):
+        """Dynamic symbols are included in screen result."""
+        s = KRScreener()
+        with patch.object(s, "_screen_by_yfinance", return_value=[]):
+            result = s.screen(dynamic_symbols=["111111", "222222"])
+            assert "111111" in result.symbols
+            assert "222222" in result.symbols
+            assert "dynamic" in result.sources
+
+    def test_screen_dynamic_symbols_deduplicates(self):
+        """Dynamic symbols that overlap with curated list appear only once."""
+        s = KRScreener()
+        with patch.object(s, "_screen_by_yfinance", return_value=[]):
+            # 005930 is in curated AND dynamic
+            result = s.screen(dynamic_symbols=["005930", "111111"])
+            assert result.symbols.count("005930") == 1
+
+    def test_screen_dynamic_symbols_added_to_candidates(self):
+        """yfinance screening runs over curated + dynamic symbols."""
+        s = KRScreener()
+        screened_symbols = []
+
+        def capture_screen(symbols):
+            screened_symbols.extend(symbols)
+            return []
+
+        with patch.object(s, "_screen_by_yfinance", side_effect=capture_screen):
+            s.screen(dynamic_symbols=["111111"])
+            # 111111 should be in the candidates passed to yfinance
+            assert "111111" in screened_symbols
+
+    def test_screen_no_dynamic_symbols(self):
+        """screen() without dynamic_symbols behaves as before."""
+        s = KRScreener()
+        with patch.object(s, "_screen_by_yfinance", return_value=[]):
+            result = s.screen()
+            assert "dynamic" not in result.sources
+            assert "005930" in result.symbols
+
+    def test_screen_dynamic_none_equals_empty(self):
+        """dynamic_symbols=None and omitted are equivalent."""
+        s = KRScreener()
+        with patch.object(s, "_screen_by_yfinance", return_value=[]):
+            result_none = s.screen(dynamic_symbols=None)
+            result_omit = s.screen()
+            assert result_none.symbols == result_omit.symbols
