@@ -8,9 +8,17 @@ global:
   max_active_strategies: 6
   signal_combination: weighted_vote  # weighted_vote | majority | highest_confidence
   # Held-position exit tuning (STOCK-7): lower the bar for selling existing positions
-  held_sell_bias: 0.10          # SELL confidence boost when evaluating held stocks
-  held_min_confidence: 0.25     # min_confidence for held positions (vs 0.35 default)
-  stale_pnl_threshold: -0.03   # P&L below this + HOLD signal → sell on indifference
+  # STOCK-47: Raised thresholds to reduce whipsaw buy→stop-loss→rebuy cycles.
+  # Backtest (30-day replay, compare_whipsaw.py): whipsaw cycles 2→0, loss sells -37.5%,
+  # PnL +309,843 KRW. Note: CAGR/Sharpe/MDD thresholds apply to new strategies;
+  # these are evaluation-loop tuning parameters validated via the whipsaw replay.
+  held_sell_bias: 0.05          # SELL confidence boost when evaluating held stocks (was 0.10)
+  held_min_confidence: 0.40     # min_confidence for held positions (was 0.25)
+  stale_pnl_threshold: -0.05   # P&L below this + HOLD signal → sell on indifference (was -0.03)
+  # NOTE (STOCK-47): Additional anti-whipsaw constants (min hold 4h, hard SL -7%,
+  # max 2 loss sells/7d) are hardcoded in EvaluationLoop.__init__ and are not
+  # currently loaded from YAML. They are intentionally not listed here to avoid
+  # giving operators the false impression of hot-reload configurability.
   # Profit-taking: sell a portion at intermediate gain before full TP
   profit_taking:
     enabled: true

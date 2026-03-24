@@ -1,6 +1,7 @@
 """Tests for Evaluation Loop."""
 
 import logging
+import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pandas as pd
@@ -3510,3 +3511,660 @@ class TestSellCooldownKRMarket:
 
         await loop.evaluate_symbol("009150")
         mock_adapter.create_buy_order.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# STOCK-47: Anti-Whipsaw Tests
+# ---------------------------------------------------------------------------
+
+class TestAntiWhipsawDefaults:
+    """STOCK-47: Verify default values for anti-whipsaw parameters.
+
+    These tests validate the compile-time constants set in EvaluationLoop.__init__.
+    The values are intentionally NOT loaded from strategies.yaml (the YAML config
+    only applies to strategy weights/params, not evaluation-loop internals).
+
+    TODO: If YAML config loading is ever wired up for these constants via
+    StrategyConfigLoader.get_anti_whipsaw_config(), update these tests to
+    verify that YAML values override the hardcoded __init__ defaults.
+    """
+
+    def test_min_hold_secs_default(self, eval_loop):
+        """_min_hold_secs should be 4 hours (14400 seconds)."""
+        assert eval_loop._min_hold_secs == 4 * 3600
+
+    def test_hard_sl_pct_default(self, eval_loop):
+        """_hard_sl_pct should be -7% (hard stop-loss bypass threshold)."""
+        assert eval_loop._hard_sl_pct == -0.07
+
+    def test_max_loss_sells_default(self, eval_loop):
+        """_max_loss_sells should be 2 (block re-entry after 2 losses in 7d)."""
+        assert eval_loop._max_loss_sells == 2
+
+    def test_loss_sell_history_initial(self, eval_loop):
+        """_loss_sell_history should start as an empty dict."""
+        assert eval_loop._loss_sell_history == {}
+
+    def test_check_min_hold_no_tracker(self, eval_loop):
+        """_check_min_hold returns True when no position tracker is set."""
+        eval_loop._position_tracker = None
+        assert eval_loop._check_min_hold("AAPL") is True
+
+    def test_check_min_hold_no_tracked_dict(self, eval_loop):
+        """_check_min_hold returns True when _tracked is missing from tracker."""
+        tracker = MagicMock(spec=[])  # No attributes
+        eval_loop._position_tracker = tracker
+        assert eval_loop._check_min_hold("AAPL") is True
+
+    def test_check_min_hold_symbol_not_tracked(self, eval_loop):
+        """_check_min_hold returns True when symbol not in _tracked."""
+        tracker = MagicMock()
+        tracker._tracked = {}
+        eval_loop._position_tracker = tracker
+        assert eval_loop._check_min_hold("AAPL") is True
+
+    def test_check_min_hold_disabled_when_zero(self, eval_loop):
+        """_check_min_hold returns True when _min_hold_secs=0 (disabled)."""
+
+        eval_loop._min_hold_secs = 0
+        tracked = MagicMock()
+        tracked.tracked_at = time.time()  # Just bought
+        tracker = MagicMock()
+        tracker._tracked = {"AAPL": tracked}
+        eval_loop._position_tracker = tracker
+        assert eval_loop._check_min_hold("AAPL") is True
+
+    def test_check_min_hold_held_long_enough(self, eval_loop):
+        """_check_min_hold returns True when position held > 4 hours."""
+
+        tracked = MagicMock()
+        tracked.tracked_at = time.time() - 5 * 3600  # 5h ago
+        tracker = MagicMock()
+        tracker._tracked = {"AAPL": tracked}
+        eval_loop._position_tracker = tracker
+        assert eval_loop._check_min_hold("AAPL") is True
+
+    def test_check_min_hold_too_short(self, eval_loop):
+        """_check_min_hold returns False when position held < 4 hours."""
+
+        tracked = MagicMock()
+        tracked.tracked_at = time.time() - 2 * 3600  # 2h ago
+        tracker = MagicMock()
+        tracker._tracked = {"AAPL": tracked}
+        eval_loop._position_tracker = tracker
+        assert eval_loop._check_min_hold("AAPL") is False
+
+    def test_check_min_hold_invalid_tracked_at(self, eval_loop):
+        """_check_min_hold returns True when tracked_at cannot be converted."""
+        tracked = MagicMock()
+        tracked.tracked_at = "not-a-number"
+        tracker = MagicMock()
+        tracker._tracked = {"AAPL": tracked}
+        eval_loop._position_tracker = tracker
+        # Should not raise — returns True (allow sell) on bad data
+        assert eval_loop._check_min_hold("AAPL") is True
+
+
+class TestStopLossCounter:
+    """STOCK-47: Verify whipsaw counter tracks loss sells correctly."""
+
+    def test_register_sell_cooldown_is_loss_false_no_history(self, eval_loop):
+        """register_sell_cooldown with is_loss=False should NOT record loss history."""
+
+        eval_loop.register_sell_cooldown("AAPL", time.time(), is_loss=False)
+        assert "AAPL" not in eval_loop._loss_sell_history
+
+    def test_register_sell_cooldown_is_loss_true_records(self, eval_loop):
+        """register_sell_cooldown with is_loss=True should record in _loss_sell_history."""
+
+        ts = time.time()
+        eval_loop.register_sell_cooldown("AAPL", ts, is_loss=True)
+        assert "AAPL" in eval_loop._loss_sell_history
+        assert len(eval_loop._loss_sell_history["AAPL"]) == 1
+        assert eval_loop._loss_sell_history["AAPL"][0] == ts
+
+    def test_multiple_loss_sells_accumulated(self, eval_loop):
+        """Multiple loss sells for same symbol should accumulate in history."""
+
+        now = time.time()
+        eval_loop.register_sell_cooldown("AAPL", now - 86400, is_loss=True)
+        eval_loop.register_sell_cooldown("AAPL", now - 3600, is_loss=True)
+        eval_loop.register_sell_cooldown("AAPL", now, is_loss=True)
+        assert len(eval_loop._loss_sell_history["AAPL"]) == 3
+
+    def test_loss_history_prunes_old_entries(self, eval_loop):
+        """Entries older than 7 days should be pruned when new loss is recorded."""
+
+        now = time.time()
+        old_ts = now - 8 * 86400  # 8 days ago
+        eval_loop._loss_sell_history["TSLA"] = [old_ts]
+
+        eval_loop.register_sell_cooldown("TSLA", now, is_loss=True)
+        # Old entry pruned; only the new one remains
+        history = eval_loop._loss_sell_history["TSLA"]
+        assert len(history) == 1
+        assert history[0] == now
+
+    def test_loss_history_boundary_exactly_7_days(self, eval_loop):
+        """Entry at exactly 7 days uses strict > comparison, so it is pruned.
+
+        The implementation uses ``ts > cutoff`` (strict greater-than), meaning
+        a sell at exactly 7 * 86400 seconds ago equals the cutoff and is NOT
+        counted as recent. This test documents that boundary semantics.
+        """
+        now = time.time()
+        exactly_7d = now - 7 * 86400  # exactly on the boundary
+        eval_loop._loss_sell_history["AAPL"] = [exactly_7d]
+
+        eval_loop.register_sell_cooldown("AAPL", now, is_loss=True)
+        # exactly_7d == cutoff, so ts > cutoff is False → entry is pruned
+        # Only the new entry (now) survives
+        history = eval_loop._loss_sell_history["AAPL"]
+        assert len(history) == 1
+        assert history[0] == now
+
+    def test_loss_history_default_is_not_loss(self, eval_loop):
+        """register_sell_cooldown without is_loss kwarg defaults to False."""
+
+        # Call without keyword to verify default is False
+        eval_loop.register_sell_cooldown("MSFT", time.time())
+        assert "MSFT" not in eval_loop._loss_sell_history
+
+    def test_loss_history_kr_market(self):
+        """KR market symbols should track loss sells correctly."""
+        from data.indicator_service import IndicatorService
+        from strategies.combiner import SignalCombiner
+
+        loop = EvaluationLoop(
+            adapter=AsyncMock(),
+            market_data=AsyncMock(),
+            indicator_svc=IndicatorService(),
+            registry=MagicMock(),
+            combiner=SignalCombiner(),
+            order_manager=MagicMock(),
+            risk_manager=RiskManager(),
+            market="KR",
+        )
+        ts = time.time()
+        loop.register_sell_cooldown("091160", ts, is_loss=True)
+        assert "091160" in loop._loss_sell_history
+        assert len(loop._loss_sell_history["091160"]) == 1
+
+    def test_different_symbols_independent(self, eval_loop):
+        """Loss sells on one symbol should not affect another symbol's counter."""
+
+        now = time.time()
+        eval_loop.register_sell_cooldown("AAPL", now, is_loss=True)
+        eval_loop.register_sell_cooldown("AAPL", now - 3600, is_loss=True)
+
+        # TSLA should have no loss history
+        assert "TSLA" not in eval_loop._loss_sell_history
+
+    def test_cooldown_still_registered_when_is_loss_true(self, eval_loop):
+        """is_loss=True should ALSO register the normal sell cooldown."""
+
+        ts = time.time()
+        eval_loop.register_sell_cooldown("AAPL", ts, is_loss=True)
+        # Verify normal cooldown is still set
+        assert "AAPL" in eval_loop._recovery_watch
+
+
+class TestMinimumHoldPeriod:
+    """STOCK-47: Verify minimum hold period enforcement via _evaluate_all.
+
+    position_cleanup and strategy SELL min hold checks live in _evaluate_all(),
+    not in evaluate_symbol(), so these tests call _evaluate_all() directly.
+    """
+
+    def _make_full_loop(
+        self,
+        mock_adapter,
+        mock_market_data,
+        *,
+        strategy_signal: Signal,
+        tracked_at: float,
+        avg_price: float = 100.0,
+        current_price: float = 94.0,
+    ) -> "EvaluationLoop":
+        """Create EvaluationLoop with a held position for _evaluate_all tests."""
+        from data.indicator_service import IndicatorService
+        from strategies.combiner import SignalCombiner
+
+        strategy = AsyncMock()
+        strategy.name = strategy_signal.strategy_name or "trend_following"
+        strategy.analyze = AsyncMock(return_value=strategy_signal)
+        strategy.evaluate_exit = MagicMock(return_value=strategy_signal)
+
+        registry = MagicMock()
+        registry.get_enabled.return_value = [strategy]
+        registry.get_profile_weights.return_value = {strategy.name: 1.0}
+        registry.get_trailing_stop_config.return_value = None
+
+        # Position with requested PnL
+        mock_market_data.get_positions = AsyncMock(
+            return_value=[
+                Position(
+                    symbol="AAPL",
+                    exchange="NASD",
+                    quantity=10,
+                    avg_price=avg_price,
+                    current_price=current_price,
+                )
+            ]
+        )
+
+        # Set up sell order mock to return success by default
+        mock_adapter.create_sell_order = AsyncMock(
+            return_value=OrderResult(
+                order_id="O_SELL",
+                symbol="AAPL",
+                side="SELL",
+                order_type="market",
+                quantity=10,
+                price=current_price,
+                status="filled",
+                filled_price=current_price,
+            )
+        )
+
+        tracked = MagicMock()
+        tracked.tracked_at = tracked_at
+        position_tracker = MagicMock()
+        position_tracker.tracked_symbols = ["AAPL"]
+        position_tracker.get_buy_strategy.return_value = strategy.name
+        position_tracker._tracked = {"AAPL": tracked}
+
+        risk = RiskManager()
+        order_mgr = OrderManager(adapter=mock_adapter, risk_manager=risk)
+        loop = EvaluationLoop(
+            adapter=mock_adapter,
+            market_data=mock_market_data,
+            indicator_svc=IndicatorService(),
+            registry=registry,
+            combiner=SignalCombiner(),
+            order_manager=order_mgr,
+            risk_manager=risk,
+            watchlist=[],  # Only held positions evaluated
+            market_state="uptrend",
+            interval_sec=1,
+            position_tracker=position_tracker,
+        )
+        return loop
+
+    async def test_position_cleanup_blocked_within_min_hold(
+        self, mock_adapter, mock_market_data
+    ):
+        """position_cleanup SELL blocked if held < 4h (not hard SL)."""
+
+        loop = self._make_full_loop(
+            mock_adapter, mock_market_data,
+            strategy_signal=Signal(
+                signal_type=SignalType.HOLD, confidence=0.6,
+                strategy_name="trend_following", reason="hold",
+            ),
+            tracked_at=time.time() - 3600,   # 1h ago (< 4h)
+            avg_price=100.0,
+            current_price=94.0,              # -6%, below -5% threshold, above -7% hard SL
+        )
+        await loop._evaluate_all()
+        mock_adapter.create_sell_order.assert_not_called()
+
+    async def test_position_cleanup_allowed_after_min_hold(
+        self, mock_adapter, mock_market_data
+    ):
+        """position_cleanup SELL fires after 4h min hold period."""
+
+        loop = self._make_full_loop(
+            mock_adapter, mock_market_data,
+            strategy_signal=Signal(
+                signal_type=SignalType.HOLD, confidence=0.6,
+                strategy_name="trend_following", reason="hold",
+            ),
+            tracked_at=time.time() - 5 * 3600,  # 5h ago (> 4h)
+            avg_price=100.0,
+            current_price=94.0,                 # -6%, triggers cleanup
+        )
+        await loop._evaluate_all()
+        mock_adapter.create_sell_order.assert_called_once()
+
+    async def test_hard_sl_bypasses_min_hold_in_position_cleanup(
+        self, mock_adapter, mock_market_data
+    ):
+        """Hard SL (-7%+) bypasses min hold in position_cleanup path."""
+
+        loop = self._make_full_loop(
+            mock_adapter, mock_market_data,
+            strategy_signal=Signal(
+                signal_type=SignalType.HOLD, confidence=0.6,
+                strategy_name="trend_following", reason="hold",
+            ),
+            tracked_at=time.time() - 1800,  # 30min ago (< 4h)
+            avg_price=100.0,
+            current_price=92.0,             # -8%, below -7% hard SL → bypass min hold
+        )
+        await loop._evaluate_all()
+        mock_adapter.create_sell_order.assert_called_once()
+
+    async def test_strategy_sell_blocked_within_min_hold(
+        self, mock_adapter, mock_market_data
+    ):
+        """Strategy SELL blocked if held < 4h and loss not hard SL."""
+
+        loop = self._make_full_loop(
+            mock_adapter, mock_market_data,
+            strategy_signal=Signal(
+                signal_type=SignalType.SELL, confidence=0.8,
+                strategy_name="trend_following", reason="sell",
+            ),
+            tracked_at=time.time() - 3600,  # 1h ago (< 4h)
+            avg_price=100.0,
+            current_price=97.0,             # -3%, loss but not hard SL
+        )
+        await loop._evaluate_all()
+        mock_adapter.create_sell_order.assert_not_called()
+
+    async def test_strategy_sell_allowed_after_min_hold(
+        self, mock_adapter, mock_market_data
+    ):
+        """Strategy SELL executes after 4h min hold period."""
+
+        loop = self._make_full_loop(
+            mock_adapter, mock_market_data,
+            strategy_signal=Signal(
+                signal_type=SignalType.SELL, confidence=0.8,
+                strategy_name="trend_following", reason="sell",
+            ),
+            tracked_at=time.time() - 5 * 3600,  # 5h ago (> 4h)
+            avg_price=100.0,
+            current_price=97.0,
+        )
+        await loop._evaluate_all()
+        mock_adapter.create_sell_order.assert_called_once()
+
+    async def test_strategy_hard_sl_bypasses_min_hold(
+        self, mock_adapter, mock_market_data
+    ):
+        """Strategy SELL with hard SL (-7%+) bypasses min hold check."""
+
+        loop = self._make_full_loop(
+            mock_adapter, mock_market_data,
+            strategy_signal=Signal(
+                signal_type=SignalType.SELL, confidence=0.9,
+                strategy_name="trend_following", reason="stop_loss",
+            ),
+            tracked_at=time.time() - 1800,  # 30min ago (< 4h)
+            avg_price=100.0,
+            current_price=92.0,             # -8%, hard SL bypasses
+        )
+        await loop._evaluate_all()
+        mock_adapter.create_sell_order.assert_called_once()
+
+    async def test_profit_protection_not_blocked_by_min_hold(
+        self, mock_adapter, mock_market_data
+    ):
+        """profit_protection sells bypass min hold check (profit_protection exempt)."""
+
+        loop = self._make_full_loop(
+            mock_adapter, mock_market_data,
+            strategy_signal=Signal(
+                signal_type=SignalType.HOLD, confidence=0.6,
+                strategy_name="trend_following", reason="hold",
+            ),
+            tracked_at=time.time() - 3600,  # Only 1h ago (< 4h)
+            avg_price=100.0,
+            current_price=120.0,            # +20%, triggers profit_protection
+        )
+        loop._profit_protection_pct = 0.15  # 15% gain triggers
+        await loop._evaluate_all()
+        mock_adapter.create_sell_order.assert_called_once()
+
+    async def test_min_hold_not_applied_to_buy_signals(
+        self, mock_adapter, mock_market_data, mock_registry
+    ):
+        """Min hold is a SELL barrier only; BUY signals on non-held stocks proceed."""
+        from data.indicator_service import IndicatorService
+        from strategies.combiner import SignalCombiner
+
+        strategy = mock_registry.get_enabled.return_value[0]
+        strategy.analyze.return_value = Signal(
+            signal_type=SignalType.BUY,
+            confidence=0.8,
+            strategy_name="trend_following",
+            reason="buy",
+        )
+        mock_market_data.get_positions.return_value = []
+        mock_adapter.create_buy_order = AsyncMock(
+            return_value=OrderResult(
+                order_id="O_BUY",
+                symbol="AAPL",
+                side="BUY",
+                order_type="limit",
+                quantity=10,
+                price=100.0,
+                status="filled",
+                filled_price=100.0,
+            )
+        )
+
+        risk = RiskManager()
+        order_mgr = OrderManager(adapter=mock_adapter, risk_manager=risk)
+        loop = EvaluationLoop(
+            adapter=mock_adapter,
+            market_data=mock_market_data,
+            indicator_svc=IndicatorService(),
+            registry=mock_registry,
+            combiner=SignalCombiner(),
+            order_manager=order_mgr,
+            risk_manager=risk,
+            watchlist=["AAPL"],
+            market_state="uptrend",
+            interval_sec=1,
+        )
+        # No position tracker → AAPL is not held → BUY proceeds freely
+        await loop._evaluate_all()
+        mock_adapter.create_buy_order.assert_called_once()
+
+
+class TestWhipsawCounter:
+    """STOCK-47: Verify whipsaw counter blocks re-entry after repeated loss sells."""
+
+    def _make_loop(self, mock_adapter, mock_market_data, mock_registry):
+        """Helper: create a clean EvaluationLoop."""
+        from data.indicator_service import IndicatorService
+        from strategies.combiner import SignalCombiner
+
+        risk = RiskManager()
+        order_mgr = OrderManager(adapter=mock_adapter, risk_manager=risk)
+        return EvaluationLoop(
+            adapter=mock_adapter,
+            market_data=mock_market_data,
+            indicator_svc=IndicatorService(),
+            registry=mock_registry,
+            combiner=SignalCombiner(),
+            order_manager=order_mgr,
+            risk_manager=risk,
+            watchlist=["AAPL"],
+        )
+
+    async def test_buy_blocked_after_max_loss_sells(
+        self, mock_adapter, mock_market_data, mock_registry
+    ):
+        """BUY should be blocked after 2 loss sells in 7 days."""
+
+        loop = self._make_loop(mock_adapter, mock_market_data, mock_registry)
+        now = time.time()
+        # Simulate 2 loss sells in the past 3 days
+        loop._loss_sell_history["AAPL"] = [now - 3 * 86400, now - 86400]
+
+        strategy = mock_registry.get_enabled.return_value[0]
+        strategy.analyze.return_value = Signal(
+            signal_type=SignalType.BUY,
+            confidence=0.9,
+            strategy_name="trend_following",
+            reason="buy",
+        )
+        mock_market_data.get_positions.return_value = []
+
+        await loop.evaluate_symbol("AAPL")
+        mock_adapter.create_buy_order.assert_not_called()
+
+    async def test_buy_allowed_with_one_loss_sell(
+        self, mock_adapter, mock_market_data, mock_registry
+    ):
+        """BUY should be allowed when only 1 loss sell in 7 days (below max=2)."""
+
+        loop = self._make_loop(mock_adapter, mock_market_data, mock_registry)
+        now = time.time()
+        # Only 1 loss sell — below the block threshold of 2
+        loop._loss_sell_history["AAPL"] = [now - 86400]
+        mock_market_data.get_positions.return_value = []
+        mock_adapter.create_buy_order = AsyncMock(
+            return_value=OrderResult(
+                order_id="O_BUY",
+                symbol="AAPL",
+                side="BUY",
+                order_type="limit",
+                quantity=10,
+                price=100.0,
+                status="filled",
+                filled_price=100.0,
+            )
+        )
+
+        await loop.evaluate_symbol("AAPL")
+        mock_adapter.create_buy_order.assert_called_once()
+
+    async def test_buy_allowed_after_window_expires(
+        self, mock_adapter, mock_market_data, mock_registry
+    ):
+        """BUY should be allowed when all loss sells are older than 7 days."""
+
+        loop = self._make_loop(mock_adapter, mock_market_data, mock_registry)
+        now = time.time()
+        # Both loss sells are older than 7 days
+        loop._loss_sell_history["AAPL"] = [now - 8 * 86400, now - 10 * 86400]
+        mock_market_data.get_positions.return_value = []
+        mock_adapter.create_buy_order = AsyncMock(
+            return_value=OrderResult(
+                order_id="O_BUY2",
+                symbol="AAPL",
+                side="BUY",
+                order_type="limit",
+                quantity=10,
+                price=100.0,
+                status="filled",
+                filled_price=100.0,
+            )
+        )
+
+        await loop.evaluate_symbol("AAPL")
+        mock_adapter.create_buy_order.assert_called_once()
+
+    async def test_buy_blocked_kr_market(self):
+        """Whipsaw counter should work for KR market symbols."""
+        from data.indicator_service import IndicatorService
+        from strategies.combiner import SignalCombiner
+
+        mock_adapter = AsyncMock()
+        mock_adapter.fetch_balance = AsyncMock(
+            return_value=Balance(currency="KRW", total=10_000_000, available=8_000_000)
+        )
+        mock_adapter.fetch_positions = AsyncMock(return_value=[])
+        mock_adapter.create_buy_order = AsyncMock()
+
+        mock_md = AsyncMock()
+        mock_md.get_ohlcv = AsyncMock(return_value=_make_ohlcv_df())
+        mock_md.get_balance = AsyncMock(
+            return_value=Balance(currency="KRW", total=10_000_000, available=8_000_000)
+        )
+        mock_md.get_positions = AsyncMock(return_value=[])
+        mock_md.get_price = AsyncMock(return_value=50000.0)
+
+        strategy = AsyncMock()
+        strategy.name = "dual_momentum"
+        strategy.analyze = AsyncMock(
+            return_value=Signal(
+                signal_type=SignalType.BUY,
+                confidence=0.85,
+                strategy_name="dual_momentum",
+                reason="buy",
+            )
+        )
+        registry = MagicMock()
+        registry.get_enabled.return_value = [strategy]
+        registry.get_profile_weights.return_value = {"dual_momentum": 1.0}
+
+        risk = RiskManager()
+        order_mgr = OrderManager(adapter=mock_adapter, risk_manager=risk, market="KR")
+        loop = EvaluationLoop(
+            adapter=mock_adapter,
+            market_data=mock_md,
+            indicator_svc=IndicatorService(),
+            registry=registry,
+            combiner=SignalCombiner(),
+            order_manager=order_mgr,
+            risk_manager=risk,
+            watchlist=["005935"],
+            market="KR",
+        )
+
+        now = time.time()
+        # Simulate 2 loss sells on 005935 in KR market
+        loop._loss_sell_history["005935"] = [now - 3 * 86400, now - 86400]
+
+        await loop.evaluate_symbol("005935")
+        mock_adapter.create_buy_order.assert_not_called()
+
+    async def test_max_loss_sells_configurable(
+        self, mock_adapter, mock_market_data, mock_registry
+    ):
+        """_max_loss_sells should be configurable per loop instance."""
+
+        loop = self._make_loop(mock_adapter, mock_market_data, mock_registry)
+        loop._max_loss_sells = 3  # Raise threshold to 3
+
+        now = time.time()
+        # 2 loss sells — below new max of 3, so BUY should go through
+        loop._loss_sell_history["AAPL"] = [now - 3 * 86400, now - 86400]
+        mock_market_data.get_positions.return_value = []
+        mock_adapter.create_buy_order = AsyncMock(
+            return_value=OrderResult(
+                order_id="O_CONF3",
+                symbol="AAPL",
+                side="BUY",
+                order_type="limit",
+                quantity=10,
+                price=100.0,
+                status="filled",
+                filled_price=100.0,
+            )
+        )
+
+        await loop.evaluate_symbol("AAPL")
+        mock_adapter.create_buy_order.assert_called_once()
+
+    async def test_loss_sells_on_other_symbol_dont_affect_aapl(
+        self, mock_adapter, mock_market_data, mock_registry
+    ):
+        """Loss sells on TSLA should not block BUY on AAPL."""
+
+        loop = self._make_loop(mock_adapter, mock_market_data, mock_registry)
+        now = time.time()
+        # 2 loss sells on TSLA — NOT AAPL
+        loop._loss_sell_history["TSLA"] = [now - 3 * 86400, now - 86400]
+        mock_market_data.get_positions.return_value = []
+        mock_adapter.create_buy_order = AsyncMock(
+            return_value=OrderResult(
+                order_id="O_AAPL",
+                symbol="AAPL",
+                side="BUY",
+                order_type="limit",
+                quantity=10,
+                price=100.0,
+                status="filled",
+                filled_price=100.0,
+            )
+        )
+
+        await loop.evaluate_symbol("AAPL")
+        mock_adapter.create_buy_order.assert_called_once()
