@@ -408,7 +408,8 @@ class PositionTracker:
             price,
         )
 
-        order_type = "limit" if session != "regular" else "market"
+        # KIS overseas API only supports limit orders
+        order_type = "limit"
 
         order = await self._orders.place_sell(
             symbol=tracked.symbol,
@@ -491,8 +492,9 @@ class PositionTracker:
             price,
         )
 
-        # Extended hours: force limit order (market orders not supported)
-        order_type = "limit" if session != "regular" else "market"
+        # KIS overseas API only supports limit orders (ORD_DVSN="00")
+        # Market orders (ORD_DVSN="01") return APBK1269 error
+        order_type = "limit"
 
         order = await self._orders.place_sell(
             symbol=tracked.symbol,
