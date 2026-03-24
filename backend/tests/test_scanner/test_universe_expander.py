@@ -1,12 +1,19 @@
-"""Tests for UniverseExpander."""
+"""Tests for UniverseExpander and KRUniverseExpander."""
+
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from unittest.mock import patch, MagicMock, AsyncMock
 
-from scanner.universe_expander import UniverseExpander, UniverseResult
-from scanner.etf_universe import ETFUniverse, SectorETF
-from scanner.sector_analyzer import SectorAnalyzer
 from exchange.kis_adapter import RankedStock
+from exchange.kis_kr_adapter import KRRankedStock
+from scanner.etf_universe import ETFUniverse, SectorETF
+from scanner.universe_expander import (
+    KRUniverseExpander,
+    KRUniverseResult,
+    UniverseExpander,
+    UniverseResult,
+    _is_valid_kr_symbol,
+)
 
 
 @pytest.fixture
@@ -373,3 +380,250 @@ class TestExpand:
             existing_watchlist=["AAPL", "MSFT", "NVDA", "GOOGL", "AMZN", "META"],
         )
         assert len(result.symbols) <= 5
+
+
+# ---------------------------------------------------------------------------
+# KRUniverseExpander tests
+# ---------------------------------------------------------------------------
+
+
+class TestIsValidKRSymbol:
+    """Tests for _is_valid_kr_symbol helper."""
+
+    def test_valid_6digit_code(self):
+        assert _is_valid_kr_symbol("005930") is True
+        assert _is_valid_kr_symbol("000660") is True
+        assert _is_valid_kr_symbol("247540") is True
+
+    def test_rejects_non_numeric(self):
+        assert _is_valid_kr_symbol("AAPL") is False
+        assert _is_valid_kr_symbol("ABC123") is False
+
+    def test_rejects_wrong_length(self):
+        assert _is_valid_kr_symbol("05930") is False   # 5 digits
+        assert _is_valid_kr_symbol("0059300") is False  # 7 digits
+
+    def test_rejects_empty(self):
+        assert _is_valid_kr_symbol("") is False
+
+    def test_rejects_with_dot(self):
+        assert _is_valid_kr_symbol("005930.KS") is False
+
+
+class TestKRUniverseExpander:
+    """Tests for KRUniverseExpander."""
+
+    @pytest.fixture
+    def expander(self):
+        return KRUniverseExpander(max_total=80)
+
+    @pytest.mark.asyncio
+    async def test_expand_kr_includes_seed(self, expander):
+        """expand_kr always includes the curated seed list."""
+        result = await expander.expand_kr()
+        assert isinstance(result, KRUniverseResult)
+        assert "seed" in result.sources
+        # Samsung is in the seed
+        assert "005930" in result.symbols
+
+    @pytest.mark.asyncio
+    async def test_expand_kr_includes_watchlist(self, expander):
+        """expand_kr includes existing watchlist symbols."""
+        result = await expander.expand_kr(existing_watchlist=["005930", "000660"])
+        assert "watchlist" in result.sources
+        assert "005930" in result.symbols
+        assert "000660" in result.symbols
+
+    @pytest.mark.asyncio
+    async def test_expand_kr_no_kis_adapter(self, expander):
+        """Without KIS adapter, still returns seed symbols."""
+        result = await expander.expand_kr()
+        assert len(result.symbols) > 0
+        assert "kis_kr_ranking" not in result.sources
+
+    @pytest.mark.asyncio
+    async def test_expand_kr_respects_max_total(self):
+        """expand_kr limits symbols to max_total."""
+        expander = KRUniverseExpander(max_total=10)
+        result = await expander.expand_kr()
+        assert len(result.symbols) <= 10
+
+    @pytest.mark.asyncio
+    async def test_expand_kr_deduplicates(self, expander):
+        """Symbols appear only once even if in multiple sources."""
+        result = await expander.expand_kr(existing_watchlist=["005930"])
+        assert result.symbols.count("005930") == 1
+
+    @pytest.mark.asyncio
+    async def test_expand_kr_with_kis_adapter(self):
+        """expand_kr includes KIS domestic ranking results."""
+        mock_kis_kr = AsyncMock()
+        mock_kis_kr.fetch_volume_surge.return_value = [
+            KRRankedStock(symbol="035420", name="NAVER",
+                          exchange="KRX", source="kr_volume_surge"),
+        ]
+        mock_kis_kr.fetch_updown_rate.return_value = [
+            KRRankedStock(symbol="377300", name="카카오페이",
+                          exchange="KOSDAQ", source="kr_updown_up"),
+        ]
+        mock_kis_kr.fetch_new_highlow.return_value = []
+        mock_limiter = AsyncMock()
+
+        expander = KRUniverseExpander(
+            kis_kr_adapter=mock_kis_kr,
+            rate_limiter=mock_limiter,
+            max_total=80,
+        )
+        result = await expander.expand_kr()
+
+        assert "kis_kr_ranking" in result.sources
+        assert "035420" in result.symbols
+        assert "377300" in result.symbols
+
+    @pytest.mark.asyncio
+    async def test_expand_kr_exchange_map_from_seed(self, expander):
+        """Exchange map is populated from seed list."""
+        result = await expander.expand_kr()
+        assert "005930" in result.exchange_map
+        assert result.exchange_map["005930"] == "KRX"
+        assert "247540" in result.exchange_map
+        assert result.exchange_map["247540"] == "KOSDAQ"
+
+    @pytest.mark.asyncio
+    async def test_expand_kr_exchange_map_from_kis(self):
+        """Exchange map updated with KIS ranking discoveries."""
+        mock_kis_kr = AsyncMock()
+        mock_kis_kr.fetch_volume_surge.return_value = [
+            KRRankedStock(symbol="111111", exchange="KOSDAQ",
+                          source="kr_volume_surge"),
+        ]
+        mock_kis_kr.fetch_updown_rate.return_value = []
+        mock_kis_kr.fetch_new_highlow.return_value = []
+        mock_limiter = AsyncMock()
+
+        expander = KRUniverseExpander(
+            kis_kr_adapter=mock_kis_kr,
+            rate_limiter=mock_limiter,
+        )
+        result = await expander.expand_kr()
+
+        assert "111111" in result.exchange_map
+        assert result.exchange_map["111111"] == "KOSDAQ"
+
+    @pytest.mark.asyncio
+    async def test_expand_kr_total_discovered(self, expander):
+        """total_discovered reflects filtered symbol count."""
+        result = await expander.expand_kr()
+        assert result.total_discovered == len(result.symbols)
+
+
+class TestKRRunKisKRScreening:
+    """Tests for KRUniverseExpander._run_kis_kr_screening()."""
+
+    @pytest.mark.asyncio
+    async def test_no_kis_adapter_returns_empty(self):
+        expander = KRUniverseExpander()
+        symbols, exchange_map = await expander._run_kis_kr_screening()
+        assert symbols == []
+        assert exchange_map == {}
+
+    @pytest.mark.asyncio
+    async def test_acquires_rate_limiter_per_call(self):
+        """Rate limiter acquired for each of the 6 API calls."""
+        mock_kis_kr = AsyncMock()
+        mock_kis_kr.fetch_volume_surge.return_value = []
+        mock_kis_kr.fetch_updown_rate.return_value = []
+        mock_kis_kr.fetch_new_highlow.return_value = []
+        mock_limiter = AsyncMock()
+
+        expander = KRUniverseExpander(
+            kis_kr_adapter=mock_kis_kr,
+            rate_limiter=mock_limiter,
+        )
+        await expander._run_kis_kr_screening()
+
+        # 6 calls: volume surge (J,K), gainers (J,K), new highs (J,K)
+        assert mock_limiter.acquire.call_count == 6
+
+    @pytest.mark.asyncio
+    async def test_filters_non_kr_symbols(self):
+        """Non-6-digit symbols are filtered out."""
+        mock_kis_kr = AsyncMock()
+        mock_kis_kr.fetch_volume_surge.return_value = [
+            KRRankedStock(symbol="005930", exchange="KRX"),
+            KRRankedStock(symbol="AAPL", exchange="KRX"),  # US stock — invalid
+            KRRankedStock(symbol="12345", exchange="KRX"),  # 5 digits — invalid
+        ]
+        mock_kis_kr.fetch_updown_rate.return_value = []
+        mock_kis_kr.fetch_new_highlow.return_value = []
+
+        expander = KRUniverseExpander(kis_kr_adapter=mock_kis_kr)
+        symbols, _ = await expander._run_kis_kr_screening()
+
+        assert "005930" in symbols
+        assert "AAPL" not in symbols
+        assert "12345" not in symbols
+
+    @pytest.mark.asyncio
+    async def test_deduplicates_across_calls(self):
+        """Same symbol from multiple sources appears only once."""
+        mock_kis_kr = AsyncMock()
+        mock_kis_kr.fetch_volume_surge.return_value = [
+            KRRankedStock(symbol="005930", exchange="KRX"),
+        ]
+        mock_kis_kr.fetch_updown_rate.return_value = [
+            KRRankedStock(symbol="005930", exchange="KRX"),  # dup
+        ]
+        mock_kis_kr.fetch_new_highlow.return_value = []
+
+        expander = KRUniverseExpander(kis_kr_adapter=mock_kis_kr)
+        symbols, _ = await expander._run_kis_kr_screening()
+
+        assert symbols.count("005930") == 1
+
+    @pytest.mark.asyncio
+    async def test_partial_failure_continues(self):
+        """Failure in one call doesn't stop other calls."""
+        mock_kis_kr = AsyncMock()
+        mock_kis_kr.fetch_volume_surge.side_effect = Exception("timeout")
+        mock_kis_kr.fetch_updown_rate.return_value = [
+            KRRankedStock(symbol="000660", exchange="KRX"),
+        ]
+        mock_kis_kr.fetch_new_highlow.return_value = []
+
+        expander = KRUniverseExpander(kis_kr_adapter=mock_kis_kr)
+        symbols, _ = await expander._run_kis_kr_screening()
+
+        assert "000660" in symbols
+
+    @pytest.mark.asyncio
+    async def test_without_rate_limiter(self):
+        """Works fine without rate limiter (no throttling)."""
+        mock_kis_kr = AsyncMock()
+        mock_kis_kr.fetch_volume_surge.return_value = [
+            KRRankedStock(symbol="005930", exchange="KRX"),
+        ]
+        mock_kis_kr.fetch_updown_rate.return_value = []
+        mock_kis_kr.fetch_new_highlow.return_value = []
+
+        expander = KRUniverseExpander(
+            kis_kr_adapter=mock_kis_kr,
+            rate_limiter=None,
+        )
+        symbols, _ = await expander._run_kis_kr_screening()
+        assert "005930" in symbols
+
+    @pytest.mark.asyncio
+    async def test_exchange_map_populated(self):
+        """Exchange map includes exchange from ranked stocks."""
+        mock_kis_kr = AsyncMock()
+        mock_kis_kr.fetch_volume_surge.return_value = [
+            KRRankedStock(symbol="247540", exchange="KOSDAQ"),
+        ]
+        mock_kis_kr.fetch_updown_rate.return_value = []
+        mock_kis_kr.fetch_new_highlow.return_value = []
+
+        expander = KRUniverseExpander(kis_kr_adapter=mock_kis_kr)
+        symbols, exchange_map = await expander._run_kis_kr_screening()
+
+        assert exchange_map.get("247540") == "KOSDAQ"
