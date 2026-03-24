@@ -105,6 +105,13 @@ class EvaluationLoop:
         self._cache_key: str = f"sell_cooldown:{market}"
         # Per-symbol maximum position weight (% of portfolio) (STOCK-20)
         self._max_per_symbol_pct: float = 0.10  # 10% max per symbol
+        # STOCK-47: Minimum hold period before non-emergency sells (4 hours)
+        self._min_hold_secs: int = 4 * 3600
+        # STOCK-47: Hard stop-loss threshold that bypasses min hold (-7%)
+        self._hard_sl_pct: float = -0.07
+        # STOCK-47: Whipsaw counter — track loss sell timestamps per symbol
+        self._loss_sell_history: dict[str, list[float]] = {}  # {symbol: [timestamps]}
+        self._max_loss_sells: int = 2  # block re-entry after N loss sells in 7 days
         # Daily buy counter (resets at midnight)
         self._daily_buy_count: int = 0
         self._daily_buy_date: str = ""
@@ -164,7 +171,9 @@ class EvaluationLoop:
         """Set Redis cache for persisting sell cooldown data (STOCK-43)."""
         self._cache = cache
 
-    def register_sell_cooldown(self, symbol: str, sell_ts: float) -> None:
+    def register_sell_cooldown(
+        self, symbol: str, sell_ts: float, *, is_loss: bool = False,
+    ) -> None:
         """Record a sell event for cooldown enforcement (STOCK-43).
 
         Called as a callback from PositionTracker after stop-loss/take-profit/
@@ -172,6 +181,9 @@ class EvaluationLoop:
         re-buy of the same symbol.
 
         Also persists to Redis so cooldowns survive service restarts.
+
+        Args:
+            is_loss: If True, also records in whipsaw counter (STOCK-47).
         """
         self._recovery_watch[symbol] = sell_ts
         logger.info(
@@ -180,6 +192,18 @@ class EvaluationLoop:
             self._market,
             self._sell_cooldown_secs // 3600,
         )
+        # STOCK-47: Track loss sells for whipsaw detection
+        if is_loss:
+            cutoff = sell_ts - 7 * 86400
+            history = self._loss_sell_history.get(symbol, [])
+            history = [ts for ts in history if ts > cutoff]
+            history.append(sell_ts)
+            self._loss_sell_history[symbol] = history
+            logger.info(
+                "Whipsaw counter for %s: %d loss sells in 7d",
+                symbol,
+                len(history),
+            )
         # Fire-and-forget Redis persistence (non-blocking from sync callback)
         if self._cache:
             import asyncio
@@ -520,9 +544,10 @@ class EvaluationLoop:
                         signals = evaluated
 
                 # Held positions: lower SELL threshold + bias for easier exits (STOCK-7)
+                # STOCK-47: Raised thresholds to reduce whipsaw
                 if is_held:
-                    _hsb = getattr(self, "_held_sell_bias", 0.10)
-                    _hmc = getattr(self, "_held_min_confidence", 0.25)
+                    _hsb = getattr(self, "_held_sell_bias", 0.05)
+                    _hmc = getattr(self, "_held_min_confidence", 0.40)
                     combined = self._combiner.combine(
                         signals,
                         weights,
@@ -536,26 +561,32 @@ class EvaluationLoop:
                 # Sell on indifference: if no strategy has a strong opinion
                 # (HOLD) and the held position is losing beyond threshold,
                 # free up capital by selling (STOCK-7).
+                # STOCK-47: threshold -3% → -5%, add min hold check
                 if is_held and combined.signal_type == SignalType.HOLD and symbol in position_map:
                     pos = position_map[symbol]
                     if hasattr(pos, "avg_price") and pos.avg_price > 0:
                         pnl_pct = (pos.current_price - pos.avg_price) / pos.avg_price
-                        _spt = getattr(self, "_stale_pnl_threshold", -0.03)
+                        _spt = getattr(self, "_stale_pnl_threshold", -0.05)
                         if pnl_pct < _spt:
-                            combined = Signal(
-                                signal_type=SignalType.SELL,
-                                confidence=0.50,
-                                strategy_name="position_cleanup",
-                                reason=(
-                                    f"Sell on indifference: P&L={pnl_pct:.1%},"
-                                    f" no strategy recommends"
-                                ),
-                            )
-                            logger.info(
-                                "Position cleanup SELL for %s: P&L=%.1f%%",
-                                symbol,
-                                pnl_pct * 100,
-                            )
+                            # STOCK-47: Check min hold (skip for hard SL)
+                            hold_ok = True
+                            if pnl_pct >= self._hard_sl_pct:
+                                hold_ok = self._check_min_hold(symbol)
+                            if hold_ok:
+                                combined = Signal(
+                                    signal_type=SignalType.SELL,
+                                    confidence=0.50,
+                                    strategy_name="position_cleanup",
+                                    reason=(
+                                        f"Sell on indifference: P&L={pnl_pct:.1%},"
+                                        f" no strategy recommends"
+                                    ),
+                                )
+                                logger.info(
+                                    "Position cleanup SELL for %s: P&L=%.1f%%",
+                                    symbol,
+                                    pnl_pct * 100,
+                                )
 
                 # STOCK-34: Profit protection — sell on high profit when
                 # all strategies say HOLD. This is a defense-in-depth
@@ -613,8 +644,27 @@ class EvaluationLoop:
                     )
 
                 # SELLs execute immediately (no competition for cash)
+                # STOCK-47: Min hold check for strategy sells (not position_cleanup
+                # or profit_protection which have their own checks above).
                 if combined.signal_type == SignalType.SELL:
-                    await self._execute_signal(combined, symbol, df)
+                    if is_held and combined.strategy_name not in (
+                        "position_cleanup", "profit_protection",
+                    ):
+                        # Check if hard SL bypass applies
+                        pos = position_map.get(symbol)
+                        is_hard_sl = False
+                        if pos and hasattr(pos, "avg_price") and pos.avg_price > 0:
+                            pnl_pct = (pos.current_price - pos.avg_price) / pos.avg_price
+                            is_hard_sl = pnl_pct < self._hard_sl_pct
+                        if not is_hard_sl and not self._check_min_hold(symbol):
+                            combined = Signal(
+                                signal_type=SignalType.HOLD,
+                                confidence=combined.confidence,
+                                strategy_name="combiner",
+                                reason=f"Min hold not met for {symbol}",
+                            )
+                    if combined.signal_type == SignalType.SELL:
+                        await self._execute_signal(combined, symbol, df)
                 elif combined.signal_type == SignalType.BUY:
                     buy_candidates.append((combined.confidence, symbol, combined, df))
 
@@ -659,6 +709,36 @@ class EvaluationLoop:
                 len(candidates) - len(deduped),
             )
         return deduped
+
+    def _check_min_hold(self, symbol: str) -> bool:
+        """Return True if the position has been held for at least _min_hold_secs.
+
+        STOCK-47: Prevents whipsaw by enforcing a minimum holding period
+        before non-emergency sells. Hard stop-loss bypasses this check.
+        """
+        if self._min_hold_secs <= 0:
+            return True
+        if not self._position_tracker:
+            return True
+        tracked_dict = getattr(self._position_tracker, "_tracked", None)
+        if not tracked_dict:
+            return True
+        tracked = tracked_dict.get(symbol)
+        if not tracked:
+            return True
+        try:
+            hold_secs = time.time() - float(tracked.tracked_at)
+        except (TypeError, ValueError):
+            return True  # Can't determine hold time — allow sell
+        if hold_secs < self._min_hold_secs:
+            logger.info(
+                "Min hold not met for %s: held %.1fh < %.1fh required",
+                symbol,
+                hold_secs / 3600,
+                self._min_hold_secs / 3600,
+            )
+            return False
+        return True
 
     async def _check_protective_sells(self, held: set[str]) -> None:
         """Sell positions on regime deterioration or negative news sentiment.
@@ -749,7 +829,10 @@ class EvaluationLoop:
                 )
                 if sell_order and self._position_tracker:
                     self._position_tracker.untrack(symbol)
-                    self.register_sell_cooldown(symbol, time.time())
+                    # Protective sells are always loss sells (regime/sentiment)
+                    self.register_sell_cooldown(
+                        symbol, time.time(), is_loss=True,
+                    )
 
         # Clear processed sentiments to avoid re-selling
         for symbol in held:
@@ -901,6 +984,20 @@ class EvaluationLoop:
                         symbol,
                         hours_ago,
                         cooldown_h,
+                    )
+                    return
+
+            # STOCK-47: Whipsaw counter — block re-entry after repeated loss sells
+            loss_history = self._loss_sell_history.get(symbol, [])
+            if loss_history:
+                cutoff = time.time() - 7 * 86400
+                recent = [ts for ts in loss_history if ts > cutoff]
+                if len(recent) >= self._max_loss_sells:
+                    logger.info(
+                        "Skipping BUY for %s: whipsaw block (%d loss sells in 7d, max=%d)",
+                        symbol,
+                        len(recent),
+                        self._max_loss_sells,
                     )
                     return
 
@@ -1110,8 +1207,14 @@ class EvaluationLoop:
                 )
                 if sell_order and self._position_tracker:
                     self._position_tracker.untrack(symbol)
+                    # STOCK-47: Determine if this was a loss sell
+                    is_loss = False
+                    if pos.avg_price > 0:
+                        is_loss = price < pos.avg_price
                     # Add to recovery watch for re-entry evaluation
-                    self.register_sell_cooldown(symbol, time.time())
+                    self.register_sell_cooldown(
+                        symbol, time.time(), is_loss=is_loss,
+                    )
 
     def _build_position_context(self, symbol: str, current_price: float) -> PositionContext | None:
         """Build a PositionContext for a held symbol.
