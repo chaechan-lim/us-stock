@@ -4,12 +4,14 @@ Wraps 한국투자증권 Open API domestic endpoints for:
 - Market data (현재가, 일봉, 호가)
 - Order management (매수, 매도, 취소)
 - Account (잔고, 보유종목)
+- Scanner / Ranking (거래량 급등, 등락률, 신고가/신저가)
 
 Shares the same KISAuth (OAuth token) as the US adapter.
 """
 
 import json
 import logging
+from dataclasses import dataclass
 from typing import Any
 
 import aiohttp
@@ -29,6 +31,36 @@ from exchange.kis_auth import KISAuth
 
 logger = logging.getLogger(__name__)
 
+
+@dataclass
+class KRRankedStock:
+    """A KR stock from KIS domestic ranking API.
+
+    Uses @dataclass (not Pydantic) — intentional for lightweight internal DTO
+    matching the US RankedStock pattern. No validation needed for transport.
+    """
+
+    symbol: str
+    name: str = ""
+    price: float = 0.0
+    change_pct: float = 0.0
+    volume: float = 0.0
+    exchange: str = "KRX"  # KRX (KOSPI) or KOSDAQ
+    source: str = ""
+
+
+def _safe_float(val: Any) -> float:
+    """Safely convert a KIS API value to float.
+
+    KIS endpoints can return "N/A", "-", or empty strings for
+    fields during trading halts or special states.
+    """
+    try:
+        return float(val or 0)
+    except (ValueError, TypeError):
+        return 0.0
+
+
 # TR_ID mappings for Korean domestic stock operations
 TR_ID_KR_LIVE = {
     # Market data (same for live/paper)
@@ -44,6 +76,10 @@ TR_ID_KR_LIVE = {
     "PENDING_ORDERS": "TTTC8036R",
     "EXECUTED_ORDERS": "TTTC8001R",
     "BUYING_POWER": "TTTC8908R",
+    # Scanner / Ranking (국내 주식 랭킹)
+    "KR_VOLUME_SURGE": "FHPST01720000",   # 거래량 급등
+    "KR_UPDOWN_RATE": "FHPST01700000",    # 등락률 순위
+    "KR_NEW_HIGHLOW": "FHPST01600000",    # 신고가/신저가
 }
 
 TR_ID_KR_PAPER = {
@@ -651,6 +687,116 @@ class KISKRAdapter(ExchangeAdapter):
             price=price,
             status="pending" if success else "failed",
         )
+
+    # -- Scanner / Ranking --
+
+    async def fetch_volume_surge(
+        self, market: str = "J", limit: int = 20,
+    ) -> list[KRRankedStock]:
+        """Fetch domestic stocks with surging volume.
+
+        Args:
+            market: "J" = KOSPI (KRX), "K" = KOSDAQ
+            limit: Max number of results to return.
+        """
+        await self._auth.ensure_valid_token()
+        params = {
+            "FID_COND_MRKT_DIV_CODE": market,
+            "FID_COND_SCR_DIV_CODE": "20171",  # 거래량 급등 화면
+            "FID_INPUT_ISCD": "0000",           # 전체 종목
+            "FID_RANK_SORT_CLS_CODE": "0",      # 급등률 내림차순
+            "FID_BLNG_CLS_CODE": "0",           # 전체 업종
+        }
+        data = await self._get(
+            "/uapi/domestic-stock/v1/ranking/volume-surge",
+            self._tr["KR_VOLUME_SURGE"],
+            params,
+        )
+        exchange = "KRX" if market == "J" else "KOSDAQ"
+        return self._parse_kr_ranked(data, "kr_volume_surge", limit, exchange)
+
+    async def fetch_updown_rate(
+        self, market: str = "J", direction: str = "up", limit: int = 20,
+    ) -> list[KRRankedStock]:
+        """Fetch domestic stocks by price change rate (gainers or losers).
+
+        Args:
+            market: "J" = KOSPI (KRX), "K" = KOSDAQ
+            direction: "up" for gainers, "down" for losers.
+            limit: Max number of results to return.
+        """
+        await self._auth.ensure_valid_token()
+        params = {
+            "FID_COND_MRKT_DIV_CODE": market,
+            "FID_COND_SCR_DIV_CODE": "20170",  # 등락률 순위 화면
+            "FID_INPUT_ISCD": "0000",           # 전체 종목
+            "FID_RANK_SORT_CLS_CODE": "0" if direction == "up" else "1",
+            "FID_PRCSTEP_RCNT_CLS_CODE": "1",  # 상승/하락
+            "FID_BLNG_CLS_CODE": "0",           # 전체 업종
+        }
+        data = await self._get(
+            "/uapi/domestic-stock/v1/ranking/updown-rate",
+            self._tr["KR_UPDOWN_RATE"],
+            params,
+        )
+        exchange = "KRX" if market == "J" else "KOSDAQ"
+        return self._parse_kr_ranked(data, f"kr_updown_{direction}", limit, exchange)
+
+    async def fetch_new_highlow(
+        self, market: str = "J", high: bool = True, limit: int = 20,
+    ) -> list[KRRankedStock]:
+        """Fetch domestic stocks hitting new highs or new lows.
+
+        Args:
+            market: "J" = KOSPI (KRX), "K" = KOSDAQ
+            high: True for new highs, False for new lows.
+            limit: Max number of results to return.
+        """
+        await self._auth.ensure_valid_token()
+        params = {
+            "FID_COND_MRKT_DIV_CODE": market,
+            "FID_COND_SCR_DIV_CODE": "20160",  # 신고가/신저가 화면
+            "FID_INPUT_ISCD": "0000",           # 전체 종목
+            "FID_RANK_SORT_CLS_CODE": "0",      # 내림차순
+            "FID_BLNG_CLS_CODE": "0",           # 전체 업종
+            "FID_DIV_CLS_CODE": "1" if high else "2",  # 1=신고가, 2=신저가
+        }
+        data = await self._get(
+            "/uapi/domestic-stock/v1/ranking/new-highlow",
+            self._tr["KR_NEW_HIGHLOW"],
+            params,
+        )
+        exchange = "KRX" if market == "J" else "KOSDAQ"
+        return self._parse_kr_ranked(
+            data, "kr_new_high" if high else "kr_new_low", limit, exchange,
+        )
+
+    def _parse_kr_ranked(
+        self,
+        data: dict[str, Any],
+        source: str,
+        limit: int,
+        exchange: str = "KRX",
+    ) -> list[KRRankedStock]:
+        """Parse KIS domestic ranking API response into KRRankedStock list."""
+        results: list[KRRankedStock] = []
+        for item in data.get("output", [])[:limit]:
+            if not isinstance(item, dict):
+                continue
+            # Domestic stock code field (종목코드)
+            symbol = item.get("stck_shrn_iscd", item.get("mksc_shrn_iscd", "")).strip()
+            if not symbol:
+                continue
+            results.append(KRRankedStock(
+                symbol=symbol,
+                name=item.get("hts_kor_isnm", ""),
+                price=_safe_float(item.get("stck_prpr", 0)),
+                change_pct=_safe_float(item.get("prdy_ctrt", 0)),
+                volume=_safe_float(item.get("acml_vol", 0)),
+                exchange=exchange,
+                source=source,
+            ))
+        return results
 
     async def _get(
         self, path: str, tr_id: str, params: dict[str, str],

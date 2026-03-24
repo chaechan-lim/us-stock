@@ -29,7 +29,7 @@ from scanner.pipeline import ScannerPipeline
 from scanner.fundamental_enricher import FundamentalEnricher
 from scanner.stock_scanner import StockScanner
 from scanner.sector_analyzer import SectorAnalyzer
-from scanner.universe_expander import UniverseExpander
+from scanner.universe_expander import UniverseExpander, KRUniverseExpander
 from scanner.etf_universe import ETFUniverse
 from engine.etf_engine import ETFEngine
 from data.market_state import MarketStateDetector
@@ -464,7 +464,15 @@ async def lifespan(app: FastAPI):
     app.state.kr_etf_engine = kr_etf_engine
     kr_market_state_detector = MarketStateDetector()
     app.state.kr_market_state_detector = kr_market_state_detector
-    logger.info("KR engine components initialized (incl. ETF Engine)")
+
+    # KR Universe Expander (dynamic KR stock discovery via KIS domestic ranking)
+    kr_universe_expander = KRUniverseExpander(
+        kis_kr_adapter=kr_adapter,
+        rate_limiter=rate_limiter,
+        kr_etf_universe=kr_etf_universe,
+    )
+    app.state.kr_universe_expander = kr_universe_expander
+    logger.info("KR engine components initialized (incl. ETF Engine + Universe Expander)")
 
     # Recovery manager for circuit breakers
     recovery_mgr = RecoveryManager(notification=notification)
@@ -1411,36 +1419,71 @@ async def lifespan(app: FastAPI):
         await kr_evaluation_loop._evaluate_all()
 
     async def task_kr_daily_scan():
-        """KR daily scan: discover stocks via KRScreener, update KR watchlist."""
-        from scanner.kr_screener import KRScreener, get_kr_exchange
+        """KR daily scan: discover stocks via KRUniverseExpander + KRScreener.
+
+        Uses KRUniverseExpander for dynamic discovery (seed + KIS domestic
+        ranking APIs), then feeds dynamic symbols into KRScreener for quality
+        filtering (market cap / volume). Top candidates are added to the KR
+        watchlist and the evaluation loop is refreshed.
+        """
+        from scanner.kr_screener import KRScreener
         from db.trade_repository import TradeRepository
 
         try:
-            screener = KRScreener()
-            result = screener.screen()
-            logger.info(
-                "KR scan: %d symbols discovered from %d sources",
-                result.total_discovered, len(result.sources),
-            )
-
-            if not result.symbols:
-                return
-
-            # Add top candidates to KR watchlist
+            # Get existing KR watchlist
             async with session_factory() as session:
                 repo = TradeRepository(session)
                 existing = await repo.get_watchlist(active_only=True, market="KR")
-                existing_syms = {w.symbol for w in existing}
-                added = []
-                for sym in result.symbols[:40]:
-                    if sym not in existing_syms:
+                existing_syms = [w.symbol for w in existing]
+                existing_syms_set = {w.symbol for w in existing}
+
+            # Dynamic universe expansion (seed + KIS domestic ranking)
+            universe_result = await kr_universe_expander.expand_kr(
+                existing_watchlist=existing_syms,
+            )
+            logger.info(
+                "KR universe expanded: %d symbols "
+                "(watchlist=%d, seed=%d, kis_kr=%d)",
+                universe_result.total_discovered,
+                len(universe_result.sources.get("watchlist", [])),
+                len(universe_result.sources.get("seed", [])),
+                len(universe_result.sources.get("kis_kr_ranking", [])),
+            )
+
+            # Quality filter via KRScreener (market cap + volume)
+            # Pass dynamic symbols so screener can apply yfinance quality filter
+            dynamic_new = [
+                s for s in universe_result.sources.get("kis_kr_ranking", [])
+                if s not in existing_syms_set
+            ]
+            screener = KRScreener()
+            screen_result = screener.screen(
+                dynamic_symbols=dynamic_new,
+                exchange_map=universe_result.exchange_map,
+            )
+            logger.info(
+                "KR scan: %d symbols after screening from %d sources",
+                screen_result.total_discovered, len(screen_result.sources),
+            )
+
+            if not screen_result.symbols:
+                return
+
+            # Add top candidates to KR watchlist
+            added = []
+            async with session_factory() as session:
+                repo = TradeRepository(session)
+                for sym in screen_result.symbols[:40]:
+                    if sym not in existing_syms_set:
+                        # Use exchange from universe expansion map, fallback to KRX
+                        exchange = universe_result.exchange_map.get(sym, "KRX")
                         await repo.add_to_watchlist(
-                            symbol=sym, exchange=get_kr_exchange(sym),
+                            symbol=sym, exchange=exchange,
                             source="scanner", market="KR",
                         )
                         added.append(sym)
 
-            # Update KR evaluation loop watchlist
+            # Refresh KR evaluation loop watchlist from DB
             async with session_factory() as session:
                 repo = TradeRepository(session)
                 wl = await repo.get_watchlist(active_only=True, market="KR")
@@ -1450,7 +1493,7 @@ async def lifespan(app: FastAPI):
                 logger.info("KR watchlist: +%d added (%s...)", len(added), added[:5])
                 await notification.notify_system_event(
                     "kr_daily_scan",
-                    f"KR Daily Scan: {result.total_discovered} discovered, "
+                    f"KR Daily Scan: {universe_result.total_discovered} discovered, "
                     f"+{len(added)} added to watchlist",
                 )
         except Exception as e:

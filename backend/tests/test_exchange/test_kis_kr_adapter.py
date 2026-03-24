@@ -5,7 +5,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from exchange.kis_kr_adapter import TR_ID_KR_LIVE, TR_ID_KR_PAPER, KISKRAdapter
+from exchange.kis_kr_adapter import (
+    TR_ID_KR_LIVE,
+    TR_ID_KR_PAPER,
+    KISKRAdapter,
+    KRRankedStock,
+    _safe_float,
+)
 
 
 @pytest.fixture
@@ -41,6 +47,18 @@ def _mock_post_response(adapter: KISKRAdapter, response_data: dict) -> None:
     ctx.__aexit__ = AsyncMock(return_value=False)
     adapter._session = MagicMock()
     adapter._session.post = MagicMock(return_value=ctx)
+
+
+def _mock_get_response(adapter: KISKRAdapter, response_data: dict) -> None:
+    """Helper to mock a GET response on the adapter."""
+    mock_resp = AsyncMock()
+    mock_resp.status = 200
+    mock_resp.json = AsyncMock(return_value=response_data)
+    ctx = MagicMock()
+    ctx.__aenter__ = AsyncMock(return_value=mock_resp)
+    ctx.__aexit__ = AsyncMock(return_value=False)
+    adapter._session = MagicMock()
+    adapter._session.get = MagicMock(return_value=ctx)
 
 
 def _extract_post_body(adapter: KISKRAdapter) -> dict:
@@ -679,3 +697,291 @@ class TestFetchOrderableAmountLogging:
 
         result = await adapter._fetch_orderable_amount()
         assert result == 15000000.0
+
+
+# ---------------------------------------------------------------------------
+# Ranking API tests
+# ---------------------------------------------------------------------------
+
+_RANKING_RESPONSE = {
+    "rt_cd": "0",
+    "output": [
+        {
+            "stck_shrn_iscd": "005930",
+            "hts_kor_isnm": "삼성전자",
+            "stck_prpr": "75000",
+            "prdy_ctrt": "2.5",
+            "acml_vol": "15000000",
+        },
+        {
+            "stck_shrn_iscd": "000660",
+            "hts_kor_isnm": "SK하이닉스",
+            "stck_prpr": "185000",
+            "prdy_ctrt": "3.1",
+            "acml_vol": "8000000",
+        },
+    ],
+}
+
+
+class TestKRRankedStock:
+    """Tests for KRRankedStock dataclass."""
+
+    def test_default_fields(self):
+        stock = KRRankedStock(symbol="005930")
+        assert stock.symbol == "005930"
+        assert stock.name == ""
+        assert stock.price == 0.0
+        assert stock.change_pct == 0.0
+        assert stock.volume == 0.0
+        assert stock.exchange == "KRX"
+        assert stock.source == ""
+
+    def test_all_fields(self):
+        stock = KRRankedStock(
+            symbol="247540",
+            name="에코프로비엠",
+            price=350000.0,
+            change_pct=5.2,
+            volume=1500000.0,
+            exchange="KOSDAQ",
+            source="kr_volume_surge",
+        )
+        assert stock.symbol == "247540"
+        assert stock.exchange == "KOSDAQ"
+        assert stock.source == "kr_volume_surge"
+
+
+class TestParseKRRanked:
+    """Tests for KISKRAdapter._parse_kr_ranked()."""
+
+    def test_parses_standard_response(self, adapter):
+        result = adapter._parse_kr_ranked(
+            _RANKING_RESPONSE, "kr_volume_surge", 20, "KRX",
+        )
+        assert len(result) == 2
+        assert result[0].symbol == "005930"
+        assert result[0].name == "삼성전자"
+        assert result[0].price == 75000.0
+        assert result[0].change_pct == 2.5
+        assert result[0].volume == 15000000.0
+        assert result[0].exchange == "KRX"
+        assert result[0].source == "kr_volume_surge"
+
+    def test_parses_kosdaq_exchange(self, adapter):
+        result = adapter._parse_kr_ranked(
+            _RANKING_RESPONSE, "kr_gainers_kosdaq", 20, "KOSDAQ",
+        )
+        assert result[0].exchange == "KOSDAQ"
+
+    def test_respects_limit(self, adapter):
+        result = adapter._parse_kr_ranked(_RANKING_RESPONSE, "src", 1, "KRX")
+        assert len(result) == 1
+
+    def test_skips_empty_symbols(self, adapter):
+        data = {
+            "rt_cd": "0",
+            "output": [
+                {"stck_shrn_iscd": "", "hts_kor_isnm": "빈종목"},
+                {"stck_shrn_iscd": "005930", "hts_kor_isnm": "삼성전자",
+                 "stck_prpr": "75000", "prdy_ctrt": "1.0", "acml_vol": "10000000"},
+            ],
+        }
+        result = adapter._parse_kr_ranked(data, "src", 10, "KRX")
+        assert len(result) == 1
+        assert result[0].symbol == "005930"
+
+    def test_handles_empty_output(self, adapter):
+        result = adapter._parse_kr_ranked({"rt_cd": "0", "output": []}, "src", 10, "KRX")
+        assert result == []
+
+    def test_handles_missing_output(self, adapter):
+        result = adapter._parse_kr_ranked({"rt_cd": "-1"}, "src", 10, "KRX")
+        assert result == []
+
+    def test_handles_non_dict_items(self, adapter):
+        data = {"rt_cd": "0", "output": ["invalid", None, {"stck_shrn_iscd": "005930"}]}
+        result = adapter._parse_kr_ranked(data, "src", 10, "KRX")
+        assert len(result) == 1
+
+    def test_handles_missing_numeric_fields(self, adapter):
+        """Missing price/vol/change_pct fields default to 0."""
+        data = {"rt_cd": "0", "output": [{"stck_shrn_iscd": "005930"}]}
+        result = adapter._parse_kr_ranked(data, "src", 10, "KRX")
+        assert result[0].price == 0.0
+        assert result[0].volume == 0.0
+        assert result[0].change_pct == 0.0
+
+    def test_uses_mksc_shrn_iscd_fallback(self, adapter):
+        """mksc_shrn_iscd used when stck_shrn_iscd missing."""
+        data = {
+            "rt_cd": "0",
+            "output": [{"mksc_shrn_iscd": "035720", "hts_kor_isnm": "카카오"}],
+        }
+        result = adapter._parse_kr_ranked(data, "src", 10, "KRX")
+        assert result[0].symbol == "035720"
+
+
+class TestFetchVolumeSurge:
+    """Tests for KISKRAdapter.fetch_volume_surge()."""
+
+    @pytest.mark.asyncio
+    async def test_returns_ranked_stocks(self, adapter):
+        _mock_get_response(adapter, _RANKING_RESPONSE)
+        result = await adapter.fetch_volume_surge()
+        assert len(result) == 2
+        assert result[0].symbol == "005930"
+        assert result[0].exchange == "KRX"
+
+    @pytest.mark.asyncio
+    async def test_kosdaq_market(self, adapter):
+        resp = {
+            "rt_cd": "0",
+            "output": [{"stck_shrn_iscd": "247540", "hts_kor_isnm": "에코프로비엠",
+                        "stck_prpr": "350000", "prdy_ctrt": "4.0", "acml_vol": "2000000"}],
+        }
+        _mock_get_response(adapter, resp)
+        result = await adapter.fetch_volume_surge(market="K")
+        assert result[0].exchange == "KOSDAQ"
+
+    @pytest.mark.asyncio
+    async def test_uses_correct_tr_id(self, adapter):
+        _mock_get_response(adapter, _RANKING_RESPONSE)
+        await adapter.fetch_volume_surge()
+        # TR_ID is passed to get_auth_headers — verify it was called with the
+        # expected ranking TR_ID value from the TR map
+        call_args = adapter._auth.get_auth_headers.call_args
+        used_tr_id = call_args[0][0] if call_args[0] else call_args.kwargs.get("tr_id")
+        assert used_tr_id == adapter._tr["KR_VOLUME_SURGE"]
+
+    @pytest.mark.asyncio
+    async def test_empty_response(self, adapter):
+        _mock_get_response(adapter, {"rt_cd": "0", "output": []})
+        result = await adapter.fetch_volume_surge()
+        assert result == []
+
+    @pytest.mark.asyncio
+    async def test_respects_limit(self, adapter):
+        _mock_get_response(adapter, _RANKING_RESPONSE)
+        result = await adapter.fetch_volume_surge(limit=1)
+        assert len(result) == 1
+
+
+class TestFetchUpdownRate:
+    """Tests for KISKRAdapter.fetch_updown_rate()."""
+
+    @pytest.mark.asyncio
+    async def test_gainers_direction(self, adapter):
+        _mock_get_response(adapter, _RANKING_RESPONSE)
+        result = await adapter.fetch_updown_rate(direction="up")
+        assert result[0].source == "kr_updown_up"
+
+    @pytest.mark.asyncio
+    async def test_losers_direction(self, adapter):
+        _mock_get_response(adapter, _RANKING_RESPONSE)
+        result = await adapter.fetch_updown_rate(direction="down")
+        assert result[0].source == "kr_updown_down"
+
+    @pytest.mark.asyncio
+    async def test_kosdaq_market(self, adapter):
+        _mock_get_response(adapter, _RANKING_RESPONSE)
+        result = await adapter.fetch_updown_rate(market="K")
+        assert result[0].exchange == "KOSDAQ"
+
+    @pytest.mark.asyncio
+    async def test_returns_ranked_stocks(self, adapter):
+        _mock_get_response(adapter, _RANKING_RESPONSE)
+        result = await adapter.fetch_updown_rate()
+        assert len(result) == 2
+        assert result[1].symbol == "000660"
+
+
+class TestFetchNewHighlow:
+    """Tests for KISKRAdapter.fetch_new_highlow()."""
+
+    @pytest.mark.asyncio
+    async def test_new_highs(self, adapter):
+        _mock_get_response(adapter, _RANKING_RESPONSE)
+        result = await adapter.fetch_new_highlow(high=True)
+        assert result[0].source == "kr_new_high"
+
+    @pytest.mark.asyncio
+    async def test_new_lows(self, adapter):
+        _mock_get_response(adapter, _RANKING_RESPONSE)
+        result = await adapter.fetch_new_highlow(high=False)
+        assert result[0].source == "kr_new_low"
+
+    @pytest.mark.asyncio
+    async def test_kosdaq_market(self, adapter):
+        _mock_get_response(adapter, _RANKING_RESPONSE)
+        result = await adapter.fetch_new_highlow(market="K")
+        assert result[0].exchange == "KOSDAQ"
+
+    @pytest.mark.asyncio
+    async def test_empty_response(self, adapter):
+        _mock_get_response(adapter, {"rt_cd": "0", "output": []})
+        result = await adapter.fetch_new_highlow()
+        assert result == []
+
+
+class TestSafeFloat:
+    """Tests for _safe_float helper."""
+
+    def test_normal_values(self):
+        assert _safe_float(100.5) == 100.5
+        assert _safe_float("75000") == 75000.0
+        assert _safe_float(0) == 0.0
+
+    def test_none_and_empty(self):
+        assert _safe_float(None) == 0.0
+        assert _safe_float("") == 0.0
+
+    def test_non_numeric_strings(self):
+        assert _safe_float("N/A") == 0.0
+        assert _safe_float("-") == 0.0
+        assert _safe_float("거래정지") == 0.0
+
+    def test_negative_values(self):
+        assert _safe_float("-3.5") == -3.5
+        assert _safe_float(-100) == -100.0
+
+
+class TestParseKRRankedWithBadData:
+    """Test _parse_kr_ranked with non-numeric API responses."""
+
+    def test_handles_non_numeric_price(self, adapter):
+        """Non-numeric price field (e.g. trading halt) doesn't crash."""
+        data = {
+            "rt_cd": "0",
+            "output": [{
+                "stck_shrn_iscd": "005930",
+                "hts_kor_isnm": "삼성전자",
+                "stck_prpr": "N/A",
+                "prdy_ctrt": "-",
+                "acml_vol": "거래정지",
+            }],
+        }
+        result = adapter._parse_kr_ranked(data, "src", 10, "KRX")
+        assert len(result) == 1
+        assert result[0].price == 0.0
+        assert result[0].change_pct == 0.0
+        assert result[0].volume == 0.0
+
+
+class TestRankingTRIDs:
+    """Tests that ranking TR_IDs are configured in TR_ID maps."""
+
+    def test_live_has_ranking_tr_ids(self):
+        assert "KR_VOLUME_SURGE" in TR_ID_KR_LIVE
+        assert "KR_UPDOWN_RATE" in TR_ID_KR_LIVE
+        assert "KR_NEW_HIGHLOW" in TR_ID_KR_LIVE
+
+    def test_paper_inherits_ranking_tr_ids(self):
+        assert "KR_VOLUME_SURGE" in TR_ID_KR_PAPER
+        assert "KR_UPDOWN_RATE" in TR_ID_KR_PAPER
+        assert "KR_NEW_HIGHLOW" in TR_ID_KR_PAPER
+
+    def test_ranking_tr_id_values(self):
+        assert TR_ID_KR_LIVE["KR_VOLUME_SURGE"] == "FHPST01720000"
+        assert TR_ID_KR_LIVE["KR_UPDOWN_RATE"] == "FHPST01700000"
+        assert TR_ID_KR_LIVE["KR_NEW_HIGHLOW"] == "FHPST01600000"

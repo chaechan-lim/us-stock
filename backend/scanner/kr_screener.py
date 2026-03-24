@@ -101,7 +101,7 @@ class KRScreener:
         self,
         max_per_source: int = 20,
         max_total: int = 60,
-        min_market_cap: int = 500_000_000_000,  # 5000억원
+        min_market_cap: int = 500_000_000_000,  # 5000억원 (configurable)
         min_avg_volume: int = 100_000,
     ):
         self._max_per_source = max_per_source
@@ -109,24 +109,59 @@ class KRScreener:
         self._min_market_cap = min_market_cap
         self._min_avg_volume = min_avg_volume
 
-    def screen(self, **kwargs) -> KRScreenResult:
+    def screen(
+        self,
+        dynamic_symbols: list[str] | None = None,
+        exchange_map: dict[str, str] | None = None,
+        **kwargs,
+    ) -> KRScreenResult:
         """Screen Korean stocks from curated universe using yfinance data.
 
-        Accepts **kwargs for backward compatibility (date, markets are ignored).
+        Args:
+            dynamic_symbols: Optional list of dynamically discovered symbols
+                (e.g. from KRUniverseExpander / KIS ranking APIs) to include
+                alongside the curated seed list.
+            exchange_map: Optional symbol→exchange mapping for dynamic symbols
+                (from KRUniverseResult.exchange_map). Required to get the
+                correct yfinance suffix (.KS vs .KQ) for KOSDAQ symbols not
+                in the curated universe.
+            **kwargs: Accepted for backward compatibility (date, markets ignored).
+
+        The curated list serves as a seed/baseline. Dynamic symbols from
+        KRUniverseExpander are merged in so the scanner benefits from both
+        the curated large-caps and newly discovered opportunities.
+
+        Dynamic symbols are ONLY included if they pass yfinance quality
+        screening (market cap + volume). Curated symbols are always included
+        as pre-vetted large-caps.
         """
         result = KRScreenResult()
+        merged_exchange_map = dict(exchange_map) if exchange_map else {}
 
-        # Source 1: Curated large-caps (always included)
+        # Source 1: Curated large-caps (seed / baseline — always included)
         curated = [s[0] for s in _KR_UNIVERSE]
         result.sources["curated"] = curated
 
-        # Source 2: yfinance screening (filter by market cap + volume)
-        screened = self._screen_by_yfinance(curated)
+        # Source 2: Dynamic symbols from KRUniverseExpander / KIS ranking
+        dynamic = list(dynamic_symbols) if dynamic_symbols else []
+        if dynamic:
+            result.sources["dynamic"] = dynamic
+
+        # Source 3: yfinance screening (filter by market cap + volume)
+        # Screen over union of seed + dynamic to apply quality filter
+        all_candidates = list(dict.fromkeys(curated + dynamic))
+        screened = self._screen_by_yfinance(
+            all_candidates, merged_exchange_map,
+        )
         result.sources["yfinance_filtered"] = screened
 
-        # Combine: screened first (quality-filtered), then remaining curated
-        seen = set()
-        combined = []
+        # Combine: screened first (quality-filtered), then curated.
+        # Dynamic symbols are ONLY included if they passed screening —
+        # curated symbols are pre-vetted large-caps that bypass filtering,
+        # but dynamic symbols from KIS ranking could be penny stocks.
+        screened_set = set(screened)
+        seen: set[str] = set()
+        combined: list[str] = []
         for s in screened:
             if s not in seen:
                 seen.add(s)
@@ -135,31 +170,60 @@ class KRScreener:
             if s not in seen:
                 seen.add(s)
                 combined.append(s)
+        # Dynamic symbols: only if they passed quality screening
+        for s in dynamic:
+            if s not in seen and s in screened_set:
+                seen.add(s)
+                combined.append(s)
 
-        result.symbols = combined[:self._max_total]
+        result.symbols = combined[: self._max_total]
         result.total_discovered = len(combined)
         return result
 
-    def _screen_by_yfinance(self, symbols: list[str]) -> list[str]:
+    def _screen_by_yfinance(
+        self,
+        symbols: list[str],
+        extra_exchange_map: dict[str, str] | None = None,
+    ) -> list[str]:
         """Filter symbols using yfinance market data."""
         qualified = []
         for symbol in symbols:
             try:
-                yf_sym = to_yfinance(symbol, self._get_exchange(symbol))
+                exchange = self._get_exchange(
+                    symbol, extra_exchange_map,
+                )
+                yf_sym = to_yfinance(symbol, exchange)
                 ticker = yf.Ticker(yf_sym)
                 info = ticker.fast_info
                 market_cap = getattr(info, "market_cap", 0) or 0
-                avg_vol = getattr(info, "three_month_average_volume", 0) or 0
+                avg_vol = (
+                    getattr(info, "three_month_average_volume", 0) or 0
+                )
 
-                if market_cap >= self._min_market_cap and avg_vol >= self._min_avg_volume:
+                if (
+                    market_cap >= self._min_market_cap
+                    and avg_vol >= self._min_avg_volume
+                ):
                     qualified.append(symbol)
             except Exception as e:
-                logger.debug("yfinance screening failed for %s: %s", symbol, e)
+                logger.debug(
+                    "yfinance screening failed for %s: %s", symbol, e,
+                )
 
         return qualified[:self._max_per_source]
 
-    def _get_exchange(self, symbol: str) -> str:
-        """Look up exchange from curated universe."""
+    def _get_exchange(
+        self,
+        symbol: str,
+        extra_map: dict[str, str] | None = None,
+    ) -> str:
+        """Look up exchange for symbol.
+
+        Checks extra_map (dynamic discoveries) first, then curated universe.
+        Falls back to "KRX" if unknown.
+        """
+        if extra_map and symbol in extra_map:
+            return extra_map[symbol]
         return _EXCHANGE_MAP.get(symbol, "KRX")
 
 
