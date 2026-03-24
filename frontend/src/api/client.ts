@@ -106,7 +106,9 @@ export const fetchEquityHistory = (days = 30, market = 'US') =>
 export interface PeriodReturn {
   change: number
   pct: number
+  simple_pct?: number
   base_equity: number
+  has_cash_flows?: boolean
 }
 export interface PortfolioReturns {
   daily: PeriodReturn | null

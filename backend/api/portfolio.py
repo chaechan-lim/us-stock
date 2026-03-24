@@ -239,10 +239,12 @@ async def _enrich_positions(positions, market: str, request: Request) -> list[di
 
 @router.get("/returns")
 async def portfolio_returns(request: Request):
-    """Get cumulative returns: daily, weekly, monthly (from equity snapshots)."""
-    from core.models import PortfolioSnapshot
-    from sqlalchemy import select
+    """Get cumulative returns: daily, weekly, monthly (from equity snapshots).
 
+    STOCK-46: Uses TWR (Time-Weighted Return) when cash flows are detected,
+    so that deposits/withdrawals don't inflate the return percentage.
+    Returns both `pct` (TWR) and `simple_pct` (old method) for transparency.
+    """
     if not _session_factory:
         return {"daily": None, "weekly": None, "monthly": None}
 
@@ -253,7 +255,6 @@ async def portfolio_returns(request: Request):
         "monthly": now - timedelta(days=30),
     }
 
-    # Get the latest snapshot per market as "current" equity
     async with _session_factory() as session:
         result = {}
         for period_name, since in periods.items():
@@ -275,11 +276,27 @@ async def portfolio_returns(request: Request):
 
             if old_equity > 0:
                 change = new_equity - old_equity
-                pct = (change / old_equity) * 100
+                simple_pct = (change / old_equity) * 100
+
+                # STOCK-46: Lightweight check first — only fetch all snapshots when
+                # cash flows actually exist (the common case has none).
+                us_has_cf = await _has_cash_flows_db(session, since, "US")
+                kr_has_cf = await _has_cash_flows_db(session, since, "KR")
+                has_cf = us_has_cf or kr_has_cf
+
+                if has_cf:
+                    us_snapshots = await _get_snapshots_in_range(session, since, "US")
+                    kr_snapshots = await _get_snapshots_in_range(session, since, "KR")
+                    twr_pct = _calculate_twr(us_snapshots, kr_snapshots, _cached_usd_krw)
+                else:
+                    twr_pct = simple_pct
+
                 result[period_name] = {
                     "change": round(change, 0),
-                    "pct": round(pct, 2),
+                    "pct": round(twr_pct, 2),
+                    "simple_pct": round(simple_pct, 2),
                     "base_equity": round(old_equity, 0),
+                    "has_cash_flows": has_cf,
                 }
             else:
                 result[period_name] = None
@@ -316,6 +333,139 @@ async def _get_latest_snapshot(session, market: str):
     )
     result = await session.execute(stmt)
     return result.scalar_one_or_none()
+
+
+async def _get_snapshots_in_range(session, since: datetime, market: str) -> list:
+    """Get all snapshots for a market in a time range, ordered by time."""
+    from sqlalchemy import select
+
+    from core.models import PortfolioSnapshot
+
+    stmt = (
+        select(PortfolioSnapshot)
+        .where(PortfolioSnapshot.recorded_at >= since)
+        .where(PortfolioSnapshot.market == market)
+        .order_by(PortfolioSnapshot.recorded_at.asc())
+    )
+    result = await session.execute(stmt)
+    return list(result.scalars().all())
+
+
+def _has_cash_flows(snapshots: list) -> bool:
+    """Check if any snapshot in the list has a non-zero cash_flow."""
+    return any((getattr(s, "cash_flow", 0.0) or 0.0) != 0.0 for s in snapshots)
+
+
+async def _has_cash_flows_db(session, since: datetime, market: str) -> bool:
+    """Lightweight DB check: does any snapshot in range have non-zero cash_flow?
+
+    Avoids fetching full snapshot rows in the common case (no deposits/withdrawals).
+    """
+    from sqlalchemy import func, select
+
+    from core.models import PortfolioSnapshot
+
+    stmt = (
+        select(func.count())
+        .select_from(PortfolioSnapshot)
+        .where(
+            PortfolioSnapshot.recorded_at >= since,
+            PortfolioSnapshot.market == market,
+            PortfolioSnapshot.cash_flow != 0.0,
+        )
+    )
+    result = await session.execute(stmt)
+    count = result.scalar() or 0
+    return count > 0
+
+
+def _build_equity_timeline(
+    us_snapshots: list, kr_snapshots: list, usd_krw: float
+) -> list[tuple[datetime, float, float]]:
+    """Build a combined equity timeline using carry-forward for mismatched timestamps.
+
+    In production, US and KR save_snapshot() each call datetime.utcnow()
+    independently, so their recorded_at values differ by at least milliseconds.
+    Exact-timestamp aggregation would compare single-market equity values against
+    each other, producing nonsensical sub-period returns.
+
+    Instead, carry forward the last-known equity from each market: at each snapshot
+    event, total portfolio equity = this_market_equity + last_known_other_market_equity.
+    Entries are skipped until at least one snapshot from every active market has been
+    seen, ensuring the initial equity denominator reflects the full portfolio.
+
+    Returns list of (timestamp, total_equity_krw, cash_flow_krw) sorted by time.
+    """
+    events: list[tuple[datetime, str, float, float]] = []
+
+    for s in us_snapshots:
+        equity = s.total_value_usd * usd_krw
+        cf = (getattr(s, "cash_flow", 0.0) or 0.0) * usd_krw
+        events.append((s.recorded_at, "US", equity, cf))
+
+    for s in kr_snapshots:
+        equity = s.total_value_usd  # KR stores KRW directly
+        cf = getattr(s, "cash_flow", 0.0) or 0.0
+        events.append((s.recorded_at, "KR", equity, cf))
+
+    events.sort(key=lambda x: x[0])
+
+    if not events:
+        return []
+
+    has_us = bool(us_snapshots)
+    has_kr = bool(kr_snapshots)
+    last_equity: dict[str, float | None] = {"US": None, "KR": None}
+    timeline: list[tuple[datetime, float, float]] = []
+
+    for ts, market, equity, cf in events:
+        last_equity[market] = equity
+
+        # Skip until we have an initial equity reading for every active market
+        if has_us and last_equity["US"] is None:
+            continue
+        if has_kr and last_equity["KR"] is None:
+            continue
+
+        total_equity = (last_equity["US"] or 0.0) + (last_equity["KR"] or 0.0)
+        timeline.append((ts, total_equity, cf))
+
+    return timeline
+
+
+def _calculate_twr(us_snapshots: list, kr_snapshots: list, usd_krw: float) -> float:
+    """Calculate TWR (Time-Weighted Return) across a period.
+
+    TWR splits the period at each cash flow event and chains sub-period returns:
+      TWR = prod(1 + Ri) - 1, where Ri = (end_equity - start_equity - cf) / start_equity
+
+    Uses carry-forward per-market equity (via _build_equity_timeline) so that
+    near-simultaneous US and KR snapshots with slightly different timestamps are
+    aggregated correctly rather than being compared against each other directly.
+    """
+    timeline = _build_equity_timeline(us_snapshots, kr_snapshots, usd_krw)
+    if len(timeline) < 2:
+        return 0.0
+
+    compound = 1.0
+    for idx in range(1, len(timeline)):
+        prev_eq = timeline[idx - 1][1]
+        curr_eq = timeline[idx][1]
+        curr_cf = timeline[idx][2]
+
+        if prev_eq <= 0:
+            logger.warning(
+                "[TWR] Skipping sub-period %d: prev_eq=%.2f (zero or negative equity)",
+                idx,
+                prev_eq,
+            )
+            continue
+
+        # Sub-period return: gain excluding the cash flow
+        sub_return = (curr_eq - curr_cf - prev_eq) / prev_eq
+        compound *= 1.0 + sub_return
+
+    return (compound - 1.0) * 100.0
 
 
 @router.delete("/snapshots")

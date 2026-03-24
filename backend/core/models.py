@@ -93,6 +93,7 @@ class PortfolioSnapshot(Base):
     unrealized_pnl = Column(Float)
     daily_pnl = Column(Float)
     drawdown_pct = Column(Float)
+    cash_flow = Column(Float, default=0.0)  # STOCK-46: detected deposit/withdrawal amount
     recorded_at = Column(DateTime, default=datetime.utcnow)
 
     __table_args__ = (Index("idx_snapshots_recorded", "recorded_at"),)

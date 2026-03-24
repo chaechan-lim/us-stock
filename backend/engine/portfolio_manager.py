@@ -20,6 +20,40 @@ logger = logging.getLogger(__name__)
 # fraction vs the previous snapshot (e.g. 0.5 = 50% drop).
 ANOMALY_DROP_THRESHOLD = 0.5
 
+# STOCK-46: Cash flow detection threshold (fraction of total equity).
+# If abs(raw_cash_flow) > threshold * prev_total_equity, treat as deposit/withdrawal.
+CASH_FLOW_THRESHOLD = 0.05  # 5%
+
+
+def detect_cash_flow(
+    prev_total: float,
+    new_total: float,
+) -> float:
+    """Detect external deposit/withdrawal between two snapshots.
+
+    Uses total portfolio equity change rather than (cash + invested_cost_basis).
+    This correctly handles profitable sells: selling a position at a gain does NOT
+    change total equity (unrealized PnL is simply converted to cash), so it is
+    never misclassified as a deposit.
+
+    Genuine deposits/withdrawals directly change total equity:
+      raw_cf = new_total - prev_total
+
+    Normal market appreciation may also appear here, but is typically below the
+    5% threshold within a single snapshot interval.
+
+    Returns the detected cash flow amount (positive=deposit, negative=withdrawal).
+    """
+    if prev_total <= 0:
+        return 0.0
+
+    raw_cf = new_total - prev_total
+    threshold_amount = CASH_FLOW_THRESHOLD * prev_total
+
+    if abs(raw_cf) > threshold_amount:
+        return raw_cf
+    return 0.0
+
 
 class PortfolioManager:
     """Track portfolio state and persist snapshots to DB."""
@@ -124,6 +158,19 @@ class PortfolioManager:
 
         daily_pnl = await self._calculate_daily_pnl(total_equity)
 
+        # STOCK-46: Detect external cash flow (deposit/withdrawal).
+        cash_flow = 0.0
+        if prev is not None and prev.total_value_usd > 0:
+            cash_flow = detect_cash_flow(
+                prev_total=prev.total_value_usd,
+                new_total=total_equity,
+            )
+            if cash_flow != 0.0:
+                action = "deposit" if cash_flow > 0 else "withdrawal"
+                logger.info(
+                    "[%s] Cash flow detected: %.2f (%s)", self._market, cash_flow, action
+                )
+
         snapshot = PortfolioSnapshot(
             market=self._market,
             total_value_usd=total_equity,
@@ -131,6 +178,7 @@ class PortfolioManager:
             invested_usd=invested,
             unrealized_pnl=unrealized_pnl,
             daily_pnl=daily_pnl,
+            cash_flow=cash_flow,
             recorded_at=datetime.utcnow(),
         )
 
@@ -234,6 +282,7 @@ class PortfolioManager:
                 "invested_usd": s.invested_usd,
                 "unrealized_pnl": s.unrealized_pnl,
                 "daily_pnl": s.daily_pnl,
+                "cash_flow": getattr(s, "cash_flow", 0.0) or 0.0,
             }
             for s in snapshots
         ]

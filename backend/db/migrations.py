@@ -24,6 +24,7 @@ _EXPECTED_COLUMNS: Sequence[tuple[str, str, str, str | None, bool]] = [
     ("orders", "is_paper", "BOOLEAN", "FALSE", True),
     ("orders", "buy_strategy", "VARCHAR(50)", None, False),
     ("orders", "pnl_pct", "FLOAT", None, False),
+    ("portfolio_snapshots", "cash_flow", "FLOAT", "0.0", False),
 ]
 
 # Indexes that may be missing from existing deployments.

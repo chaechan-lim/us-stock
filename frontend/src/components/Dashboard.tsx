@@ -279,6 +279,11 @@ function EquityCard({
               <span className={`text-xs ${currentReturn.pct >= 0 ? 'text-green-400' : 'text-red-400'}`}>
                 {currentReturn.pct >= 0 ? '+' : ''}{currentReturn.pct.toFixed(2)}%
               </span>
+              {currentReturn.has_cash_flows && (
+                <span className="text-[9px] px-1 py-0.5 rounded bg-yellow-900/40 text-yellow-400" title="TWR: adjusted for deposits/withdrawals">
+                  TWR
+                </span>
+              )}
             </div>
           ) : (
             <div className="text-xs text-gray-600">No data</div>
