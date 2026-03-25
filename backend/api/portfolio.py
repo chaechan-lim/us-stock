@@ -1,7 +1,8 @@
 """Portfolio API endpoints."""
 
 import logging
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Request
 
@@ -549,10 +550,48 @@ async def trade_summary_periods(request: Request, market: str | None = None):
                 if o.side == "SELL" and o.status in ("filled", "not_found") and o.pnl is not None
             ]
 
-            now = datetime.utcnow()
-            today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-            week_start = today_start - timedelta(days=now.weekday())
-            month_start = today_start.replace(day=1)
+            # Use each trade's market-local timezone for period classification
+            # US trades → America/New_York, KR trades → Asia/Seoul
+            _market_tz = {
+                "US": ZoneInfo("America/New_York"),
+                "KR": ZoneInfo("Asia/Seoul"),
+            }
+
+            def _trade_market_date(s) -> date | None:
+                """Get the local market date for a trade."""
+                t = s.filled_at or s.created_at
+                if not t:
+                    return None
+                mkt = getattr(s, "market", "US")
+                tz = _market_tz.get(mkt, ZoneInfo("UTC"))
+                if t.tzinfo is None:
+                    t = t.replace(tzinfo=ZoneInfo("UTC"))
+                return t.astimezone(tz).date()
+
+            def _market_today(mkt: str) -> date:
+                tz = _market_tz.get(mkt, ZoneInfo("UTC"))
+                return datetime.now(tz).date()
+
+            def _in_today(s) -> bool:
+                d = _trade_market_date(s)
+                if not d:
+                    return False
+                return d == _market_today(getattr(s, "market", "US"))
+
+            def _in_week(s) -> bool:
+                d = _trade_market_date(s)
+                if not d:
+                    return False
+                today = _market_today(getattr(s, "market", "US"))
+                week_start = today - timedelta(days=today.weekday())
+                return d >= week_start
+
+            def _in_month(s) -> bool:
+                d = _trade_market_date(s)
+                if not d:
+                    return False
+                today = _market_today(getattr(s, "market", "US"))
+                return d.year == today.year and d.month == today.month
 
             def _calc(trades):
                 wins = [t for t in trades if t.pnl > 0]
@@ -584,14 +623,9 @@ async def trade_summary_periods(request: Request, market: str | None = None):
                     "win_rate": round(len(wins) / len(trades) * 100, 1) if trades else 0,
                 }
 
-            # STOCK-37: Use filled_at if available, fallback to created_at for
-            # orders where filled_at is NULL (e.g. not_found orders with PnL).
-            def _trade_time(s):
-                return s.filled_at or s.created_at
-
-            today_sells = [s for s in sells if _trade_time(s) and _trade_time(s) >= today_start]
-            week_sells = [s for s in sells if _trade_time(s) and _trade_time(s) >= week_start]
-            month_sells = [s for s in sells if _trade_time(s) and _trade_time(s) >= month_start]
+            today_sells = [s for s in sells if _in_today(s)]
+            week_sells = [s for s in sells if _in_week(s)]
+            month_sells = [s for s in sells if _in_month(s)]
 
             return {
                 "today": _calc(today_sells),
