@@ -471,7 +471,7 @@ class ETFEngine:
                 pos = next((p for p in positions if p.symbol == sym), None)
                 if pos and pos.quantity > 0:
                     price = float(pos.current_price) if pos.current_price else 0
-                    await self._order_manager.place_sell(
+                    sell_result = await self._order_manager.place_sell(
                         symbol=sym,
                         quantity=int(pos.quantity),
                         price=price,
@@ -480,6 +480,12 @@ class ETFEngine:
                         entry_price=pos.avg_price,
                         buy_strategy="etf_engine",
                     )
+                    if sell_result is None:
+                        logger.warning(
+                            "ETF Engine: SELL failed for %s — retaining tracking for retry",
+                            sym,
+                        )
+                        continue
                     hold_days = hold_seconds / 86400
                     actions.append(
                         f"SELL {sym} (held {hold_days:.0f}d > {self._risk.max_hold_days}d limit)"

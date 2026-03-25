@@ -327,6 +327,55 @@ class TestHoldLimits:
         actions = await engine._check_hold_limits()
         assert actions == []
 
+    @pytest.mark.asyncio
+    async def test_sell_failure_retains_tracking(
+        self, engine, mock_order_manager, mock_market_data
+    ):
+        """When place_sell returns None, tracking must NOT be removed so retry is possible."""
+        engine._managed_positions["TQQQ"] = ETFPosition(
+            symbol="TQQQ",
+            entry_date=time.time() - 15 * 86400,
+            reason="regime_bull",
+        )
+
+        pos = MagicMock(symbol="TQQQ", quantity=100, current_price=55.0)
+        mock_market_data.get_positions.return_value = [pos]
+        # Simulate sell order failure
+        mock_order_manager.place_sell.return_value = None
+
+        actions = await engine._check_hold_limits()
+
+        # Sell was attempted
+        assert mock_order_manager.place_sell.called
+        # No action logged (sell did not complete)
+        assert actions == []
+        # Tracking must still be present for retry
+        assert "TQQQ" in engine._managed_positions
+
+    @pytest.mark.asyncio
+    async def test_sell_success_removes_tracking(
+        self, engine, mock_order_manager, mock_market_data
+    ):
+        """When place_sell succeeds, tracking should be removed normally."""
+        engine._managed_positions["TQQQ"] = ETFPosition(
+            symbol="TQQQ",
+            entry_date=time.time() - 15 * 86400,
+            reason="regime_bull",
+        )
+
+        pos = MagicMock(symbol="TQQQ", quantity=100, current_price=55.0)
+        mock_market_data.get_positions.return_value = [pos]
+        # Simulate successful sell order
+        mock_order_manager.place_sell.return_value = MagicMock()
+
+        actions = await engine._check_hold_limits()
+
+        assert mock_order_manager.place_sell.called
+        assert len(actions) == 1
+        assert "TQQQ" in actions[0]
+        # Tracking removed after successful sell
+        assert "TQQQ" not in engine._managed_positions
+
 
 class TestExposureLimits:
     """Test portfolio exposure limit checks."""
