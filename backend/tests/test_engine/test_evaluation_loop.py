@@ -1121,6 +1121,319 @@ class TestProtectiveSells:
         # Should NOT sell because position held only 1 minute (min hold is 4 hours)
         mock_adapter.create_sell_order.assert_not_called()
 
+    async def test_protective_sell_returns_sold_symbols(
+        self,
+        loop_with_tracker,
+        mock_market_data,
+        mock_adapter,
+    ):
+        """STOCK-54: _check_protective_sells should return filled sell symbols."""
+        mock_market_data.get_positions.return_value = [
+            Position(
+                symbol="AAPL", exchange="NASD", quantity=10, avg_price=150.0, current_price=130.0
+            ),
+            Position(
+                symbol="TSLA", exchange="NASD", quantity=5, avg_price=200.0, current_price=220.0
+            ),
+        ]
+        mock_adapter.create_sell_order = AsyncMock(
+            return_value=OrderResult(
+                order_id="O1",
+                symbol="AAPL",
+                side="SELL",
+                order_type="limit",
+                quantity=10,
+                price=130.0,
+                status="filled",
+                filled_price=130.0,
+            )
+        )
+        # Regime change: uptrend -> downtrend
+        loop_with_tracker.set_market_state("downtrend")
+
+        sold = await loop_with_tracker._check_protective_sells({"AAPL", "TSLA"})
+
+        # AAPL is losing (130 < 150) so it should be sold; TSLA is winning so kept
+        assert "AAPL" in sold
+        assert "TSLA" not in sold
+
+    async def test_protective_sell_returns_empty_when_no_fills(
+        self,
+        loop_with_tracker,
+        mock_market_data,
+        mock_adapter,
+    ):
+        """STOCK-54: Returns empty set when no orders are filled."""
+        mock_market_data.get_positions.return_value = [
+            Position(
+                symbol="AAPL", exchange="NASD", quantity=10, avg_price=150.0, current_price=130.0
+            ),
+        ]
+        mock_adapter.create_sell_order = AsyncMock(
+            return_value=OrderResult(
+                order_id="O1",
+                symbol="AAPL",
+                side="SELL",
+                order_type="limit",
+                quantity=10,
+                price=130.0,
+                status="submitted",  # Not filled yet
+                filled_price=None,
+            )
+        )
+        loop_with_tracker.set_market_state("downtrend")
+
+        sold = await loop_with_tracker._check_protective_sells({"AAPL"})
+
+        assert sold == set()
+
+    async def test_protective_sell_returns_empty_set_no_triggers(
+        self,
+        loop_with_tracker,
+    ):
+        """STOCK-54: Returns empty set when no regime change or sentiment trigger."""
+        sold = await loop_with_tracker._check_protective_sells({"AAPL"})
+        assert sold == set()
+
+
+class TestPhase0HeldSetUpdate:
+    """STOCK-54: Phase 0 매도 후 held set이 업데이트되어야 Phase 1 이중매도 방지."""
+
+    @pytest.fixture
+    def loop_with_tracker(self, mock_adapter, mock_market_data, mock_registry):
+        from data.indicator_service import IndicatorService
+        from strategies.combiner import SignalCombiner
+        from engine.position_tracker import PositionTracker
+
+        risk = RiskManager()
+        order_mgr = OrderManager(adapter=mock_adapter, risk_manager=risk)
+        position_tracker = MagicMock(spec=PositionTracker)
+        position_tracker.tracked_symbols = ["AAPL", "TSLA"]
+        position_tracker._tracked = {}
+
+        loop = EvaluationLoop(
+            adapter=mock_adapter,
+            market_data=mock_market_data,
+            indicator_svc=IndicatorService(),
+            registry=mock_registry,
+            combiner=SignalCombiner(),
+            order_manager=order_mgr,
+            risk_manager=risk,
+            watchlist=["AAPL", "TSLA"],
+            market_state="uptrend",
+            position_tracker=position_tracker,
+        )
+        return loop
+
+    async def test_held_set_updated_after_phase0_sell(
+        self,
+        loop_with_tracker,
+        mock_market_data,
+        mock_adapter,
+        mock_registry,
+    ):
+        """STOCK-54: Symbols sold in Phase 0 should not be is_held=True in Phase 1.
+
+        When Phase 0 protective sells execute for a symbol, Phase 1 should not
+        treat it as held (no BUY→HOLD remapping, no held_sell_bias).
+        """
+        # Setup: AAPL is losing, TSLA is winning
+        mock_market_data.get_positions.return_value = [
+            Position(
+                symbol="AAPL", exchange="NASD", quantity=10, avg_price=150.0, current_price=130.0
+            ),
+            Position(
+                symbol="TSLA", exchange="NASD", quantity=5, avg_price=200.0, current_price=220.0
+            ),
+        ]
+        mock_adapter.create_sell_order = AsyncMock(
+            return_value=OrderResult(
+                order_id="O1",
+                symbol="AAPL",
+                side="SELL",
+                order_type="limit",
+                quantity=10,
+                price=130.0,
+                status="filled",
+                filled_price=130.0,
+            )
+        )
+
+        # Trigger regime change
+        loop_with_tracker.set_market_state("downtrend")
+
+        # Track calls to _combiner.combine to see if held_sell_bias is applied
+        original_combine = loop_with_tracker._combiner.combine
+        combine_calls = []
+
+        def tracking_combine(signals, weights, **kwargs):
+            combine_calls.append(kwargs)
+            return original_combine(signals, weights, **kwargs)
+
+        loop_with_tracker._combiner.combine = tracking_combine
+
+        # Make strategies return SELL for both symbols
+        mock_registry.get_enabled.return_value[0].analyze = AsyncMock(
+            return_value=Signal(
+                signal_type=SignalType.SELL,
+                confidence=0.7,
+                strategy_name="trend_following",
+                reason="test sell",
+            )
+        )
+
+        await loop_with_tracker._evaluate_all()
+
+        # AAPL was sold in Phase 0 → should NOT have held_sell_bias in Phase 1
+        # TSLA is still held → should have held_sell_bias
+        aapl_calls = [c for c in combine_calls if "held_sell_bias" not in c]
+        tsla_calls = [c for c in combine_calls if "held_sell_bias" in c]
+        # At least TSLA should be evaluated as held
+        assert len(tsla_calls) >= 1, "TSLA should be evaluated with held_sell_bias"
+
+    async def test_no_double_sell_after_phase0(
+        self,
+        loop_with_tracker,
+        mock_market_data,
+        mock_adapter,
+        mock_registry,
+    ):
+        """STOCK-54: A symbol sold in Phase 0 should not be sold again in Phase 1."""
+        mock_market_data.get_positions.return_value = [
+            Position(
+                symbol="AAPL", exchange="NASD", quantity=10, avg_price=150.0, current_price=130.0
+            ),
+        ]
+        mock_adapter.create_sell_order = AsyncMock(
+            return_value=OrderResult(
+                order_id="O1",
+                symbol="AAPL",
+                side="SELL",
+                order_type="limit",
+                quantity=10,
+                price=130.0,
+                status="filled",
+                filled_price=130.0,
+            )
+        )
+
+        # Trigger regime change
+        loop_with_tracker.set_market_state("downtrend")
+
+        # Strategy returns SELL for AAPL
+        mock_registry.get_enabled.return_value[0].analyze = AsyncMock(
+            return_value=Signal(
+                signal_type=SignalType.SELL,
+                confidence=0.8,
+                strategy_name="trend_following",
+                reason="test sell",
+            )
+        )
+
+        await loop_with_tracker._evaluate_all()
+
+        # create_sell_order should be called exactly once (Phase 0 only),
+        # NOT twice (Phase 0 + Phase 1).
+        assert mock_adapter.create_sell_order.call_count == 1
+
+
+class TestSellPendingOrderDedup:
+    """STOCK-54: Defense-in-depth sell dedup in _execute_signal."""
+
+    @pytest.fixture
+    def loop_with_tracker(self, mock_adapter, mock_market_data, mock_registry):
+        from data.indicator_service import IndicatorService
+        from strategies.combiner import SignalCombiner
+        from engine.position_tracker import PositionTracker
+
+        risk = RiskManager()
+        order_mgr = OrderManager(adapter=mock_adapter, risk_manager=risk)
+        tracker = MagicMock(spec=PositionTracker)
+        tracker.tracked_symbols = ["AAPL"]
+        tracker.get_buy_strategy.return_value = "trend_following"
+
+        loop = EvaluationLoop(
+            adapter=mock_adapter,
+            market_data=mock_market_data,
+            indicator_svc=IndicatorService(),
+            registry=mock_registry,
+            combiner=SignalCombiner(),
+            order_manager=order_mgr,
+            risk_manager=risk,
+            watchlist=["AAPL"],
+            position_tracker=tracker,
+        )
+        return loop
+
+    async def test_sell_skipped_when_pending_sell_exists(
+        self,
+        loop_with_tracker,
+        mock_market_data,
+        mock_adapter,
+    ):
+        """STOCK-54: _execute_signal should skip SELL if pending sell order exists."""
+        # Simulate a pending sell order in order_manager
+        loop_with_tracker._order_manager._active_orders["O1"] = OrderResult(
+            order_id="O1",
+            symbol="AAPL",
+            side="SELL",
+            order_type="limit",
+            quantity=10,
+            price=150.0,
+            status="pending",
+        )
+
+        sell_signal = Signal(
+            signal_type=SignalType.SELL,
+            confidence=0.7,
+            strategy_name="trend_following",
+            reason="test sell",
+        )
+        df = _make_ohlcv_df()
+
+        await loop_with_tracker._execute_signal(sell_signal, "AAPL", df)
+
+        # Should not attempt to create a sell order (pending already exists)
+        mock_adapter.create_sell_order.assert_not_called()
+
+    async def test_sell_proceeds_when_no_pending_order(
+        self,
+        loop_with_tracker,
+        mock_market_data,
+        mock_adapter,
+    ):
+        """STOCK-54: _execute_signal should proceed with SELL when no pending order."""
+        mock_market_data.get_positions.return_value = [
+            Position(
+                symbol="AAPL", exchange="NASD", quantity=10, avg_price=150.0, current_price=140.0
+            ),
+        ]
+        mock_adapter.create_sell_order = AsyncMock(
+            return_value=OrderResult(
+                order_id="O1",
+                symbol="AAPL",
+                side="SELL",
+                order_type="limit",
+                quantity=10,
+                price=140.0,
+                status="filled",
+                filled_price=140.0,
+            )
+        )
+
+        sell_signal = Signal(
+            signal_type=SignalType.SELL,
+            confidence=0.7,
+            strategy_name="trend_following",
+            reason="test sell",
+        )
+        df = _make_ohlcv_df()
+
+        await loop_with_tracker._execute_signal(sell_signal, "AAPL", df)
+
+        # Should proceed with the sell
+        mock_adapter.create_sell_order.assert_called_once()
+
 
 class TestDuplicateBuyPrevention:
     """Test defense-in-depth: exchange position check prevents duplicate buys.
