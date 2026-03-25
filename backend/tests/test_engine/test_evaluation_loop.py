@@ -2651,6 +2651,7 @@ class TestHeldPositionSellBias:
         position_tracker = MagicMock()
         position_tracker.tracked_symbols = ["AAPL"]
         position_tracker.get_buy_strategy.return_value = "trend_following"
+        position_tracker._tracked = {}
 
         # AAPL held at small loss (-1%)
         mock_market_data.get_positions = AsyncMock(
@@ -2929,6 +2930,7 @@ class TestProfitProtection:
         position_tracker = MagicMock()
         position_tracker.tracked_symbols = ["VG"]
         position_tracker.get_buy_strategy.return_value = "trend_following"
+        position_tracker._tracked = {}
 
         # VG held at +20% gain (simulating the STOCK-34 scenario)
         mock_market_data.get_positions = AsyncMock(
@@ -3003,6 +3005,7 @@ class TestProfitProtection:
         position_tracker = MagicMock()
         position_tracker.tracked_symbols = ["AAPL"]
         position_tracker.get_buy_strategy.return_value = "trend_following"
+        position_tracker._tracked = {}
 
         # AAPL held at +5% gain (below 15% threshold)
         mock_market_data.get_positions = AsyncMock(
