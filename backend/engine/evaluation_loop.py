@@ -172,7 +172,11 @@ class EvaluationLoop:
         self._cache = cache
 
     def register_sell_cooldown(
-        self, symbol: str, sell_ts: float, *, is_loss: bool = False,
+        self,
+        symbol: str,
+        sell_ts: float,
+        *,
+        is_loss: bool = False,
     ) -> None:
         """Record a sell event for cooldown enforcement (STOCK-43).
 
@@ -648,7 +652,8 @@ class EvaluationLoop:
                 # or profit_protection which have their own checks above).
                 if combined.signal_type == SignalType.SELL:
                     if is_held and combined.strategy_name not in (
-                        "position_cleanup", "profit_protection",
+                        "position_cleanup",
+                        "profit_protection",
                     ):
                         # Check if hard SL bypass applies
                         pos = position_map.get(symbol)
@@ -790,7 +795,7 @@ class EvaluationLoop:
                     try:
                         tracked = self._position_tracker._tracked.get(symbol)
                         if tracked:
-                            hold_secs = time.time() - tracked.tracked_at
+                            hold_secs = time.monotonic() - tracked.tracked_at
                     except AttributeError:
                         pass  # mock or missing _tracked
                 min_hold = 4 * 3600  # 4 hours minimum
@@ -831,7 +836,9 @@ class EvaluationLoop:
                     self._position_tracker.untrack(symbol)
                     # Protective sells are always loss sells (regime/sentiment)
                     self.register_sell_cooldown(
-                        symbol, time.time(), is_loss=True,
+                        symbol,
+                        time.time(),
+                        is_loss=True,
                     )
 
         # Clear processed sentiments to avoid re-selling
@@ -1213,7 +1220,9 @@ class EvaluationLoop:
                         is_loss = price < pos.avg_price
                     # Add to recovery watch for re-entry evaluation
                     self.register_sell_cooldown(
-                        symbol, time.time(), is_loss=is_loss,
+                        symbol,
+                        time.time(),
+                        is_loss=is_loss,
                     )
 
     def _build_position_context(self, symbol: str, current_price: float) -> PositionContext | None:
@@ -1236,7 +1245,7 @@ class EvaluationLoop:
                 if tracked.entry_price > 0
                 else 0.0
             )
-            hold_secs = time.time() - tracked.tracked_at
+            hold_secs = time.monotonic() - tracked.tracked_at
             return PositionContext(
                 symbol=symbol,
                 entry_price=tracked.entry_price,
