@@ -150,6 +150,144 @@ class PositionTracker:
         self._tracked.pop(symbol, None)
         self._schedule_db_remove(symbol)
 
+    async def handle_sell_fill(
+        self,
+        symbol: str,
+        filled_price: float | None,
+        filled_quantity: int | None,
+        reason: str = "",
+    ) -> None:
+        """Handle confirmed sell fill from reconciliation.
+
+        STOCK-52: When a pending sell order is confirmed filled during
+        reconciliation, compute PnL, untrack (or reduce qty for partial fills),
+        fire sell callbacks, and send notifications. This replaces the
+        immediate untrack that was previously done in _execute_sell() for
+        pending orders.
+
+        Args:
+            symbol: Stock ticker symbol.
+            filled_price: Actual fill price from exchange. None if unknown.
+            filled_quantity: Number of shares filled. None means full position.
+            reason: Sell reason extracted from strategy name (e.g. "stop_loss",
+                "take_profit", "trailing_stop", "profit_taking").
+        """
+        tracked = self._tracked.get(symbol)
+        if not tracked:
+            # Already untracked (e.g. by check_all finding position gone)
+            return
+
+        # Use explicit None checks — 0 and 0.0 should NOT silently fall back
+        fill_qty = filled_quantity if filled_quantity is not None else tracked.quantity
+        if fill_qty <= 0:
+            fill_qty = tracked.quantity
+
+        if filled_price is None or filled_price <= 0:
+            logger.warning(
+                "handle_sell_fill: no valid fill price for %s (got %s), "
+                "using entry price for PnL estimate — accuracy may be off",
+                symbol,
+                filled_price,
+            )
+            fill_price = tracked.entry_price
+        else:
+            fill_price = filled_price
+
+        pnl = (fill_price - tracked.entry_price) * fill_qty
+        self._risk.update_daily_pnl(pnl)
+        is_loss = fill_price < tracked.entry_price
+
+        if fill_qty >= tracked.quantity:
+            # Full position sold — untrack
+            self.untrack(symbol)
+
+            logger.info(
+                "Reconciliation confirmed sell fill for %s: qty=%d price=$%.2f pnl=$%.2f",
+                symbol,
+                fill_qty,
+                fill_price,
+                pnl,
+            )
+
+            # Fire sell callbacks (e.g. EvaluationLoop sell cooldown).
+            # Try to pass is_loss so register_sell_cooldown can update the
+            # whipsaw counter correctly. Fall back to the bare (symbol, ts)
+            # signature for callbacks that don't accept is_loss.
+            sell_ts = time.time()
+            for cb in self._on_sell_callbacks:
+                try:
+                    cb(symbol, sell_ts, is_loss=is_loss)  # type: ignore[call-arg]
+                except TypeError:
+                    try:
+                        cb(symbol, sell_ts)
+                    except Exception as e:
+                        logger.warning("on_sell callback failed for %s: %s", symbol, e)
+                except Exception as e:
+                    logger.warning("on_sell callback failed for %s: %s", symbol, e)
+
+            if self._notification:
+                try:
+                    pnl_pct = (
+                        round((fill_price - tracked.entry_price) / tracked.entry_price * 100, 2)
+                        if tracked.entry_price > 0
+                        else None
+                    )
+                    if reason == "stop_loss":
+                        await self._notification.notify_stop_loss(
+                            symbol,
+                            fill_qty,
+                            tracked.entry_price,
+                            fill_price,
+                            pnl,
+                            pnl_pct=pnl_pct,
+                        )
+                    elif reason == "take_profit":
+                        await self._notification.notify_take_profit(
+                            symbol,
+                            fill_qty,
+                            tracked.entry_price,
+                            fill_price,
+                            pnl,
+                            pnl_pct=pnl_pct,
+                        )
+                    elif reason in ("trailing_stop", "tiered_trailing_stop", "breakeven_stop"):
+                        await self._notification.notify_trailing_stop(
+                            symbol,
+                            fill_qty,
+                            tracked.entry_price,
+                            fill_price,
+                            tracked.highest_price,
+                            pnl,
+                            pnl_pct=pnl_pct,
+                        )
+                except Exception as e:
+                    logger.error(
+                        "Failed to send %s notification for %s: %s",
+                        reason or "sell",
+                        symbol,
+                        e,
+                    )
+        else:
+            # Partial fill — reduce quantity and tighten SL, keep position tracked
+            tracked.quantity -= fill_qty
+            tracked.partial_profit_taken = True
+            tracked.stop_loss_pct = max(
+                0.01,
+                min(tracked.stop_loss_pct or 0.08, 0.03),
+            )
+            self._schedule_db_upsert(symbol)
+
+            logger.info(
+                "Reconciliation confirmed partial sell fill for %s: "
+                "qty=%d remaining=%d price=$%.2f pnl=$%.2f SL→%.1f%%",
+                symbol,
+                fill_qty,
+                tracked.quantity,
+                fill_price,
+                pnl,
+                tracked.stop_loss_pct * 100,
+            )
+
     async def check_all(self, session: str = "regular") -> list[dict]:
         """Check all tracked positions. Returns list of triggered actions.
 
@@ -200,6 +338,20 @@ class PositionTracker:
                     "Position %s has invalid price (%.2f), skipping",
                     symbol,
                     current_price,
+                )
+                continue
+
+            # STOCK-52: Skip evaluation if there is already a pending sell order
+            # for this symbol. This prevents duplicate sell orders while a limit
+            # sell is awaiting fill confirmation via reconciliation.
+            #
+            # Note: if the order fails/cancels, has_pending_order returns False
+            # on the next cycle, which naturally retries the sell — this is the
+            # correct behavior. Do NOT add an extra guard here.
+            if self._orders.has_pending_order(symbol, "SELL"):
+                logger.debug(
+                    "Position %s has pending sell order, skipping SL/TP evaluation",
+                    symbol,
                 )
                 continue
 
@@ -428,6 +580,19 @@ class PositionTracker:
         )
 
         if order:
+            # STOCK-52: Only update tracked position when order is confirmed filled.
+            # Pending partial sells should not modify quantity/SL until fill confirmed.
+            # handle_sell_fill() (called by reconciliation) handles the deferred update.
+            if order.status != "filled":
+                logger.info(
+                    "Partial sell order for %s is %s (order_id=%s), "
+                    "deferring quantity update until fill confirmed",
+                    tracked.symbol,
+                    order.status,
+                    order.order_id,
+                )
+                return
+
             fill_qty = order.filled_quantity or sell_qty
             fill_price = order.filled_price or price
             pnl = (fill_price - tracked.entry_price) * fill_qty
@@ -514,63 +679,86 @@ class PositionTracker:
         )
 
         if order:
-            # Use actual filled quantity for PnL (handles partial fills)
-            fill_qty = order.filled_quantity or tracked.quantity
-            fill_price = order.filled_price or price
-            pnl = (fill_price - tracked.entry_price) * fill_qty
-            self._risk.update_daily_pnl(pnl)
-            self.untrack(tracked.symbol)
+            # STOCK-52: Only untrack + update PnL when order is confirmed filled.
+            # KIS limit orders return status="pending" — if we untrack immediately,
+            # the position is lost from SL/TP monitoring. If the order never fills
+            # (price moved away), the position gets abandoned on the exchange.
+            # Pending sells are handled by handle_sell_fill() (called from
+            # reconciliation when the fill is confirmed).
+            if order.status == "filled":
+                # Use actual filled quantity for PnL (handles partial fills)
+                fill_qty = order.filled_quantity or tracked.quantity
+                fill_price = order.filled_price or price
+                pnl = (fill_price - tracked.entry_price) * fill_qty
+                self._risk.update_daily_pnl(pnl)
+                self.untrack(tracked.symbol)
 
-            # STOCK-43: Notify listeners (e.g. EvaluationLoop sell cooldown)
-            sell_ts = time.time()
-            for cb in self._on_sell_callbacks:
-                try:
-                    cb(tracked.symbol, sell_ts)
-                except Exception as e:
-                    logger.warning("on_sell callback failed for %s: %s", tracked.symbol, e)
+                # STOCK-43: Notify listeners (e.g. EvaluationLoop sell cooldown).
+                # Try to pass is_loss for whipsaw detection; fall back to bare
+                # (symbol, ts) for callbacks that don't accept the kwarg.
+                is_loss = fill_price < tracked.entry_price
+                sell_ts = time.time()
+                for cb in self._on_sell_callbacks:
+                    try:
+                        cb(tracked.symbol, sell_ts, is_loss=is_loss)  # type: ignore[call-arg]
+                    except TypeError:
+                        try:
+                            cb(tracked.symbol, sell_ts)
+                        except Exception as e:
+                            logger.warning("on_sell callback failed for %s: %s", tracked.symbol, e)
+                    except Exception as e:
+                        logger.warning("on_sell callback failed for %s: %s", tracked.symbol, e)
 
-            if self._notification:
-                try:
-                    pnl_pct = (
-                        round((fill_price - tracked.entry_price) / tracked.entry_price * 100, 2)
-                        if tracked.entry_price > 0
-                        else None
-                    )
-                    if reason == "stop_loss":
-                        await self._notification.notify_stop_loss(
-                            tracked.symbol,
-                            tracked.quantity,
-                            tracked.entry_price,
-                            price,
-                            pnl,
-                            pnl_pct=pnl_pct,
+                if self._notification:
+                    try:
+                        pnl_pct = (
+                            round((fill_price - tracked.entry_price) / tracked.entry_price * 100, 2)
+                            if tracked.entry_price > 0
+                            else None
                         )
-                    elif reason == "take_profit":
-                        await self._notification.notify_take_profit(
+                        if reason == "stop_loss":
+                            await self._notification.notify_stop_loss(
+                                tracked.symbol,
+                                tracked.quantity,
+                                tracked.entry_price,
+                                price,
+                                pnl,
+                                pnl_pct=pnl_pct,
+                            )
+                        elif reason == "take_profit":
+                            await self._notification.notify_take_profit(
+                                tracked.symbol,
+                                tracked.quantity,
+                                tracked.entry_price,
+                                price,
+                                pnl,
+                                pnl_pct=pnl_pct,
+                            )
+                        elif reason == "trailing_stop":
+                            await self._notification.notify_trailing_stop(
+                                tracked.symbol,
+                                tracked.quantity,
+                                tracked.entry_price,
+                                price,
+                                tracked.highest_price,
+                                pnl,
+                                pnl_pct=pnl_pct,
+                            )
+                    except Exception as e:
+                        logger.error(
+                            "Failed to send %s notification for %s: %s",
+                            reason,
                             tracked.symbol,
-                            tracked.quantity,
-                            tracked.entry_price,
-                            price,
-                            pnl,
-                            pnl_pct=pnl_pct,
+                            e,
                         )
-                    elif reason == "trailing_stop":
-                        await self._notification.notify_trailing_stop(
-                            tracked.symbol,
-                            tracked.quantity,
-                            tracked.entry_price,
-                            price,
-                            tracked.highest_price,
-                            pnl,
-                            pnl_pct=pnl_pct,
-                        )
-                except Exception as e:
-                    logger.error(
-                        "Failed to send %s notification for %s: %s",
-                        reason,
-                        tracked.symbol,
-                        e,
-                    )
+            else:
+                logger.info(
+                    "Sell order for %s is %s (order_id=%s), keeping position tracked "
+                    "until fill is confirmed by reconciliation",
+                    tracked.symbol,
+                    order.status,
+                    order.order_id,
+                )
 
     async def restore_from_exchange(self, session_factory=None) -> list[dict]:
         """Restore position tracking from exchange state after restart.
