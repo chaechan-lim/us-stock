@@ -727,7 +727,7 @@ class EvaluationLoop:
         if not tracked:
             return True
         try:
-            hold_secs = time.time() - float(tracked.tracked_at)
+            hold_secs = time.monotonic() - float(tracked.tracked_at)
         except (TypeError, ValueError):
             return True  # Can't determine hold time — allow sell
         if hold_secs < self._min_hold_secs:

@@ -2221,7 +2221,7 @@ class TestBuildPositionContext:
         tracked.highest_price = 115.0
         tracked.quantity = 50
         tracked.strategy = "trend_following"
-        tracked.tracked_at = time.time() - 3600  # 1 hour ago
+        tracked.tracked_at = time.monotonic() - 3600  # 1 hour ago
 
         position_tracker = MagicMock()
         position_tracker._tracked = {"AAPL": tracked}
@@ -2302,7 +2302,7 @@ class TestEvaluateExitIntegration:
         tracked.highest_price = 110.0
         tracked.quantity = 50
         tracked.strategy = "trend_following"
-        tracked.tracked_at = time.time() - 86400
+        tracked.tracked_at = time.monotonic() - 86400
 
         position_tracker = MagicMock()
         position_tracker._tracked = {"AAPL": tracked}
@@ -2388,7 +2388,7 @@ class TestEvaluateExitIntegration:
         tracked.highest_price = 112.0
         tracked.quantity = 50
         tracked.strategy = "trend_following"
-        tracked.tracked_at = time.time() - 86400
+        tracked.tracked_at = time.monotonic() - 86400
 
         position_tracker = MagicMock()
         position_tracker._tracked = {"AAPL": tracked}
@@ -3568,7 +3568,7 @@ class TestAntiWhipsawDefaults:
 
         eval_loop._min_hold_secs = 0
         tracked = MagicMock()
-        tracked.tracked_at = time.time()  # Just bought
+        tracked.tracked_at = time.monotonic()  # Just bought
         tracker = MagicMock()
         tracker._tracked = {"AAPL": tracked}
         eval_loop._position_tracker = tracker
@@ -3578,7 +3578,7 @@ class TestAntiWhipsawDefaults:
         """_check_min_hold returns True when position held > 4 hours."""
 
         tracked = MagicMock()
-        tracked.tracked_at = time.time() - 5 * 3600  # 5h ago
+        tracked.tracked_at = time.monotonic() - 5 * 3600  # 5h ago
         tracker = MagicMock()
         tracker._tracked = {"AAPL": tracked}
         eval_loop._position_tracker = tracker
@@ -3588,7 +3588,7 @@ class TestAntiWhipsawDefaults:
         """_check_min_hold returns False when position held < 4 hours."""
 
         tracked = MagicMock()
-        tracked.tracked_at = time.time() - 2 * 3600  # 2h ago
+        tracked.tracked_at = time.monotonic() - 2 * 3600  # 2h ago
         tracker = MagicMock()
         tracker._tracked = {"AAPL": tracked}
         eval_loop._position_tracker = tracker
@@ -3802,7 +3802,7 @@ class TestMinimumHoldPeriod:
                 signal_type=SignalType.HOLD, confidence=0.6,
                 strategy_name="trend_following", reason="hold",
             ),
-            tracked_at=time.time() - 3600,   # 1h ago (< 4h)
+            tracked_at=time.monotonic() - 3600,   # 1h ago (< 4h)
             avg_price=100.0,
             current_price=94.0,              # -6%, below -5% threshold, above -7% hard SL
         )
@@ -3820,7 +3820,7 @@ class TestMinimumHoldPeriod:
                 signal_type=SignalType.HOLD, confidence=0.6,
                 strategy_name="trend_following", reason="hold",
             ),
-            tracked_at=time.time() - 5 * 3600,  # 5h ago (> 4h)
+            tracked_at=time.monotonic() - 5 * 3600,  # 5h ago (> 4h)
             avg_price=100.0,
             current_price=94.0,                 # -6%, triggers cleanup
         )
@@ -3838,7 +3838,7 @@ class TestMinimumHoldPeriod:
                 signal_type=SignalType.HOLD, confidence=0.6,
                 strategy_name="trend_following", reason="hold",
             ),
-            tracked_at=time.time() - 1800,  # 30min ago (< 4h)
+            tracked_at=time.monotonic() - 1800,  # 30min ago (< 4h)
             avg_price=100.0,
             current_price=92.0,             # -8%, below -7% hard SL → bypass min hold
         )
@@ -3856,7 +3856,7 @@ class TestMinimumHoldPeriod:
                 signal_type=SignalType.SELL, confidence=0.8,
                 strategy_name="trend_following", reason="sell",
             ),
-            tracked_at=time.time() - 3600,  # 1h ago (< 4h)
+            tracked_at=time.monotonic() - 3600,  # 1h ago (< 4h)
             avg_price=100.0,
             current_price=97.0,             # -3%, loss but not hard SL
         )
@@ -3874,7 +3874,7 @@ class TestMinimumHoldPeriod:
                 signal_type=SignalType.SELL, confidence=0.8,
                 strategy_name="trend_following", reason="sell",
             ),
-            tracked_at=time.time() - 5 * 3600,  # 5h ago (> 4h)
+            tracked_at=time.monotonic() - 5 * 3600,  # 5h ago (> 4h)
             avg_price=100.0,
             current_price=97.0,
         )
@@ -3892,7 +3892,7 @@ class TestMinimumHoldPeriod:
                 signal_type=SignalType.SELL, confidence=0.9,
                 strategy_name="trend_following", reason="stop_loss",
             ),
-            tracked_at=time.time() - 1800,  # 30min ago (< 4h)
+            tracked_at=time.monotonic() - 1800,  # 30min ago (< 4h)
             avg_price=100.0,
             current_price=92.0,             # -8%, hard SL bypasses
         )
@@ -3910,7 +3910,7 @@ class TestMinimumHoldPeriod:
                 signal_type=SignalType.HOLD, confidence=0.6,
                 strategy_name="trend_following", reason="hold",
             ),
-            tracked_at=time.time() - 3600,  # Only 1h ago (< 4h)
+            tracked_at=time.monotonic() - 3600,  # Only 1h ago (< 4h)
             avg_price=100.0,
             current_price=120.0,            # +20%, triggers profit_protection
         )
