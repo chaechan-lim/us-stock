@@ -166,7 +166,11 @@ class PositionTracker:
         """
         pnl = (fill_price - tracked.entry_price) * fill_qty
         self._risk.update_daily_pnl(pnl)
-        is_loss = fill_price < tracked.entry_price
+        # STOCK-55: Use reason-based is_loss for whipsaw detection.
+        # Defensive exits (SL, trailing stop) always count as loss sells
+        # even if fill_price > entry (e.g. trailing stop after partial gain).
+        # Planned exits (TP, breakeven) never count as loss sells.
+        is_loss = reason in ("stop_loss", "trailing_stop", "tiered_trailing_stop")
 
         self.untrack(symbol)
 
