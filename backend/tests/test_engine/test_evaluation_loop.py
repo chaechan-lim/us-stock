@@ -2503,6 +2503,7 @@ class TestHeldPositionSellBias:
         position_tracker = MagicMock()
         position_tracker.tracked_symbols = ["AAPL"]
         position_tracker.get_buy_strategy.return_value = "trend_following"
+        position_tracker._tracked = {}  # Prevent MagicMock auto-attribute in _check_min_hold
 
         # Exchange shows held position with P&L = -5%
         mock_market_data.get_positions = AsyncMock(
@@ -2570,6 +2571,12 @@ class TestHeldPositionSellBias:
         position_tracker = MagicMock()
         position_tracker.tracked_symbols = ["AAPL"]
         position_tracker.get_buy_strategy.return_value = "trend_following"
+        # Explicit empty _tracked so _check_min_hold returns True immediately.
+        # Without this, MagicMock auto-creates _tracked which returns
+        # float(MagicMock()) = 1.0 for tracked_at, causing hold_secs =
+        # time.monotonic() - 1.0 which fails on fresh CI runners where
+        # monotonic() < 14400 (4h min hold).
+        position_tracker._tracked = {}
 
         # AAPL held at loss (-5.3%)
         mock_market_data.get_positions = AsyncMock(
