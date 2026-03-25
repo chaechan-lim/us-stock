@@ -150,6 +150,103 @@ class PositionTracker:
         self._tracked.pop(symbol, None)
         self._schedule_db_remove(symbol)
 
+    async def _finalize_sell(
+        self,
+        symbol: str,
+        fill_qty: int,
+        fill_price: float,
+        tracked: TrackedPosition,
+        reason: str,
+    ) -> None:
+        """Common sell finalization: PnL, untrack, callbacks, notifications.
+
+        Used by both _execute_sell (immediate fills) and handle_sell_fill
+        (reconciliation-confirmed fills) to avoid duplicating PnL/callback/
+        notification logic across two code paths.
+        """
+        pnl = (fill_price - tracked.entry_price) * fill_qty
+        self._risk.update_daily_pnl(pnl)
+        is_loss = fill_price < tracked.entry_price
+
+        self.untrack(symbol)
+
+        # Fire sell callbacks (e.g. EvaluationLoop sell cooldown).
+        # Try to pass is_loss for whipsaw detection; fall back to bare
+        # (symbol, ts) for callbacks that don't accept the kwarg.
+        sell_ts = time.time()
+        for cb in self._on_sell_callbacks:
+            try:
+                cb(symbol, sell_ts, is_loss=is_loss)  # type: ignore[call-arg]
+            except TypeError:
+                try:
+                    cb(symbol, sell_ts)
+                except Exception as e:
+                    logger.warning("on_sell callback failed for %s: %s", symbol, e)
+            except Exception as e:
+                logger.warning("on_sell callback failed for %s: %s", symbol, e)
+
+        if self._notification:
+            try:
+                pnl_pct = (
+                    round(
+                        (fill_price - tracked.entry_price) / tracked.entry_price * 100,
+                        2,
+                    )
+                    if tracked.entry_price > 0
+                    else None
+                )
+                if reason == "stop_loss":
+                    await self._notification.notify_stop_loss(
+                        symbol,
+                        fill_qty,
+                        tracked.entry_price,
+                        fill_price,
+                        pnl,
+                        pnl_pct=pnl_pct,
+                    )
+                elif reason == "take_profit":
+                    await self._notification.notify_take_profit(
+                        symbol,
+                        fill_qty,
+                        tracked.entry_price,
+                        fill_price,
+                        pnl,
+                        pnl_pct=pnl_pct,
+                    )
+                elif reason in (
+                    "trailing_stop",
+                    "tiered_trailing_stop",
+                    "breakeven_stop",
+                ):
+                    await self._notification.notify_trailing_stop(
+                        symbol,
+                        fill_qty,
+                        tracked.entry_price,
+                        fill_price,
+                        tracked.highest_price,
+                        pnl,
+                        pnl_pct=pnl_pct,
+                    )
+                else:
+                    # Generic sell notification for evaluation_loop paths
+                    # (protective sells, signal-based sells) where the
+                    # strategy_name lacks a colon separator.
+                    await self._notification.notify_trade_executed(
+                        symbol,
+                        "SELL",
+                        fill_qty,
+                        fill_price,
+                        reason or "sell",
+                        market=self._market,
+                    )
+            except Exception as e:
+                logger.error(
+                    "Failed to send %s notification for %s: %s",
+                    reason or "sell",
+                    symbol,
+                    e,
+                )
+
     async def handle_sell_fill(
         self,
         symbol: str,
@@ -177,10 +274,18 @@ class PositionTracker:
             # Already untracked (e.g. by check_all finding position gone)
             return
 
-        # Use explicit None checks — 0 and 0.0 should NOT silently fall back
+        # Use explicit None checks — 0 and 0.0 should NOT silently fall back.
+        # None means "unknown quantity" → assume full position (e.g. KIS didn't
+        # return filled_quantity).  0 means "no shares filled" (e.g. cancelled
+        # order) → early return to avoid false untrack.
         fill_qty = filled_quantity if filled_quantity is not None else tracked.quantity
         if fill_qty <= 0:
-            fill_qty = tracked.quantity
+            logger.info(
+                "handle_sell_fill: filled_quantity=%s for %s, no shares filled — skipping",
+                filled_quantity,
+                symbol,
+            )
+            return
 
         if filled_price is None or filled_price <= 0:
             logger.warning(
@@ -193,13 +298,10 @@ class PositionTracker:
         else:
             fill_price = filled_price
 
-        pnl = (fill_price - tracked.entry_price) * fill_qty
-        self._risk.update_daily_pnl(pnl)
-        is_loss = fill_price < tracked.entry_price
-
         if fill_qty >= tracked.quantity:
-            # Full position sold — untrack
-            self.untrack(symbol)
+            # Full position sold — delegate to shared finalization
+            pnl = (fill_price - tracked.entry_price) * fill_qty
+            await self._finalize_sell(symbol, fill_qty, fill_price, tracked, reason)
 
             logger.info(
                 "Reconciliation confirmed sell fill for %s: qty=%d price=$%.2f pnl=$%.2f",
@@ -208,80 +310,11 @@ class PositionTracker:
                 fill_price,
                 pnl,
             )
-
-            # Fire sell callbacks (e.g. EvaluationLoop sell cooldown).
-            # Try to pass is_loss so register_sell_cooldown can update the
-            # whipsaw counter correctly. Fall back to the bare (symbol, ts)
-            # signature for callbacks that don't accept is_loss.
-            sell_ts = time.time()
-            for cb in self._on_sell_callbacks:
-                try:
-                    cb(symbol, sell_ts, is_loss=is_loss)  # type: ignore[call-arg]
-                except TypeError:
-                    try:
-                        cb(symbol, sell_ts)
-                    except Exception as e:
-                        logger.warning("on_sell callback failed for %s: %s", symbol, e)
-                except Exception as e:
-                    logger.warning("on_sell callback failed for %s: %s", symbol, e)
-
-            if self._notification:
-                try:
-                    pnl_pct = (
-                        round((fill_price - tracked.entry_price) / tracked.entry_price * 100, 2)
-                        if tracked.entry_price > 0
-                        else None
-                    )
-                    if reason == "stop_loss":
-                        await self._notification.notify_stop_loss(
-                            symbol,
-                            fill_qty,
-                            tracked.entry_price,
-                            fill_price,
-                            pnl,
-                            pnl_pct=pnl_pct,
-                        )
-                    elif reason == "take_profit":
-                        await self._notification.notify_take_profit(
-                            symbol,
-                            fill_qty,
-                            tracked.entry_price,
-                            fill_price,
-                            pnl,
-                            pnl_pct=pnl_pct,
-                        )
-                    elif reason in ("trailing_stop", "tiered_trailing_stop", "breakeven_stop"):
-                        await self._notification.notify_trailing_stop(
-                            symbol,
-                            fill_qty,
-                            tracked.entry_price,
-                            fill_price,
-                            tracked.highest_price,
-                            pnl,
-                            pnl_pct=pnl_pct,
-                        )
-                    else:
-                        # Generic sell notification for evaluation_loop paths
-                        # (protective sells, signal-based sells) where the
-                        # strategy_name lacks a colon separator — e.g.
-                        # "regime_protect(pnl=-5.0%)" or "trend_following".
-                        await self._notification.notify_trade_executed(
-                            symbol,
-                            "SELL",
-                            fill_qty,
-                            fill_price,
-                            reason or "sell",
-                            market=self._market,
-                        )
-                except Exception as e:
-                    logger.error(
-                        "Failed to send %s notification for %s: %s",
-                        reason or "sell",
-                        symbol,
-                        e,
-                    )
         else:
             # Partial fill — reduce quantity and tighten SL, keep position tracked
+            pnl = (fill_price - tracked.entry_price) * fill_qty
+            self._risk.update_daily_pnl(pnl)
+
             tracked.quantity -= fill_qty
             tracked.partial_profit_taken = True
             tracked.stop_loss_pct = max(
@@ -300,6 +333,23 @@ class PositionTracker:
                 pnl,
                 tracked.stop_loss_pct * 100,
             )
+
+            if self._notification:
+                try:
+                    await self._notification.notify_trade_executed(
+                        symbol,
+                        "SELL",
+                        fill_qty,
+                        fill_price,
+                        reason or "partial_fill",
+                        market=self._market,
+                    )
+                except Exception as e:
+                    logger.error(
+                        "Failed to send partial fill notification for %s: %s",
+                        symbol,
+                        e,
+                    )
 
     async def check_all(self, session: str = "regular") -> list[dict]:
         """Check all tracked positions. Returns list of triggered actions.
@@ -354,6 +404,12 @@ class PositionTracker:
                 )
                 continue
 
+            # Update highest price for trailing stop — must happen BEFORE
+            # the pending sell check so that if a pending sell is later
+            # cancelled, check_all resumes with an accurate peak price.
+            if current_price > tracked.highest_price:
+                tracked.highest_price = current_price
+
             # STOCK-52: Skip evaluation if there is already a pending sell order
             # for this symbol. This prevents duplicate sell orders while a limit
             # sell is awaiting fill confirmation via reconciliation.
@@ -367,10 +423,6 @@ class PositionTracker:
                     symbol,
                 )
                 continue
-
-            # Update highest price for trailing stop
-            if current_price > tracked.highest_price:
-                tracked.highest_price = current_price
 
             action = self._evaluate(tracked, current_price)
             if action:
@@ -699,71 +751,15 @@ class PositionTracker:
             # Pending sells are handled by handle_sell_fill() (called from
             # reconciliation when the fill is confirmed).
             if order.status == "filled":
-                # Use actual filled quantity for PnL (handles partial fills)
                 fill_qty = order.filled_quantity or tracked.quantity
                 fill_price = order.filled_price or price
-                pnl = (fill_price - tracked.entry_price) * fill_qty
-                self._risk.update_daily_pnl(pnl)
-                self.untrack(tracked.symbol)
-
-                # STOCK-43: Notify listeners (e.g. EvaluationLoop sell cooldown).
-                # Try to pass is_loss for whipsaw detection; fall back to bare
-                # (symbol, ts) for callbacks that don't accept the kwarg.
-                is_loss = fill_price < tracked.entry_price
-                sell_ts = time.time()
-                for cb in self._on_sell_callbacks:
-                    try:
-                        cb(tracked.symbol, sell_ts, is_loss=is_loss)  # type: ignore[call-arg]
-                    except TypeError:
-                        try:
-                            cb(tracked.symbol, sell_ts)
-                        except Exception as e:
-                            logger.warning("on_sell callback failed for %s: %s", tracked.symbol, e)
-                    except Exception as e:
-                        logger.warning("on_sell callback failed for %s: %s", tracked.symbol, e)
-
-                if self._notification:
-                    try:
-                        pnl_pct = (
-                            round((fill_price - tracked.entry_price) / tracked.entry_price * 100, 2)
-                            if tracked.entry_price > 0
-                            else None
-                        )
-                        if reason == "stop_loss":
-                            await self._notification.notify_stop_loss(
-                                tracked.symbol,
-                                tracked.quantity,
-                                tracked.entry_price,
-                                price,
-                                pnl,
-                                pnl_pct=pnl_pct,
-                            )
-                        elif reason == "take_profit":
-                            await self._notification.notify_take_profit(
-                                tracked.symbol,
-                                tracked.quantity,
-                                tracked.entry_price,
-                                price,
-                                pnl,
-                                pnl_pct=pnl_pct,
-                            )
-                        elif reason == "trailing_stop":
-                            await self._notification.notify_trailing_stop(
-                                tracked.symbol,
-                                tracked.quantity,
-                                tracked.entry_price,
-                                price,
-                                tracked.highest_price,
-                                pnl,
-                                pnl_pct=pnl_pct,
-                            )
-                    except Exception as e:
-                        logger.error(
-                            "Failed to send %s notification for %s: %s",
-                            reason,
-                            tracked.symbol,
-                            e,
-                        )
+                await self._finalize_sell(
+                    tracked.symbol,
+                    fill_qty,
+                    fill_price,
+                    tracked,
+                    reason,
+                )
             else:
                 logger.info(
                     "Sell order for %s is %s (order_id=%s), keeping position tracked "
