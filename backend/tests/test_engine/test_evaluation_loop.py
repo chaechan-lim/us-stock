@@ -1090,6 +1090,37 @@ class TestProtectiveSells:
         # get_positions should not even be called (early return)
         mock_market_data.get_positions.assert_not_called()
 
+    async def test_sentiment_sell_respects_min_hold_monotonic(
+        self,
+        loop_with_tracker,
+        mock_market_data,
+        mock_adapter,
+    ):
+        """STOCK-50: Sentiment sell hold check must use time.monotonic().
+
+        tracked_at is set via time.monotonic(). If the hold check used
+        time.time(), the difference would be millions of seconds and the
+        min-hold gate would always pass, defeating its purpose.
+        """
+        import time
+
+        tracked = MagicMock()
+        tracked.tracked_at = time.monotonic() - 60  # only 1 minute ago
+
+        loop_with_tracker._position_tracker._tracked = {"AAPL": tracked}
+
+        mock_market_data.get_positions.return_value = [
+            Position(
+                symbol="AAPL", exchange="NASD", quantity=10, avg_price=150.0, current_price=160.0
+            ),
+        ]
+
+        loop_with_tracker.update_news_sentiment({"AAPL": -0.8})
+        await loop_with_tracker._check_protective_sells({"AAPL"})
+
+        # Should NOT sell because position held only 1 minute (min hold is 4 hours)
+        mock_adapter.create_sell_order.assert_not_called()
+
 
 class TestDuplicateBuyPrevention:
     """Test defense-in-depth: exchange position check prevents duplicate buys.
@@ -2262,6 +2293,31 @@ class TestBuildPositionContext:
         ctx = eval_loop._build_position_context("AAPL", 110.0)
         assert ctx is None
 
+    async def test_build_context_hold_seconds_uses_monotonic(self, eval_loop):
+        """STOCK-50: hold_seconds must use time.monotonic(), not time.time().
+
+        tracked_at is set via time.monotonic(). If _build_position_context
+        used time.time(), hold_seconds would be millions of seconds off.
+        """
+        import time
+
+        tracked = MagicMock()
+        tracked.entry_price = 100.0
+        tracked.highest_price = 105.0
+        tracked.quantity = 10
+        tracked.strategy = "trend_following"
+        tracked.tracked_at = time.monotonic() - 7200  # 2 hours ago
+
+        position_tracker = MagicMock()
+        position_tracker._tracked = {"AAPL": tracked}
+        eval_loop._position_tracker = position_tracker
+
+        ctx = eval_loop._build_position_context("AAPL", 105.0)
+
+        assert ctx is not None
+        # hold_seconds should be ~7200 (2 hours), not millions
+        assert 7100 < ctx.hold_seconds < 7300
+
 
 class TestEvaluateExitIntegration:
     """Tests that evaluate_exit() is called during held position evaluation."""
@@ -2447,6 +2503,7 @@ class TestHeldPositionSellBias:
         position_tracker = MagicMock()
         position_tracker.tracked_symbols = ["AAPL"]
         position_tracker.get_buy_strategy.return_value = "trend_following"
+        position_tracker._tracked = {}  # Prevent MagicMock auto-attribute in _check_min_hold
 
         # Exchange shows held position with P&L = -5%
         mock_market_data.get_positions = AsyncMock(
@@ -2514,6 +2571,12 @@ class TestHeldPositionSellBias:
         position_tracker = MagicMock()
         position_tracker.tracked_symbols = ["AAPL"]
         position_tracker.get_buy_strategy.return_value = "trend_following"
+        # Explicit empty _tracked so _check_min_hold returns True immediately.
+        # Without this, MagicMock auto-creates _tracked which returns
+        # float(MagicMock()) = 1.0 for tracked_at, causing hold_secs =
+        # time.monotonic() - 1.0 which fails on fresh CI runners where
+        # monotonic() < 14400 (4h min hold).
+        position_tracker._tracked = {}
 
         # AAPL held at loss (-5.3%)
         mock_market_data.get_positions = AsyncMock(
@@ -2588,6 +2651,7 @@ class TestHeldPositionSellBias:
         position_tracker = MagicMock()
         position_tracker.tracked_symbols = ["AAPL"]
         position_tracker.get_buy_strategy.return_value = "trend_following"
+        position_tracker._tracked = {}
 
         # AAPL held at small loss (-1%)
         mock_market_data.get_positions = AsyncMock(
@@ -2866,6 +2930,7 @@ class TestProfitProtection:
         position_tracker = MagicMock()
         position_tracker.tracked_symbols = ["VG"]
         position_tracker.get_buy_strategy.return_value = "trend_following"
+        position_tracker._tracked = {}
 
         # VG held at +20% gain (simulating the STOCK-34 scenario)
         mock_market_data.get_positions = AsyncMock(
@@ -2940,6 +3005,7 @@ class TestProfitProtection:
         position_tracker = MagicMock()
         position_tracker.tracked_symbols = ["AAPL"]
         position_tracker.get_buy_strategy.return_value = "trend_following"
+        position_tracker._tracked = {}
 
         # AAPL held at +5% gain (below 15% threshold)
         mock_market_data.get_positions = AsyncMock(
@@ -3517,6 +3583,7 @@ class TestSellCooldownKRMarket:
 # STOCK-47: Anti-Whipsaw Tests
 # ---------------------------------------------------------------------------
 
+
 class TestAntiWhipsawDefaults:
     """STOCK-47: Verify default values for anti-whipsaw parameters.
 
@@ -3791,38 +3858,40 @@ class TestMinimumHoldPeriod:
         )
         return loop
 
-    async def test_position_cleanup_blocked_within_min_hold(
-        self, mock_adapter, mock_market_data
-    ):
+    async def test_position_cleanup_blocked_within_min_hold(self, mock_adapter, mock_market_data):
         """position_cleanup SELL blocked if held < 4h (not hard SL)."""
 
         loop = self._make_full_loop(
-            mock_adapter, mock_market_data,
+            mock_adapter,
+            mock_market_data,
             strategy_signal=Signal(
-                signal_type=SignalType.HOLD, confidence=0.6,
-                strategy_name="trend_following", reason="hold",
+                signal_type=SignalType.HOLD,
+                confidence=0.6,
+                strategy_name="trend_following",
+                reason="hold",
             ),
-            tracked_at=time.monotonic() - 3600,   # 1h ago (< 4h)
+            tracked_at=time.monotonic() - 3600,  # 1h ago (< 4h)
             avg_price=100.0,
-            current_price=94.0,              # -6%, below -5% threshold, above -7% hard SL
+            current_price=94.0,  # -6%, below -5% threshold, above -7% hard SL
         )
         await loop._evaluate_all()
         mock_adapter.create_sell_order.assert_not_called()
 
-    async def test_position_cleanup_allowed_after_min_hold(
-        self, mock_adapter, mock_market_data
-    ):
+    async def test_position_cleanup_allowed_after_min_hold(self, mock_adapter, mock_market_data):
         """position_cleanup SELL fires after 4h min hold period."""
 
         loop = self._make_full_loop(
-            mock_adapter, mock_market_data,
+            mock_adapter,
+            mock_market_data,
             strategy_signal=Signal(
-                signal_type=SignalType.HOLD, confidence=0.6,
-                strategy_name="trend_following", reason="hold",
+                signal_type=SignalType.HOLD,
+                confidence=0.6,
+                strategy_name="trend_following",
+                reason="hold",
             ),
             tracked_at=time.monotonic() - 5 * 3600,  # 5h ago (> 4h)
             avg_price=100.0,
-            current_price=94.0,                 # -6%, triggers cleanup
+            current_price=94.0,  # -6%, triggers cleanup
         )
         await loop._evaluate_all()
         mock_adapter.create_sell_order.assert_called_once()
@@ -3833,46 +3902,51 @@ class TestMinimumHoldPeriod:
         """Hard SL (-7%+) bypasses min hold in position_cleanup path."""
 
         loop = self._make_full_loop(
-            mock_adapter, mock_market_data,
+            mock_adapter,
+            mock_market_data,
             strategy_signal=Signal(
-                signal_type=SignalType.HOLD, confidence=0.6,
-                strategy_name="trend_following", reason="hold",
+                signal_type=SignalType.HOLD,
+                confidence=0.6,
+                strategy_name="trend_following",
+                reason="hold",
             ),
             tracked_at=time.monotonic() - 1800,  # 30min ago (< 4h)
             avg_price=100.0,
-            current_price=92.0,             # -8%, below -7% hard SL → bypass min hold
+            current_price=92.0,  # -8%, below -7% hard SL → bypass min hold
         )
         await loop._evaluate_all()
         mock_adapter.create_sell_order.assert_called_once()
 
-    async def test_strategy_sell_blocked_within_min_hold(
-        self, mock_adapter, mock_market_data
-    ):
+    async def test_strategy_sell_blocked_within_min_hold(self, mock_adapter, mock_market_data):
         """Strategy SELL blocked if held < 4h and loss not hard SL."""
 
         loop = self._make_full_loop(
-            mock_adapter, mock_market_data,
+            mock_adapter,
+            mock_market_data,
             strategy_signal=Signal(
-                signal_type=SignalType.SELL, confidence=0.8,
-                strategy_name="trend_following", reason="sell",
+                signal_type=SignalType.SELL,
+                confidence=0.8,
+                strategy_name="trend_following",
+                reason="sell",
             ),
             tracked_at=time.monotonic() - 3600,  # 1h ago (< 4h)
             avg_price=100.0,
-            current_price=97.0,             # -3%, loss but not hard SL
+            current_price=97.0,  # -3%, loss but not hard SL
         )
         await loop._evaluate_all()
         mock_adapter.create_sell_order.assert_not_called()
 
-    async def test_strategy_sell_allowed_after_min_hold(
-        self, mock_adapter, mock_market_data
-    ):
+    async def test_strategy_sell_allowed_after_min_hold(self, mock_adapter, mock_market_data):
         """Strategy SELL executes after 4h min hold period."""
 
         loop = self._make_full_loop(
-            mock_adapter, mock_market_data,
+            mock_adapter,
+            mock_market_data,
             strategy_signal=Signal(
-                signal_type=SignalType.SELL, confidence=0.8,
-                strategy_name="trend_following", reason="sell",
+                signal_type=SignalType.SELL,
+                confidence=0.8,
+                strategy_name="trend_following",
+                reason="sell",
             ),
             tracked_at=time.monotonic() - 5 * 3600,  # 5h ago (> 4h)
             avg_price=100.0,
@@ -3881,38 +3955,40 @@ class TestMinimumHoldPeriod:
         await loop._evaluate_all()
         mock_adapter.create_sell_order.assert_called_once()
 
-    async def test_strategy_hard_sl_bypasses_min_hold(
-        self, mock_adapter, mock_market_data
-    ):
+    async def test_strategy_hard_sl_bypasses_min_hold(self, mock_adapter, mock_market_data):
         """Strategy SELL with hard SL (-7%+) bypasses min hold check."""
 
         loop = self._make_full_loop(
-            mock_adapter, mock_market_data,
+            mock_adapter,
+            mock_market_data,
             strategy_signal=Signal(
-                signal_type=SignalType.SELL, confidence=0.9,
-                strategy_name="trend_following", reason="stop_loss",
+                signal_type=SignalType.SELL,
+                confidence=0.9,
+                strategy_name="trend_following",
+                reason="stop_loss",
             ),
             tracked_at=time.monotonic() - 1800,  # 30min ago (< 4h)
             avg_price=100.0,
-            current_price=92.0,             # -8%, hard SL bypasses
+            current_price=92.0,  # -8%, hard SL bypasses
         )
         await loop._evaluate_all()
         mock_adapter.create_sell_order.assert_called_once()
 
-    async def test_profit_protection_not_blocked_by_min_hold(
-        self, mock_adapter, mock_market_data
-    ):
+    async def test_profit_protection_not_blocked_by_min_hold(self, mock_adapter, mock_market_data):
         """profit_protection sells bypass min hold check (profit_protection exempt)."""
 
         loop = self._make_full_loop(
-            mock_adapter, mock_market_data,
+            mock_adapter,
+            mock_market_data,
             strategy_signal=Signal(
-                signal_type=SignalType.HOLD, confidence=0.6,
-                strategy_name="trend_following", reason="hold",
+                signal_type=SignalType.HOLD,
+                confidence=0.6,
+                strategy_name="trend_following",
+                reason="hold",
             ),
             tracked_at=time.monotonic() - 3600,  # Only 1h ago (< 4h)
             avg_price=100.0,
-            current_price=120.0,            # +20%, triggers profit_protection
+            current_price=120.0,  # +20%, triggers profit_protection
         )
         loop._profit_protection_pct = 0.15  # 15% gain triggers
         await loop._evaluate_all()
@@ -4115,9 +4191,7 @@ class TestWhipsawCounter:
         await loop.evaluate_symbol("005935")
         mock_adapter.create_buy_order.assert_not_called()
 
-    async def test_max_loss_sells_configurable(
-        self, mock_adapter, mock_market_data, mock_registry
-    ):
+    async def test_max_loss_sells_configurable(self, mock_adapter, mock_market_data, mock_registry):
         """_max_loss_sells should be configurable per loop instance."""
 
         loop = self._make_loop(mock_adapter, mock_market_data, mock_registry)

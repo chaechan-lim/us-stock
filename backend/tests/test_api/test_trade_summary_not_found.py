@@ -8,6 +8,7 @@ Validates:
 
 from datetime import datetime, timedelta
 from unittest.mock import MagicMock, patch
+from zoneinfo import ZoneInfo
 
 import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -118,10 +119,16 @@ async def test_trade_summary_includes_not_found_with_pnl(db_session):
 async def test_trade_summary_not_found_in_today_period(db_session):
     """STOCK-37: not_found orders with PnL appear in today period using created_at."""
     session, factory = db_session
-    now = datetime.utcnow()
-    # STOCK-48: Use today_start + offset instead of now - offset to avoid
-    # UTC day-boundary issues (now - 1h crosses into yesterday when UTC 00:00~01:00)
-    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+
+    # STOCK-50: Create order at a time that's definitely "today" in the market's timezone.
+    # Get current time in market's timezone (US = America/New_York), find the start of that day,
+    # then add offset. Convert back to UTC (naive) for storage.
+    ny_tz = ZoneInfo("America/New_York")
+    now_ny = datetime.now(ny_tz)
+    today_start_ny = now_ny.replace(hour=0, minute=0, second=0, microsecond=0)
+    trade_time_ny = today_start_ny + timedelta(hours=1)
+    # Convert to UTC by removing tzinfo after getting the UTC equivalent
+    trade_time_utc = trade_time_ny.astimezone(ZoneInfo("UTC")).replace(tzinfo=None)
 
     not_found = _make_order(
         "DOCN",
@@ -130,7 +137,7 @@ async def test_trade_summary_not_found_in_today_period(db_session):
         pnl=41.60,
         pnl_pct=3.0,
         filled_at=None,
-        created_at=today_start + timedelta(hours=1),
+        created_at=trade_time_utc,
     )
     session.add(not_found)
     await session.commit()
@@ -228,10 +235,13 @@ async def test_trade_summary_not_found_losses_counted(db_session):
 async def test_trade_summary_mixed_filled_and_not_found(db_session):
     """STOCK-37: Full scenario matching the issue — 11 not_found trades with PnL."""
     session, factory = db_session
-    now = datetime.utcnow()
-    # STOCK-48: Use today_start + offset instead of now - offset to avoid
-    # UTC day-boundary issues (now - 1h crosses into yesterday when UTC 00:00~01:00)
-    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+
+    # STOCK-50: Create orders at times that are definitely "today" in the market's timezone.
+    ny_tz = ZoneInfo("America/New_York")
+    now_ny = datetime.now(ny_tz)
+    today_start_ny = now_ny.replace(hour=0, minute=0, second=0, microsecond=0)
+    trade_time_ny = today_start_ny + timedelta(hours=1)
+    trade_time_utc = trade_time_ny.astimezone(ZoneInfo("UTC")).replace(tzinfo=None)
 
     # Replicate the 11 orders from the issue
     orders_data = [
@@ -254,7 +264,7 @@ async def test_trade_summary_mixed_filled_and_not_found(db_session):
             "not_found",
             pnl=pnl,
             filled_at=None,
-            created_at=today_start + timedelta(hours=1),
+            created_at=trade_time_utc,
         )
         session.add(order)
     await session.commit()
