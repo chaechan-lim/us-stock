@@ -1580,6 +1580,220 @@ async def test_on_sell_callback_error_does_not_block_other_callbacks(adapter, ri
     assert calls == ["AAPL"]
 
 
+# ── STOCK-55: Reason-based is_loss for whipsaw detection ─────────────────
+
+
+@pytest.mark.asyncio
+async def test_on_sell_callback_stop_loss_is_loss_true(adapter, risk, order_mgr):
+    """STOCK-55: Stop-loss sell should pass is_loss=True to callback."""
+    from exchange.base import OrderResult
+
+    adapter.fetch_positions = AsyncMock(
+        return_value=[
+            Position(
+                symbol="AAPL",
+                exchange="NASD",
+                quantity=10,
+                avg_price=150.0,
+                current_price=140.0,  # -6.7% < -5% SL
+            ),
+        ]
+    )
+    adapter.create_sell_order = AsyncMock(
+        return_value=OrderResult(
+            order_id="SL_LOSS",
+            symbol="AAPL",
+            side="SELL",
+            order_type="market",
+            quantity=10,
+            price=140.0,
+            status="filled",
+            filled_price=140.0,
+        )
+    )
+
+    callback_calls: list[tuple[str, float, bool]] = []
+
+    def on_sell(symbol: str, ts: float, *, is_loss: bool = False) -> None:
+        callback_calls.append((symbol, ts, is_loss))
+
+    tracker = PositionTracker(adapter, risk, order_mgr)
+    tracker.register_on_sell(on_sell)
+    tracker.track("AAPL", entry_price=150.0, quantity=10, stop_loss_pct=0.05)
+
+    await tracker.check_all()
+
+    assert len(callback_calls) == 1
+    assert callback_calls[0][0] == "AAPL"
+    assert callback_calls[0][2] is True  # is_loss=True for SL
+
+
+@pytest.mark.asyncio
+async def test_on_sell_callback_trailing_stop_is_loss_true(adapter, risk, order_mgr):
+    """STOCK-55: Trailing stop sell should pass is_loss=True even when price > entry."""
+    from exchange.base import OrderResult
+
+    # Scenario: entry=$100, price went to $115 (peak), then dropped to $108.
+    # Trailing activation=5%, trailing stop=5%.
+    # $115 peak retraced to $108 → drop from peak = 6.1% > 5% trailing stop.
+    # But $108 > $100 entry → old price-based logic would say is_loss=False.
+    # STOCK-55: reason-based → is_loss=True because trailing_stop is a defensive exit.
+    adapter.fetch_positions = AsyncMock(
+        return_value=[
+            Position(
+                symbol="TSLA",
+                exchange="NASD",
+                quantity=10,
+                avg_price=100.0,
+                current_price=108.0,
+            ),
+        ]
+    )
+    adapter.create_sell_order = AsyncMock(
+        return_value=OrderResult(
+            order_id="TRAIL1",
+            symbol="TSLA",
+            side="SELL",
+            order_type="market",
+            quantity=10,
+            price=108.0,
+            status="filled",
+            filled_price=108.0,
+        )
+    )
+
+    callback_calls: list[tuple[str, float, bool]] = []
+
+    def on_sell(symbol: str, ts: float, *, is_loss: bool = False) -> None:
+        callback_calls.append((symbol, ts, is_loss))
+
+    tracker = PositionTracker(adapter, risk, order_mgr)
+    tracker.register_on_sell(on_sell)
+    tracker.track(
+        "TSLA",
+        entry_price=100.0,
+        quantity=10,
+        stop_loss_pct=0.15,
+        trailing_activation_pct=0.05,
+        trailing_stop_pct=0.05,
+    )
+    # Simulate price having reached $115 peak
+    tracker._tracked["TSLA"].highest_price = 115.0
+
+    await tracker.check_all()
+
+    assert len(callback_calls) == 1
+    assert callback_calls[0][0] == "TSLA"
+    # Key assertion: trailing stop with fill_price > entry still counts as loss
+    assert callback_calls[0][2] is True
+
+
+@pytest.mark.asyncio
+async def test_on_sell_callback_take_profit_is_loss_false(adapter, risk, order_mgr):
+    """STOCK-55: Take-profit sell should pass is_loss=False to callback."""
+    from exchange.base import OrderResult
+
+    adapter.fetch_positions = AsyncMock(
+        return_value=[
+            Position(
+                symbol="MSFT",
+                exchange="NASD",
+                quantity=10,
+                avg_price=100.0,
+                current_price=125.0,  # +25% > 20% TP
+            ),
+        ]
+    )
+    adapter.create_sell_order = AsyncMock(
+        return_value=OrderResult(
+            order_id="TP_NOLOSS",
+            symbol="MSFT",
+            side="SELL",
+            order_type="market",
+            quantity=10,
+            price=125.0,
+            status="filled",
+            filled_price=125.0,
+        )
+    )
+
+    callback_calls: list[tuple[str, float, bool]] = []
+
+    def on_sell(symbol: str, ts: float, *, is_loss: bool = False) -> None:
+        callback_calls.append((symbol, ts, is_loss))
+
+    tracker = PositionTracker(adapter, risk, order_mgr)
+    tracker.register_on_sell(on_sell)
+    tracker.track("MSFT", entry_price=100.0, quantity=10, take_profit_pct=0.20)
+
+    await tracker.check_all()
+
+    assert len(callback_calls) == 1
+    assert callback_calls[0][0] == "MSFT"
+    assert callback_calls[0][2] is False  # is_loss=False for TP
+
+
+@pytest.mark.asyncio
+async def test_handle_sell_fill_reason_stop_loss_is_loss_true(adapter, risk, order_mgr):
+    """STOCK-55: handle_sell_fill with stop_loss reason passes is_loss=True."""
+    callback_calls: list[tuple[str, float, bool]] = []
+
+    def on_sell(symbol: str, ts: float, *, is_loss: bool = False) -> None:
+        callback_calls.append((symbol, ts, is_loss))
+
+    tracker = PositionTracker(adapter, risk, order_mgr)
+    tracker.register_on_sell(on_sell)
+    tracker.track("AAPL", 150.0, 10, stop_loss_pct=0.08)
+
+    await tracker.handle_sell_fill(
+        "AAPL", filled_price=140.0, filled_quantity=10, reason="stop_loss"
+    )
+
+    assert len(callback_calls) == 1
+    assert callback_calls[0][2] is True  # is_loss=True for SL
+
+
+@pytest.mark.asyncio
+async def test_handle_sell_fill_reason_take_profit_is_loss_false(adapter, risk, order_mgr):
+    """STOCK-55: handle_sell_fill with take_profit reason passes is_loss=False."""
+    callback_calls: list[tuple[str, float, bool]] = []
+
+    def on_sell(symbol: str, ts: float, *, is_loss: bool = False) -> None:
+        callback_calls.append((symbol, ts, is_loss))
+
+    tracker = PositionTracker(adapter, risk, order_mgr)
+    tracker.register_on_sell(on_sell)
+    tracker.track("AAPL", 100.0, 10, take_profit_pct=0.20)
+
+    await tracker.handle_sell_fill(
+        "AAPL", filled_price=125.0, filled_quantity=10, reason="take_profit"
+    )
+
+    assert len(callback_calls) == 1
+    assert callback_calls[0][2] is False  # is_loss=False for TP
+
+
+@pytest.mark.asyncio
+async def test_handle_sell_fill_reason_trailing_stop_is_loss_true(adapter, risk, order_mgr):
+    """STOCK-55: handle_sell_fill with trailing_stop reason passes is_loss=True."""
+    callback_calls: list[tuple[str, float, bool]] = []
+
+    def on_sell(symbol: str, ts: float, *, is_loss: bool = False) -> None:
+        callback_calls.append((symbol, ts, is_loss))
+
+    tracker = PositionTracker(adapter, risk, order_mgr)
+    tracker.register_on_sell(on_sell)
+    tracker.track("AAPL", 100.0, 10, stop_loss_pct=0.08)
+
+    # Trailing stop sell above entry — still is_loss=True
+    await tracker.handle_sell_fill(
+        "AAPL", filled_price=108.0, filled_quantity=10, reason="trailing_stop"
+    )
+
+    assert len(callback_calls) == 1
+    assert callback_calls[0][2] is True
+
+
 # ── STOCK-52: Pending sell order should NOT untrack position ──────────────
 
 
