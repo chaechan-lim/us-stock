@@ -295,6 +295,14 @@ class OrderManager:
         session: str = "regular",
     ) -> ManagedOrder | None:
         """Place a sell order. Pass entry_price for PnL, buy_strategy for attribution."""
+        # STOCK-52: Prevent duplicate sell orders while a limit sell is pending.
+        # Before STOCK-52, immediate untrack in _execute_sell() prevented duplicates.
+        # With deferred untrack, the same symbol could be sold again from
+        # _check_protective_sells or _execute_signal before reconciliation confirms.
+        if self.has_pending_order(symbol, "SELL"):
+            logger.info("Sell skipped for %s: pending sell order already exists", symbol)
+            return None
+
         try:
             # Extended hours: force limit order
             if session != "regular":

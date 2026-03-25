@@ -700,6 +700,21 @@ async def lifespan(app: FastAPI):
                             "created_at": "",
                         }
                     )
+                    # STOCK-52: When a pending SELL order is confirmed filled,
+                    # untrack the position and update PnL via position_tracker.
+                    # Previously _execute_sell() did this immediately, but with
+                    # limit orders returning status="pending", we defer to here.
+                    # Extract the sell reason from the strategy name (e.g.
+                    # "trend_following:stop_loss" → "stop_loss") for notifications.
+                    if change["side"] == "SELL":
+                        strategy = change.get("strategy", "")
+                        reason = strategy.split(":")[-1] if ":" in strategy else ""
+                        await position_tracker.handle_sell_fill(
+                            symbol=change["symbol"],
+                            filled_price=change.get("filled_price"),
+                            filled_quantity=change.get("filled_quantity"),
+                            reason=reason,
+                        )
         # Cancel stale unfilled orders
         stale = await order_manager.cancel_stale_orders(config.trading.pending_order_ttl_min)
         if stale:
@@ -1502,6 +1517,17 @@ async def lifespan(app: FastAPI):
                             "created_at": "",
                         }
                     )
+                    # STOCK-52: When a pending SELL order is confirmed filled,
+                    # untrack the position and update PnL via position_tracker.
+                    if change["side"] == "SELL":
+                        strategy = change.get("strategy", "")
+                        reason = strategy.split(":")[-1] if ":" in strategy else ""
+                        await kr_position_tracker.handle_sell_fill(
+                            symbol=change["symbol"],
+                            filled_price=change.get("filled_price"),
+                            filled_quantity=change.get("filled_quantity"),
+                            reason=reason,
+                        )
         # Cancel stale unfilled orders
         stale = await kr_order_manager.cancel_stale_orders(
             config.trading.pending_order_ttl_min,

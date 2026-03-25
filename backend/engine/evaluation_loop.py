@@ -832,14 +832,21 @@ class EvaluationLoop:
                     entry_price=pos.avg_price,
                     buy_strategy=orig_strategy,
                 )
+                # STOCK-52: Only untrack when order is confirmed filled.
+                # Pending limit orders (status != "filled") are handled by
+                # reconciliation via position_tracker.handle_sell_fill().
+                # "submitted"/"open" are also non-filled — untrack deferred.
+                # "failed"/"cancelled" leave the position tracked so the next
+                # check_all cycle can retry the sell automatically.
                 if sell_order and self._position_tracker:
-                    self._position_tracker.untrack(symbol)
-                    # Protective sells are always loss sells (regime/sentiment)
-                    self.register_sell_cooldown(
-                        symbol,
-                        time.time(),
-                        is_loss=True,
-                    )
+                    if sell_order.status == "filled":
+                        self._position_tracker.untrack(symbol)
+                        # Protective sells are always loss sells (regime/sentiment)
+                        self.register_sell_cooldown(
+                            symbol,
+                            time.time(),
+                            is_loss=True,
+                        )
 
         # Clear processed sentiments to avoid re-selling
         for symbol in held:
@@ -1212,18 +1219,24 @@ class EvaluationLoop:
                     entry_price=pos.avg_price,
                     buy_strategy=orig_strategy,
                 )
+                # STOCK-52: Only untrack when order is confirmed filled.
+                # Pending limit orders (status != "filled") are handled by
+                # reconciliation via position_tracker.handle_sell_fill().
+                # "failed"/"cancelled" leave the position tracked so the next
+                # evaluation cycle can retry the sell automatically.
                 if sell_order and self._position_tracker:
-                    self._position_tracker.untrack(symbol)
-                    # STOCK-47: Determine if this was a loss sell
-                    is_loss = False
-                    if pos.avg_price > 0:
-                        is_loss = price < pos.avg_price
-                    # Add to recovery watch for re-entry evaluation
-                    self.register_sell_cooldown(
-                        symbol,
-                        time.time(),
-                        is_loss=is_loss,
-                    )
+                    if sell_order.status == "filled":
+                        self._position_tracker.untrack(symbol)
+                        # STOCK-47: Determine if this was a loss sell
+                        is_loss = False
+                        if pos.avg_price > 0:
+                            is_loss = price < pos.avg_price
+                        # Add to recovery watch for re-entry evaluation
+                        self.register_sell_cooldown(
+                            symbol,
+                            time.time(),
+                            is_loss=is_loss,
+                        )
 
     def _build_position_context(self, symbol: str, current_price: float) -> PositionContext | None:
         """Build a PositionContext for a held symbol.

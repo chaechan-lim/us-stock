@@ -3,7 +3,7 @@
 import pytest
 from unittest.mock import AsyncMock, MagicMock
 
-from exchange.base import Position
+from exchange.base import OrderResult, Position
 from engine.risk_manager import RiskManager, RiskParams
 from engine.order_manager import OrderManager
 from engine.position_tracker import PositionTracker, TrackedPosition
@@ -1578,3 +1578,450 @@ async def test_on_sell_callback_error_does_not_block_other_callbacks(adapter, ri
 
     # Second callback should still run despite first one raising
     assert calls == ["AAPL"]
+
+
+# ── STOCK-52: Pending sell order should NOT untrack position ──────────────
+
+
+@pytest.mark.asyncio
+async def test_pending_sell_does_not_untrack(adapter, risk, order_mgr):
+    """STOCK-52: When _execute_sell returns a pending order, position stays tracked."""
+    adapter.fetch_positions = AsyncMock(
+        return_value=[
+            Position(
+                symbol="AAPL",
+                exchange="NASD",
+                quantity=10,
+                avg_price=150.0,
+                current_price=135.0,
+            ),  # -10% triggers SL
+        ]
+    )
+    adapter.create_sell_order = AsyncMock(
+        return_value=OrderResult(
+            order_id="sell_pending_1",
+            symbol="AAPL",
+            side="SELL",
+            order_type="limit",
+            quantity=10,
+            status="pending",  # KIS limit order: not yet filled
+            filled_price=None,
+            filled_quantity=0,
+        )
+    )
+
+    tracker = PositionTracker(adapter, risk, order_mgr)
+    tracker.track("AAPL", 150.0, 10, stop_loss_pct=0.08)
+
+    triggered = await tracker.check_all()
+    assert len(triggered) == 1
+    assert triggered[0]["reason"] == "stop_loss"
+    # Position must still be tracked (pending sell, not filled)
+    assert "AAPL" in tracker.tracked_symbols
+
+
+@pytest.mark.asyncio
+async def test_filled_sell_does_untrack(adapter, risk, order_mgr):
+    """STOCK-52: When _execute_sell returns a filled order, position is untracked."""
+    adapter.fetch_positions = AsyncMock(
+        return_value=[
+            Position(
+                symbol="AAPL",
+                exchange="NASD",
+                quantity=10,
+                avg_price=150.0,
+                current_price=135.0,
+            ),
+        ]
+    )
+    adapter.create_sell_order = AsyncMock(
+        return_value=OrderResult(
+            order_id="sell_filled_1",
+            symbol="AAPL",
+            side="SELL",
+            order_type="limit",
+            quantity=10,
+            status="filled",
+            filled_price=135.0,
+            filled_quantity=10,
+        )
+    )
+
+    tracker = PositionTracker(adapter, risk, order_mgr)
+    tracker.track("AAPL", 150.0, 10, stop_loss_pct=0.08)
+
+    triggered = await tracker.check_all()
+    assert len(triggered) == 1
+    # Position should be untracked after confirmed fill
+    assert "AAPL" not in tracker.tracked_symbols
+
+
+@pytest.mark.asyncio
+async def test_pending_sell_skips_duplicate_evaluation(adapter, risk, order_mgr):
+    """STOCK-52: check_all skips SL/TP evaluation if a pending sell order exists."""
+    adapter.fetch_positions = AsyncMock(
+        return_value=[
+            Position(
+                symbol="AAPL",
+                exchange="NASD",
+                quantity=10,
+                avg_price=150.0,
+                current_price=135.0,  # Below SL
+            ),
+        ]
+    )
+    adapter.create_sell_order = AsyncMock(
+        return_value=OrderResult(
+            order_id="sell_pending_2",
+            symbol="AAPL",
+            side="SELL",
+            order_type="limit",
+            quantity=10,
+            status="pending",
+            filled_price=None,
+            filled_quantity=0,
+        )
+    )
+
+    tracker = PositionTracker(adapter, risk, order_mgr)
+    tracker.track("AAPL", 150.0, 10, stop_loss_pct=0.08)
+
+    # First check: triggers SL, places pending sell
+    triggered1 = await tracker.check_all()
+    assert len(triggered1) == 1
+
+    # Second check: should skip evaluation because pending sell exists
+    triggered2 = await tracker.check_all()
+    assert len(triggered2) == 0
+    # Position still tracked
+    assert "AAPL" in tracker.tracked_symbols
+    # Only one sell order placed (no duplicate)
+    assert adapter.create_sell_order.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_pending_sell_no_pnl_update(adapter, risk, order_mgr):
+    """STOCK-52: PnL should NOT be updated when sell order is pending."""
+    adapter.fetch_positions = AsyncMock(
+        return_value=[
+            Position(
+                symbol="AAPL",
+                exchange="NASD",
+                quantity=10,
+                avg_price=150.0,
+                current_price=135.0,
+            ),
+        ]
+    )
+    adapter.create_sell_order = AsyncMock(
+        return_value=OrderResult(
+            order_id="sell_pending_3",
+            symbol="AAPL",
+            side="SELL",
+            order_type="limit",
+            quantity=10,
+            status="pending",
+            filled_price=None,
+            filled_quantity=0,
+        )
+    )
+
+    tracker = PositionTracker(adapter, risk, order_mgr)
+    tracker.track("AAPL", 150.0, 10, stop_loss_pct=0.08)
+
+    initial_pnl = risk._daily_pnl
+    await tracker.check_all()
+    # PnL should not change for pending orders
+    assert risk._daily_pnl == initial_pnl
+
+
+@pytest.mark.asyncio
+async def test_pending_sell_no_callback_fired(adapter, risk, order_mgr):
+    """STOCK-52: Sell callbacks should NOT fire when order is pending."""
+    adapter.fetch_positions = AsyncMock(
+        return_value=[
+            Position(
+                symbol="AAPL",
+                exchange="NASD",
+                quantity=10,
+                avg_price=150.0,
+                current_price=135.0,
+            ),
+        ]
+    )
+    adapter.create_sell_order = AsyncMock(
+        return_value=OrderResult(
+            order_id="sell_pending_4",
+            symbol="AAPL",
+            side="SELL",
+            order_type="limit",
+            quantity=10,
+            status="pending",
+            filled_price=None,
+            filled_quantity=0,
+        )
+    )
+
+    callback_calls = []
+    tracker = PositionTracker(adapter, risk, order_mgr)
+    tracker.register_on_sell(lambda s, t: callback_calls.append(s))
+    tracker.track("AAPL", 150.0, 10, stop_loss_pct=0.08)
+
+    await tracker.check_all()
+    # Callback should not have been called for pending order
+    assert callback_calls == []
+
+
+@pytest.mark.asyncio
+async def test_handle_sell_fill_untracks_and_updates_pnl(adapter, risk, order_mgr):
+    """STOCK-52: handle_sell_fill untracks position and updates PnL."""
+    tracker = PositionTracker(adapter, risk, order_mgr)
+    tracker.track("AAPL", 150.0, 10, stop_loss_pct=0.08)
+
+    initial_pnl = risk._daily_pnl
+
+    await tracker.handle_sell_fill("AAPL", filled_price=145.0, filled_quantity=10)
+
+    # Position should be untracked
+    assert "AAPL" not in tracker.tracked_symbols
+    # PnL should be updated: (145 - 150) * 10 = -50
+    assert risk._daily_pnl == initial_pnl + (-50.0)
+
+
+@pytest.mark.asyncio
+async def test_handle_sell_fill_fires_callbacks(adapter, risk, order_mgr):
+    """STOCK-52: handle_sell_fill fires registered sell callbacks."""
+    callback_calls = []
+    tracker = PositionTracker(adapter, risk, order_mgr)
+    tracker.register_on_sell(lambda s, t, **kw: callback_calls.append(s))
+    tracker.track("AAPL", 150.0, 10, stop_loss_pct=0.08)
+
+    await tracker.handle_sell_fill("AAPL", filled_price=145.0, filled_quantity=10)
+
+    assert callback_calls == ["AAPL"]
+
+
+@pytest.mark.asyncio
+async def test_handle_sell_fill_already_untracked(adapter, risk, order_mgr):
+    """STOCK-52: handle_sell_fill is a no-op if position already untracked."""
+    tracker = PositionTracker(adapter, risk, order_mgr)
+    # Don't track anything — symbol not in tracker
+    initial_pnl = risk._daily_pnl
+
+    # Should not raise, should be no-op
+    await tracker.handle_sell_fill("AAPL", filled_price=145.0, filled_quantity=10)
+    assert risk._daily_pnl == initial_pnl
+
+
+@pytest.mark.asyncio
+async def test_pending_partial_sell_does_not_modify_quantity(adapter, risk, order_mgr):
+    """STOCK-52: Pending partial sell should not reduce tracked quantity."""
+    adapter.fetch_positions = AsyncMock(
+        return_value=[
+            Position(
+                symbol="AAPL",
+                exchange="NASD",
+                quantity=20,
+                avg_price=100.0,
+                current_price=140.0,  # +40%, triggers TP
+            ),
+        ]
+    )
+    adapter.create_sell_order = AsyncMock(
+        return_value=OrderResult(
+            order_id="partial_pending_1",
+            symbol="AAPL",
+            side="SELL",
+            order_type="limit",
+            quantity=10,
+            status="pending",
+            filled_price=None,
+            filled_quantity=0,
+        )
+    )
+
+    tracker = PositionTracker(adapter, risk, order_mgr)
+    tracker.track("AAPL", 100.0, 20, stop_loss_pct=0.08, take_profit_pct=0.30)
+    # Override to enable profit_taking by setting conditions
+    tracked = tracker._tracked["AAPL"]
+    tracked.take_profit_pct = 0.30
+
+    original_qty = tracked.quantity
+    await tracker.check_all()
+    # Position stays tracked
+    assert "AAPL" in tracker.tracked_symbols
+    # Quantity not reduced for pending order
+    assert tracker._tracked["AAPL"].quantity == original_qty
+
+
+@pytest.mark.asyncio
+async def test_handle_sell_fill_partial_does_not_untrack(adapter, risk, order_mgr):
+    """STOCK-52: Partial fill should reduce quantity, not untrack the position."""
+    tracker = PositionTracker(adapter, risk, order_mgr)
+    tracker.track("AAPL", 100.0, 20, stop_loss_pct=0.08)
+
+    initial_pnl = risk._daily_pnl
+
+    # Reconciliation confirms only 10 of 20 shares were filled
+    await tracker.handle_sell_fill("AAPL", filled_price=138.0, filled_quantity=10)
+
+    # 10 shares remain — position must still be tracked
+    assert "AAPL" in tracker.tracked_symbols
+    assert tracker._tracked["AAPL"].quantity == 10
+    # PnL should only account for filled shares: (138 - 100) * 10 = +380
+    assert risk._daily_pnl == initial_pnl + 380.0
+
+
+@pytest.mark.asyncio
+async def test_handle_sell_fill_none_quantity_uses_full_position(adapter, risk, order_mgr):
+    """STOCK-52: filled_quantity=None means full position fill."""
+    tracker = PositionTracker(adapter, risk, order_mgr)
+    tracker.track("AAPL", 150.0, 10, stop_loss_pct=0.08)
+
+    # None means KIS didn't return quantity — assume full fill
+    await tracker.handle_sell_fill("AAPL", filled_price=145.0, filled_quantity=None)
+
+    assert "AAPL" not in tracker.tracked_symbols
+
+
+@pytest.mark.asyncio
+async def test_handle_sell_fill_generic_notification_when_no_reason(adapter, risk, order_mgr):
+    """STOCK-52: handle_sell_fill sends generic notification when reason is empty.
+
+    This covers evaluation_loop sell paths (protective sells, signal-based sells)
+    where the strategy_name lacks a colon separator (e.g. "regime_protect(pnl=-5.0%)").
+    """
+    notif = AsyncMock()
+    tracker = PositionTracker(adapter, risk, order_mgr, notification=notif)
+    tracker.track("AAPL", 150.0, 10, stop_loss_pct=0.08)
+
+    # Empty reason triggers generic notification via notify_trade_executed
+    await tracker.handle_sell_fill("AAPL", filled_price=145.0, filled_quantity=10, reason="")
+
+    assert "AAPL" not in tracker.tracked_symbols
+    notif.notify_trade_executed.assert_awaited_once_with(
+        "AAPL",
+        "SELL",
+        10,
+        145.0,
+        "sell",
+        market="US",
+    )
+
+
+@pytest.mark.asyncio
+async def test_handle_sell_fill_stop_loss_notification(adapter, risk, order_mgr):
+    """STOCK-52: handle_sell_fill sends stop_loss notification when reason matches."""
+    notif = AsyncMock()
+    tracker = PositionTracker(adapter, risk, order_mgr, notification=notif)
+    tracker.track("AAPL", 150.0, 10, stop_loss_pct=0.08)
+
+    await tracker.handle_sell_fill(
+        "AAPL",
+        filled_price=140.0,
+        filled_quantity=10,
+        reason="stop_loss",
+    )
+
+    assert "AAPL" not in tracker.tracked_symbols
+    notif.notify_stop_loss.assert_awaited_once()
+    notif.notify_trade_executed.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_handle_sell_fill_zero_quantity_does_not_untrack(adapter, risk, order_mgr):
+    """STOCK-52: filled_quantity=0 (cancelled order) must NOT untrack the position.
+
+    If reconciliation mistakenly calls handle_sell_fill for a cancelled order
+    with filled_quantity=0, the fallback should NOT treat it as a full sell.
+    """
+    tracker = PositionTracker(adapter, risk, order_mgr)
+    tracker.track("AAPL", 150.0, 10, stop_loss_pct=0.08)
+    initial_pnl = risk._daily_pnl
+
+    await tracker.handle_sell_fill("AAPL", filled_price=None, filled_quantity=0)
+
+    # Position must still be tracked — NOT untracked
+    assert "AAPL" in tracker.tracked_symbols
+    # PnL must not change
+    assert risk._daily_pnl == initial_pnl
+
+
+@pytest.mark.asyncio
+async def test_handle_sell_fill_partial_sends_notification(adapter, risk, order_mgr):
+    """STOCK-52: Partial fill in handle_sell_fill sends a notification."""
+    notif = AsyncMock()
+    tracker = PositionTracker(adapter, risk, order_mgr, notification=notif)
+    tracker.track("AAPL", 100.0, 20, stop_loss_pct=0.08)
+
+    # Partial fill: 5 of 20 shares
+    await tracker.handle_sell_fill(
+        "AAPL",
+        filled_price=138.0,
+        filled_quantity=5,
+        reason="profit_taking",
+    )
+
+    # Position should still be tracked with reduced quantity
+    assert "AAPL" in tracker.tracked_symbols
+    assert tracker._tracked["AAPL"].quantity == 15
+    # Notification should be sent
+    notif.notify_trade_executed.assert_awaited_once_with(
+        "AAPL",
+        "SELL",
+        5,
+        138.0,
+        "profit_taking",
+        market="US",
+    )
+
+
+@pytest.mark.asyncio
+async def test_highest_price_updated_during_pending_sell(adapter, risk, order_mgr):
+    """STOCK-52: highest_price is updated even when a pending sell exists.
+
+    After a pending sell is cancelled, check_all should have accurate
+    highest_price for trailing stop calculations.
+    """
+    tracker = PositionTracker(adapter, risk, order_mgr)
+    tracker.track("AAPL", 100.0, 10, stop_loss_pct=0.08, take_profit_pct=0.30)
+
+    # Simulate a pending sell order
+    order_mgr.has_pending_order = MagicMock(return_value=True)
+    adapter.fetch_positions.return_value = [
+        Position(
+            symbol="AAPL",
+            exchange="NASD",
+            quantity=10,
+            avg_price=100.0,
+            current_price=120.0,
+        )
+    ]
+
+    await tracker.check_all()
+
+    # highest_price should be updated to 120 even though eval was skipped
+    assert tracker._tracked["AAPL"].highest_price == 120.0
+
+
+@pytest.mark.asyncio
+async def test_finalize_sell_tiered_trailing_stop_notification(adapter, risk, order_mgr):
+    """STOCK-52: tiered_trailing_stop reason sends trailing stop notification.
+
+    Previously _execute_sell only checked reason == 'trailing_stop',
+    missing tiered_trailing_stop and breakeven_stop.
+    """
+    notif = AsyncMock()
+    tracker = PositionTracker(adapter, risk, order_mgr, notification=notif)
+    tracker.track("AAPL", 100.0, 10, stop_loss_pct=0.08)
+
+    await tracker.handle_sell_fill(
+        "AAPL",
+        filled_price=115.0,
+        filled_quantity=10,
+        reason="tiered_trailing_stop",
+    )
+
+    assert "AAPL" not in tracker.tracked_symbols
+    notif.notify_trailing_stop.assert_awaited_once()
+    notif.notify_trade_executed.assert_not_awaited()
