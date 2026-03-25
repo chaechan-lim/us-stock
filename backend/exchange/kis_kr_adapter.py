@@ -858,9 +858,8 @@ class KISKRAdapter(ExchangeAdapter):
                     if msg_cd == "EGW00201" and attempt < max_retries - 1:
                         await asyncio.sleep(1.0 * (attempt + 1))
                         continue
-                    if attempt < max_retries - 1:
-                        await asyncio.sleep(0.3 * (attempt + 1))
-                        continue
+                    # Non-rate-limit HTTP errors: return immediately without retry
+                    # to prevent duplicate orders (server may have processed the request)
                     return data
                 try:
                     data = await resp.json()

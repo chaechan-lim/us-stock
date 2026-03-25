@@ -399,6 +399,102 @@ class TestCreateOrder:
         assert result.status == "failed"
 
 
+def _mock_post_responses(adapter: KISKRAdapter, responses: list) -> None:
+    """Helper to mock multiple sequential POST responses (for retry testing).
+
+    Each entry in responses is a tuple of (status_code, response_data).
+    """
+    ctxs = []
+    for status, resp_data in responses:
+        mock_resp = AsyncMock()
+        mock_resp.status = status
+        mock_resp.json = AsyncMock(return_value=resp_data)
+        ctx = MagicMock()
+        ctx.__aenter__ = AsyncMock(return_value=mock_resp)
+        ctx.__aexit__ = AsyncMock(return_value=False)
+        ctxs.append(ctx)
+    adapter._session = MagicMock()
+    adapter._session.post = MagicMock(side_effect=ctxs)
+
+
+class TestPostRetryBehavior:
+    """STOCK-53: _post() must not retry on non-rate-limit HTTP errors."""
+
+    @pytest.mark.asyncio
+    async def test_no_retry_on_http_500(self, adapter):
+        """HTTP 500 without EGW00201 must NOT retry — server may have processed the order."""
+        _mock_post_responses(adapter, [
+            (500, {"rt_cd": "-1", "msg_cd": "APBK9999", "msg1": "Internal server error"}),
+            (200, _SUCCESS_RESPONSE),  # Should never reach this
+        ])
+
+        result = await adapter.create_buy_order("005930", 10, 72000.0)
+        assert result.status == "failed"
+        assert adapter._session.post.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_no_retry_on_http_400(self, adapter):
+        """HTTP 400 without EGW00201 must NOT retry."""
+        _mock_post_responses(adapter, [
+            (400, {"rt_cd": "-1", "msg_cd": "APBK1234", "msg1": "Bad request"}),
+            (200, _SUCCESS_RESPONSE),  # Should never reach this
+        ])
+
+        result = await adapter.create_buy_order("005930", 10, 72000.0)
+        assert result.status == "failed"
+        assert adapter._session.post.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_retry_on_rate_limit_egw00201(self, adapter):
+        """EGW00201 (rate limit) SHOULD retry — server did NOT process the request."""
+        _mock_post_responses(adapter, [
+            (429, {"rt_cd": "-1", "msg_cd": "EGW00201", "msg1": "Rate limit exceeded"}),
+            (200, _SUCCESS_RESPONSE),
+        ])
+
+        result = await adapter.create_buy_order("005930", 10, 72000.0)
+        assert result.status == "pending"
+        assert result.order_id == "0001234567"
+        assert adapter._session.post.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_no_retry_on_api_error_non_rate_limit(self, adapter):
+        """API error (rt_cd != 0, non-EGW00201) must NOT retry."""
+        _mock_post_responses(adapter, [
+            (200, {"rt_cd": "-1", "msg_cd": "APBK0918", "msg1": "주문가능금액 부족",
+                   "output": {}}),
+            (200, _SUCCESS_RESPONSE),  # Should never reach this
+        ])
+
+        result = await adapter.create_buy_order("005930", 10, 72000.0)
+        assert result.status == "failed"
+        assert adapter._session.post.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_retry_on_api_egw00201_success(self, adapter):
+        """API-level EGW00201 (rt_cd != 0) SHOULD retry and succeed."""
+        _mock_post_responses(adapter, [
+            (200, {"rt_cd": "-1", "msg_cd": "EGW00201", "msg1": "Rate limit exceeded"}),
+            (200, _SUCCESS_RESPONSE),
+        ])
+
+        result = await adapter.create_buy_order("005930", 10, 72000.0)
+        assert result.status == "pending"
+        assert adapter._session.post.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_cancel_order_no_retry_on_http_error(self, adapter):
+        """Cancel order must also NOT retry on non-rate-limit HTTP errors."""
+        _mock_post_responses(adapter, [
+            (500, {"rt_cd": "-1", "msg_cd": "APBK9999", "msg1": "Server error"}),
+            (200, {"rt_cd": "0"}),  # Should never reach this
+        ])
+
+        result = await adapter.cancel_order("0001234567", "005930")
+        assert result is False
+        assert adapter._session.post.call_count == 1
+
+
 class TestMarketOrderBody:
     """STOCK-29: Verify market orders send ORD_UNPR='0' and ORD_DVSN='01'.
 
