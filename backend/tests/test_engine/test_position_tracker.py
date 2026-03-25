@@ -1882,3 +1882,47 @@ async def test_handle_sell_fill_none_quantity_uses_full_position(adapter, risk, 
     await tracker.handle_sell_fill("AAPL", filled_price=145.0, filled_quantity=None)
 
     assert "AAPL" not in tracker.tracked_symbols
+
+
+@pytest.mark.asyncio
+async def test_handle_sell_fill_generic_notification_when_no_reason(adapter, risk, order_mgr):
+    """STOCK-52: handle_sell_fill sends generic notification when reason is empty.
+
+    This covers evaluation_loop sell paths (protective sells, signal-based sells)
+    where the strategy_name lacks a colon separator (e.g. "regime_protect(pnl=-5.0%)").
+    """
+    notif = AsyncMock()
+    tracker = PositionTracker(adapter, risk, order_mgr, notification=notif)
+    tracker.track("AAPL", 150.0, 10, stop_loss_pct=0.08)
+
+    # Empty reason triggers generic notification via notify_trade_executed
+    await tracker.handle_sell_fill("AAPL", filled_price=145.0, filled_quantity=10, reason="")
+
+    assert "AAPL" not in tracker.tracked_symbols
+    notif.notify_trade_executed.assert_awaited_once_with(
+        "AAPL",
+        "SELL",
+        10,
+        145.0,
+        "sell",
+        market="US",
+    )
+
+
+@pytest.mark.asyncio
+async def test_handle_sell_fill_stop_loss_notification(adapter, risk, order_mgr):
+    """STOCK-52: handle_sell_fill sends stop_loss notification when reason matches."""
+    notif = AsyncMock()
+    tracker = PositionTracker(adapter, risk, order_mgr, notification=notif)
+    tracker.track("AAPL", 150.0, 10, stop_loss_pct=0.08)
+
+    await tracker.handle_sell_fill(
+        "AAPL",
+        filled_price=140.0,
+        filled_quantity=10,
+        reason="stop_loss",
+    )
+
+    assert "AAPL" not in tracker.tracked_symbols
+    notif.notify_stop_loss.assert_awaited_once()
+    notif.notify_trade_executed.assert_not_awaited()

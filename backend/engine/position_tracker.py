@@ -260,6 +260,19 @@ class PositionTracker:
                             pnl,
                             pnl_pct=pnl_pct,
                         )
+                    else:
+                        # Generic sell notification for evaluation_loop paths
+                        # (protective sells, signal-based sells) where the
+                        # strategy_name lacks a colon separator — e.g.
+                        # "regime_protect(pnl=-5.0%)" or "trend_following".
+                        await self._notification.notify_trade_executed(
+                            symbol,
+                            "SELL",
+                            fill_qty,
+                            fill_price,
+                            reason or "sell",
+                            market=self._market,
+                        )
                 except Exception as e:
                     logger.error(
                         "Failed to send %s notification for %s: %s",

@@ -1197,7 +1197,9 @@ class TestStock26FailSafePositionCheck:
         assert order is None
         mock_adapter.create_buy_order.assert_not_called()
 
-    async def test_position_check_failure_counter(self, mock_adapter, risk_manager, mock_market_data):
+    async def test_position_check_failure_counter(
+        self, mock_adapter, risk_manager, mock_market_data
+    ):
         """Position check failures increment the counter for monitoring."""
         mock_market_data.get_positions.side_effect = ConnectionError("disconnected")
         om = OrderManager(
@@ -1208,14 +1210,22 @@ class TestStock26FailSafePositionCheck:
         assert om.position_check_failures == 0
 
         await om.place_buy(
-            symbol="AAPL", price=150.0, portfolio_value=100_000,
-            cash_available=50_000, current_positions=0, strategy_name="test",
+            symbol="AAPL",
+            price=150.0,
+            portfolio_value=100_000,
+            cash_available=50_000,
+            current_positions=0,
+            strategy_name="test",
         )
         assert om.position_check_failures == 1
 
         await om.place_buy(
-            symbol="TSLA", price=200.0, portfolio_value=100_000,
-            cash_available=50_000, current_positions=0, strategy_name="test",
+            symbol="TSLA",
+            price=200.0,
+            portfolio_value=100_000,
+            cash_available=50_000,
+            current_positions=0,
+            strategy_name="test",
         )
         assert om.position_check_failures == 2
 
@@ -1450,6 +1460,7 @@ class TestReconcileNotFoundPreservesData:
         # No prior filled data → filled_price stays None
         assert changes[0]["filled_price"] is None
         assert changes[0]["filled_quantity"] == 0
+
 
 # --- STOCK-38: DB recorder callback for immediate DB persistence ---
 
@@ -1705,3 +1716,79 @@ class TestDbRecorderCallback:
             assert record["buy_strategy"] == "momentum"
         finally:
             set_db_recorder(old_recorder)
+
+
+class TestDuplicateSellPrevention:
+    """STOCK-52: Duplicate sell prevention in place_sell."""
+
+    async def test_duplicate_sell_blocked(self, mock_adapter, risk_manager):
+        """Second sell for same symbol is blocked when first is pending."""
+        mock_adapter.create_sell_order = AsyncMock(
+            return_value=OrderResult(
+                order_id="ORD001",
+                symbol="AAPL",
+                side="SELL",
+                order_type="limit",
+                quantity=10,
+                price=160.0,
+                filled_quantity=0,
+                filled_price=None,
+                status="pending",
+            )
+        )
+        om = OrderManager(adapter=mock_adapter, risk_manager=risk_manager)
+
+        first = await om.place_sell(
+            symbol="AAPL", quantity=10, price=160.0, strategy_name="stop_loss"
+        )
+        assert first is not None
+
+        # Second sell for same symbol is blocked
+        second = await om.place_sell(
+            symbol="AAPL", quantity=10, price=155.0, strategy_name="regime_protect"
+        )
+        assert second is None
+        assert mock_adapter.create_sell_order.call_count == 1
+
+    async def test_sell_different_symbol_not_blocked(self, mock_adapter, risk_manager):
+        """Sell for different symbol is allowed."""
+        call_count = 0
+
+        async def create_sell(**kwargs):
+            nonlocal call_count
+            call_count += 1
+            return OrderResult(
+                order_id=f"ORD{call_count:03d}",
+                symbol=kwargs["symbol"],
+                side="SELL",
+                order_type="limit",
+                quantity=10,
+                price=160.0,
+                filled_quantity=0,
+                status="pending",
+            )
+
+        mock_adapter.create_sell_order = create_sell
+        om = OrderManager(adapter=mock_adapter, risk_manager=risk_manager)
+
+        first = await om.place_sell(
+            symbol="AAPL", quantity=10, price=160.0, strategy_name="stop_loss"
+        )
+        second = await om.place_sell(
+            symbol="NVDA", quantity=5, price=800.0, strategy_name="stop_loss"
+        )
+        assert first is not None
+        assert second is not None
+
+    async def test_filled_sell_allows_new_sell(self, order_manager):
+        """After a sell is filled and cleared, another sell is allowed."""
+        order = await order_manager.place_sell(
+            symbol="AAPL", quantity=10, price=160.0, strategy_name="stop_loss"
+        )
+        assert order is not None
+        # Filled order → clear completed → new sell should work
+        order_manager.clear_completed()
+        second = await order_manager.place_sell(
+            symbol="AAPL", quantity=10, price=155.0, strategy_name="take_profit"
+        )
+        assert second is not None
