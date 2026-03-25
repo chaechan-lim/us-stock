@@ -462,13 +462,30 @@ class EvaluationLoop:
         eval_symbols = list(dict.fromkeys(self._watchlist + sorted(held) + sorted(recovery)))
 
         # Phase 0: Regime-change and sentiment-based protective sells
+        sold_in_phase0: set[str] = set()
         if held and self._position_tracker:
-            await self._check_protective_sells(held)
+            # STOCK-54: Remove symbols sold in Phase 0 from held set so
+            # Phase 1 does not treat them as is_held=True (which would
+            # cause BUY→HOLD remapping, held_sell_bias, and potential
+            # double-sell attempts).
+            sold_in_phase0 = await self._check_protective_sells(held)
+            if sold_in_phase0:
+                held -= sold_in_phase0
+                logger.info(
+                    "Phase 0 sold %d symbols, removed from held: %s",
+                    len(sold_in_phase0),
+                    sorted(sold_in_phase0),
+                )
 
         # Phase 1: Collect all signals (no execution yet)
         buy_candidates: list[tuple[float, str, object, pd.DataFrame]] = []
 
         for symbol in eval_symbols:
+            # STOCK-54: Skip symbols already sold in Phase 0 to prevent
+            # double-sell attempts.
+            if symbol in sold_in_phase0:
+                logger.debug("Skipping %s in Phase 1: already sold in Phase 0", symbol)
+                continue
             try:
                 df = await self._market_data.get_ohlcv(symbol, limit=250)
                 if df.empty:
@@ -745,7 +762,7 @@ class EvaluationLoop:
             return False
         return True
 
-    async def _check_protective_sells(self, held: set[str]) -> None:
+    async def _check_protective_sells(self, held: set[str]) -> set[str]:
         """Sell positions on regime deterioration or negative news sentiment.
 
         Regime sell: when market transitions to downtrend, sell losing positions
@@ -753,6 +770,10 @@ class EvaluationLoop:
 
         Sentiment sell: when a held stock has strongly negative news sentiment
         (score <= -0.70), sell if held for at least 4 hours (avoid churn).
+
+        Returns:
+            Set of symbols that were sold (filled) so the caller can remove
+            them from the held set and avoid double-sell in Phase 1 (STOCK-54).
         """
         _BEARISH_REGIMES = {"downtrend"}
         regime_worsened = (
@@ -761,8 +782,9 @@ class EvaluationLoop:
         )
 
         if not regime_worsened and not self._news_sentiment:
-            return
+            return set()
 
+        sold_symbols: set[str] = set()
         positions = await self._market_data.get_positions()
         position_map = {p.symbol: p for p in positions}
 
@@ -841,16 +863,26 @@ class EvaluationLoop:
                 if sell_order and self._position_tracker:
                     if sell_order.status == "filled":
                         self._position_tracker.untrack(symbol)
+                        # STOCK-54: Track sold symbols so caller can update held set
+                        sold_symbols.add(symbol)
                         # Protective sells are always loss sells (regime/sentiment)
                         self.register_sell_cooldown(
                             symbol,
                             time.time(),
                             is_loss=True,
                         )
+                    elif sell_order.status in ("submitted", "open", "pending"):
+                        # STOCK-54: Sell order in flight — also exclude from Phase 1
+                        # to prevent BUY→HOLD remapping while the order is pending.
+                        # Untrack is deferred to reconciliation. "failed"/"cancelled"
+                        # are intentionally excluded so the next cycle can retry.
+                        sold_symbols.add(symbol)
 
         # Clear processed sentiments to avoid re-selling
         for symbol in held:
             self._news_sentiment.pop(symbol, None)
+
+        return sold_symbols
 
     async def _update_factor_scores(self) -> None:
         """Compute cross-sectional factor scores for the watchlist."""
@@ -1201,6 +1233,14 @@ class EvaluationLoop:
                 )
 
         elif signal.signal_type == SignalType.SELL:
+            # STOCK-54: Defense-in-depth — skip if a pending sell order
+            # already exists (e.g. from Phase 0 protective sell that hasn't
+            # filled yet). order_manager.place_sell() also checks this, but
+            # skipping early avoids unnecessary position fetches.
+            if self._order_manager.has_pending_order(symbol, "SELL"):
+                logger.debug("Skipping SELL for %s: pending sell order exists", symbol)
+                return
+
             positions = await self._market_data.get_positions()
             pos = next((p for p in positions if p.symbol == symbol), None)
             if pos and pos.quantity > 0:
