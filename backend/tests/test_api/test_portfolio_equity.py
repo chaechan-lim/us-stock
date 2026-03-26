@@ -48,10 +48,9 @@ def _make_app(
     us_adapter._full_account_usd = full_account_usd
     us_adapter._full_available_usd = full_available_usd
 
-    async def _mock_rate():
-        return adapter_exchange_rate
-
-    us_adapter._fetch_exchange_rate = _mock_rate
+    # Explicitly mock _fetch_exchange_rate with the given rate.
+    # Use AsyncMock instead of closure for clarity and to match standard mocking patterns.
+    us_adapter._fetch_exchange_rate = AsyncMock(return_value=adapter_exchange_rate)
 
     # KR adapter mock
     kr_adapter = AsyncMock()
@@ -122,6 +121,24 @@ class TestTotalEquityWithTotAsstKrw:
         data = client.get("/api/v1/portfolio/summary").json()
         # Default: krw_total=5_000_000, usd_total=5000, rate=1400
         expected = 5_000_000 + 5000 * 1400
+        assert data["total_equity"] == expected
+
+    def test_fallback_when_pb_rate_zero(self):
+        """When pb_rate (last_exchange_rate)=0, falls back to krw_total + usd_total * market_rate.
+
+        The condition `tot_asst_krw_val > 0 and pb_rate > 0` will be False when pb_rate is 0.
+        """
+        app = _make_app(
+            tot_asst_krw=50_000_000,
+            usd_deposit_krw=13_050_000,
+            last_exchange_rate=0,  # Force fallback
+            adapter_exchange_rate=1500.0,  # Market rate is available
+        )
+        client = TestClient(app)
+        data = client.get("/api/v1/portfolio/summary").json()
+        # Should use fallback: krw_total + usd_total * market_rate
+        # Default: krw_total=5_000_000, usd_total=5000, market_rate=1500
+        expected = 5_000_000 + 5000 * 1500
         assert data["total_equity"] == expected
 
     def test_available_cash_includes_usd_with_tot_asst_krw(self):

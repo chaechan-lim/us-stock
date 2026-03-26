@@ -113,11 +113,18 @@ async def _combined_summary(request: Request) -> dict:
     # broker rate. We extract the actual USD value and re-price at the live market
     # rate so that exchange-rate drift does not understate total equity.
     adapter = getattr(request.app.state, "adapter", None)
-    tot_asst_krw_val = (getattr(adapter, "_tot_asst_krw", 0) or 0) if adapter else 0
-    usd_deposit_krw_val = (getattr(adapter, "_usd_deposit_krw", 0) or 0) if adapter else 0
-    pb_rate = (getattr(adapter, "_last_exchange_rate", 0) or 0) if adapter else 0
+
+    # Helper to safely extract numeric values from adapter. The `or 0` pattern
+    # handles the case where an attribute exists but is explicitly None.
+    def _get_adapter_num(attr: str, default: float = 0.0) -> float:
+        val = getattr(adapter, attr, None) if adapter else None
+        return float(val) if val else default
+
+    tot_asst_krw_val = _get_adapter_num("_tot_asst_krw")
+    usd_deposit_krw_val = _get_adapter_num("_usd_deposit_krw")
+    pb_rate = _get_adapter_num("_last_exchange_rate")
     # Also read full_us_usd — still needed for available_cash (STOCK-42) below.
-    full_us_usd = (getattr(adapter, "_full_account_usd", 0) or 0) if adapter else 0
+    full_us_usd = _get_adapter_num("_full_account_usd")
 
     if tot_asst_krw_val > 0 and pb_rate > 0:
         # Split: KRW-denominated portion + USD portion re-valued at live market rate.
