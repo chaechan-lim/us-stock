@@ -560,6 +560,7 @@ async def lifespan(app: FastAPI):
 
     async def task_daily_reset():
         risk_manager.reset_daily()
+        kr_risk_manager.reset_daily()
         logger.info("Daily risk counters reset")
 
     async def task_evaluation_loop():
