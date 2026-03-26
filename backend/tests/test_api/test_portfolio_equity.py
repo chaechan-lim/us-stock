@@ -26,6 +26,7 @@ def _make_app(
     kr_positions: list[Position] | None = None,
     us_positions: list[Position] | None = None,
     tot_asst_krw: float | None = None,
+    usd_deposit_krw: float = 0,
     last_exchange_rate: float = 1400.0,
     adapter_exchange_rate: float = 0.0,  # from _fetch_exchange_rate
     full_account_usd: float = 0,
@@ -42,6 +43,7 @@ def _make_app(
     )
     us_adapter.fetch_positions = AsyncMock(return_value=us_positions or [])
     us_adapter._tot_asst_krw = tot_asst_krw
+    us_adapter._usd_deposit_krw = usd_deposit_krw
     us_adapter._last_exchange_rate = last_exchange_rate
     us_adapter._full_account_usd = full_account_usd
     us_adapter._full_available_usd = full_available_usd
@@ -70,18 +72,54 @@ def _make_app(
 
 
 class TestTotalEquityWithTotAsstKrw:
-    """tot_asst_krw on adapter is ignored — unified sum is always used.
+    """STOCK-59: tot_asst_krw drives total_equity when available.
 
-    CTRP6504R tot_asst_amt only covers overseas assets, not KR holdings,
-    so _combined_summary always computes: krw_total + usd_total * rate.
+    CTRP6504R tot_asst_amt (= _tot_asst_krw) contains the full account value in
+    KRW at the broker's base rate. frcr_evlu_tota (= _usd_deposit_krw) is the
+    USD portion at the same rate. We re-value the USD portion at the live market
+    rate to get an accurate total_equity.
     """
 
-    def test_ignores_tot_asst_krw_uses_sum(self):
-        """total_equity = krw_total + usd_total * rate, even when _tot_asst_krw is set."""
-        app = _make_app(tot_asst_krw=50_000_000, last_exchange_rate=1400.0)
+    def test_uses_tot_asst_krw_with_usd_breakdown(self):
+        """Primary path: split KRW portion + USD re-valued at market rate."""
+        # tot_asst_krw = 18_603_296 (full account at pb_rate=1450)
+        # usd_deposit_krw = 13_050_000 (USD portion: ~$9,000 × 1450)
+        # market_rate = 1498.7 (live rate)
+        pb_rate = 1450.0
+        usd_krw_at_broker = 13_050_000.0  # frcr_evlu_tota
+        tot = 18_603_296.0
+        market_rate = 1498.7
+        app = _make_app(
+            tot_asst_krw=tot,
+            usd_deposit_krw=usd_krw_at_broker,
+            last_exchange_rate=pb_rate,
+            adapter_exchange_rate=market_rate,
+        )
         client = TestClient(app)
-        resp = client.get("/api/v1/portfolio/summary")
-        data = resp.json()
+        data = client.get("/api/v1/portfolio/summary").json()
+
+        krw_portion = tot - usd_krw_at_broker
+        usd_value = usd_krw_at_broker / pb_rate
+        expected = krw_portion + usd_value * market_rate
+        assert abs(data["total_equity"] - expected) < 1.0  # within 1 KRW
+
+    def test_uses_tot_asst_krw_no_usd_deposit(self):
+        """When usd_deposit_krw=0, total_equity = tot_asst_krw (pure KRW account)."""
+        app = _make_app(
+            tot_asst_krw=10_000_000,
+            usd_deposit_krw=0,
+            last_exchange_rate=1400.0,
+        )
+        client = TestClient(app)
+        data = client.get("/api/v1/portfolio/summary").json()
+        # krw_portion = 10_000_000 - 0 = 10_000_000; usd_value = 0
+        assert data["total_equity"] == 10_000_000
+
+    def test_fallback_when_tot_asst_krw_zero(self):
+        """When tot_asst_krw=0, falls back to krw_total + usd_total * rate."""
+        app = _make_app(tot_asst_krw=0, last_exchange_rate=1400.0)
+        client = TestClient(app)
+        data = client.get("/api/v1/portfolio/summary").json()
         # Default: krw_total=5_000_000, usd_total=5000, rate=1400
         expected = 5_000_000 + 5000 * 1400
         assert data["total_equity"] == expected

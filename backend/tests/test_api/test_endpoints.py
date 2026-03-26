@@ -44,6 +44,8 @@ def app():
     adapter._full_account_usd = 0
     adapter._full_available_usd = 0
     adapter._last_exchange_rate = 1350.0
+    adapter._tot_asst_krw = None
+    adapter._usd_deposit_krw = 0
 
     test_app.state.adapter = adapter
     test_app.state.market_data = MarketDataService(
