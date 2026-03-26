@@ -269,11 +269,11 @@ async def portfolio_returns(request: Request):
             new_equity = 0.0
 
             if us_old and us_new:
-                # STOCK-58: Use historical exchange rate for old snapshot, current for new
+                # STOCK-58: Use historical exchange rate for each snapshot
                 # This ensures exchange rate changes are properly captured in returns
                 # Use saved rate, fall back to current if not available
                 old_rate = us_old.usd_krw_rate or _cached_usd_krw
-                new_rate = _cached_usd_krw  # Use current rate for latest snapshot
+                new_rate = us_new.usd_krw_rate or _cached_usd_krw
                 old_equity += us_old.total_value_usd * old_rate
                 new_equity += us_new.total_value_usd * new_rate
             if kr_old and kr_new:
