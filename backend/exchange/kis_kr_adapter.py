@@ -106,6 +106,7 @@ class KISKRAdapter(ExchangeAdapter):
         self._session: aiohttp.ClientSession | None = None
         self._is_paper = "vts" in config.base_url
         self._tr = TR_ID_KR_PAPER if self._is_paper else TR_ID_KR_LIVE
+        self._tot_evlu_amt: float = 0.0  # 총평가금액 (통합증거금: KR+overseas)
 
     async def initialize(self) -> None:
         self._session = aiohttp.ClientSession()
@@ -266,6 +267,8 @@ class KISKRAdapter(ExchangeAdapter):
         # and causing 100% exposure calculation that blocks all KR buys.
         # Use scts_evlu_amt (domestic stock evaluation only) instead.
         stock_eval = float(output2.get("scts_evlu_amt", 0))   # 유가증권평가금액 (domestic only)
+        # Store tot_evlu_amt for combined total equity calculation (includes overseas in 통합증거금)
+        self._tot_evlu_amt = float(output2.get("tot_evlu_amt", 0))
         invested = float(output2.get("pchs_amt_smtl_amt", 0)) # 매입금액합계
         deposit = float(output2.get("dnca_tot_amt", 0))       # 예수금총금액
 

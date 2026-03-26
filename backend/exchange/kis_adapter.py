@@ -103,7 +103,8 @@ class KISAdapter(ExchangeAdapter):
         self._tr = TR_ID_PAPER if self._is_paper else TR_ID_LIVE
         self._last_exchange_rate: float = 1450.0  # USD/KRW
         self._usd_deposit_krw: float = 0.0  # 달러예수금 (KRW equivalent)
-        self._tot_asst_krw: float = 0.0  # CTRP6504R tot_asst_amt (통합증거금 전체 자산)
+        self._tot_asst_krw: float = 0.0  # CTRP6504R tot_asst_amt (해외자산+예수금)
+        self._tot_dncl_krw: float = 0.0  # CTRP6504R tot_dncl_amt (예수금, 통합증거금 공유)
 
     async def initialize(self) -> None:
         self._session = aiohttp.ClientSession()
@@ -289,7 +290,8 @@ class KISAdapter(ExchangeAdapter):
 
         # Cache exchange rate, total, and USD deposit for cross-market calculations
         self._last_exchange_rate = exrt
-        self._tot_asst_krw = tot_asst_krw  # 통합증거금 total (KR+US+cash)
+        self._tot_asst_krw = tot_asst_krw  # 해외자산 + 예수금 (KR stocks 미포함)
+        self._tot_dncl_krw = tot_dncl_krw  # 예수금 (통합증거금 공유)
         self._usd_deposit_krw = float(pb_o3.get("frcr_evlu_tota", 0)) if pb_o3 else 0
         # STOCK-53: Store uncapped buying power + positions for total_equity calc.
         # frcr_ord_psbl_amt1 includes KRW auto-conversion, reflecting the full
