@@ -241,6 +241,12 @@ class RiskManager:
                 when both are provided, the higher implied value is used
                 (STOCK-30).
         """
+        # STOCK-56: Preserve original portfolio_value before market-cap is applied.
+        # The daily loss limit must be computed against the full portfolio value,
+        # not the market-capped slice. With 50:50 allocation the capped value is
+        # halved, which would double the apparent loss percentage and trigger a
+        # premature trading halt.
+        uncapped_portfolio_value = portfolio_value
         portfolio_value, cash_available = self._apply_market_cap(
             portfolio_value,
             cash_available,
@@ -273,9 +279,11 @@ class RiskManager:
         if reject:
             return reject
 
-        # Check daily loss limit
+        # Check daily loss limit using uncapped portfolio value (STOCK-56).
+        # Using the market-capped value here would inflate the loss percentage
+        # proportionally to the allocation split and cause premature halts.
         if self._daily_pnl < 0:
-            daily_loss_pct = abs(self._daily_pnl) / portfolio_value
+            daily_loss_pct = abs(self._daily_pnl) / uncapped_portfolio_value
             if daily_loss_pct >= self._params.daily_loss_limit_pct:
                 return PositionSizeResult(
                     quantity=0,
@@ -359,6 +367,8 @@ class RiskManager:
                 portfolio (0.0–1.0). Complementary to existing_position_value
                 (STOCK-30).
         """
+        # STOCK-56: Preserve original portfolio_value before market-cap is applied.
+        uncapped_portfolio_value = portfolio_value
         portfolio_value, cash_available = self._apply_market_cap(
             portfolio_value,
             cash_available,
@@ -391,8 +401,9 @@ class RiskManager:
         if reject:
             return reject
 
+        # Check daily loss limit using uncapped portfolio value (STOCK-56).
         if self._daily_pnl < 0:
-            daily_loss_pct = abs(self._daily_pnl) / portfolio_value
+            daily_loss_pct = abs(self._daily_pnl) / uncapped_portfolio_value
             if daily_loss_pct >= self._params.daily_loss_limit_pct:
                 return PositionSizeResult(
                     quantity=0,
@@ -569,6 +580,8 @@ class RiskManager:
                 when both are provided, the higher implied value is used
                 (STOCK-32).
         """
+        # STOCK-56: Preserve original portfolio_value before market-cap is applied.
+        uncapped_portfolio_value = portfolio_value
         portfolio_value, cash_available = self._apply_market_cap(
             portfolio_value,
             cash_available,
@@ -599,8 +612,9 @@ class RiskManager:
         if reject:
             return reject
 
-        if self._daily_pnl < 0 and portfolio_value > 0:
-            daily_loss_pct = abs(self._daily_pnl) / portfolio_value
+        # Check daily loss limit using uncapped portfolio value (STOCK-56).
+        if self._daily_pnl < 0 and uncapped_portfolio_value > 0:
+            daily_loss_pct = abs(self._daily_pnl) / uncapped_portfolio_value
             if daily_loss_pct >= self._params.daily_loss_limit_pct:
                 return PositionSizeResult(
                     quantity=0,
