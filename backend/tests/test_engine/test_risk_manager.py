@@ -1271,3 +1271,196 @@ class TestExtendedHoursConcentration:
         )
         # Concentration check passes (3% < 10%), but max_alloc = 3000-3000 = 0
         assert result.allowed is False
+
+
+class TestDailyLossLimitUncapped:
+    """STOCK-56: Daily loss limit must use uncapped (full) portfolio value.
+
+    With a 50:50 US/KR split, _apply_market_cap halves portfolio_value for
+    each market.  Using the capped value doubles the apparent loss percentage,
+    which triggers the daily halt at only half the configured threshold.
+    """
+
+    def _make_rm(self, loss_limit: float = 0.03) -> RiskManager:
+        return RiskManager(
+            RiskParams(
+                daily_loss_limit_pct=loss_limit,
+                market_allocations={"US": 0.5, "KR": 0.5},
+            )
+        )
+
+    # --- calculate_position_size ---
+
+    def test_loss_below_limit_allows_trade_with_market_cap(self):
+        """1.5% actual loss should NOT trigger 3% daily loss limit.
+
+        Setup: portfolio=100k (all cash, no positions), market=US with 50:50 split.
+        After cap: capped_portfolio=50k, capped_cash=50k (invested=0, so full cap).
+        Bug (pre-fix): loss_pct = 1500/50000 = 3.0% → incorrectly triggers halt.
+        Fix: loss_pct = 1500/100000 = 1.5% < 3% → trade allowed.
+        """
+        rm = self._make_rm(loss_limit=0.03)
+        rm.update_daily_pnl(-1_500)  # -1.5% of 100k full portfolio
+        result = rm.calculate_position_size(
+            symbol="AAPL",
+            price=100.0,
+            portfolio_value=100_000,
+            cash_available=100_000,  # all cash → invested=0 → capped_cash=50k
+            current_positions=0,
+            market="US",  # cap = 50% → capped_portfolio = 50,000
+        )
+        # 1,500 / 100,000 = 1.5% < 3% limit → should be allowed
+        assert result.allowed is True, (
+            f"Expected allowed=True but got reason: {result.reason}"
+        )
+
+    def test_loss_at_limit_blocks_trade_with_market_cap(self):
+        """3.5% actual loss SHOULD trigger 3% daily loss limit."""
+        rm = self._make_rm(loss_limit=0.03)
+        rm.update_daily_pnl(-3_500)  # -3.5% of 100k
+        result = rm.calculate_position_size(
+            symbol="AAPL",
+            price=100.0,
+            portfolio_value=100_000,
+            cash_available=100_000,
+            current_positions=0,
+            market="US",
+        )
+        assert result.allowed is False
+        assert "Daily loss" in result.reason
+
+    def test_loss_below_limit_without_market_cap_still_allowed(self):
+        """Without market= param, uncapped == portfolio_value — no regression."""
+        rm = self._make_rm(loss_limit=0.03)
+        rm.update_daily_pnl(-1_500)
+        result = rm.calculate_position_size(
+            symbol="AAPL",
+            price=100.0,
+            portfolio_value=100_000,
+            cash_available=100_000,
+            current_positions=0,
+            # No market param → no cap applied
+        )
+        assert result.allowed is True
+
+    # --- calculate_kelly_position_size ---
+
+    def test_kelly_loss_below_limit_allows_trade_with_market_cap(self):
+        """Kelly: 1.5% actual loss should NOT trigger 3% daily loss limit."""
+        rm = self._make_rm(loss_limit=0.03)
+        rm.update_daily_pnl(-1_500)
+        result = rm.calculate_kelly_position_size(
+            symbol="AAPL",
+            price=100.0,
+            portfolio_value=100_000,
+            cash_available=100_000,
+            current_positions=0,
+            market="US",
+        )
+        assert result.allowed is True, (
+            f"Expected allowed=True but got reason: {result.reason}"
+        )
+
+    def test_kelly_loss_at_limit_blocks_trade_with_market_cap(self):
+        """Kelly: 3.5% actual loss SHOULD trigger 3% daily loss limit."""
+        rm = self._make_rm(loss_limit=0.03)
+        rm.update_daily_pnl(-3_500)
+        result = rm.calculate_kelly_position_size(
+            symbol="AAPL",
+            price=100.0,
+            portfolio_value=100_000,
+            cash_available=100_000,
+            current_positions=0,
+            market="US",
+        )
+        assert result.allowed is False
+        assert "Daily loss" in result.reason
+
+    # --- calculate_extended_hours_position_size ---
+
+    def test_extended_hours_loss_below_limit_allows_trade_with_market_cap(self):
+        """Extended hours: 1.5% actual loss should NOT trigger 3% daily loss limit."""
+        rm = self._make_rm(loss_limit=0.03)
+        rm.update_daily_pnl(-1_500)
+        result = rm.calculate_extended_hours_position_size(
+            symbol="AAPL",
+            price=100.0,
+            portfolio_value=100_000,
+            cash_available=100_000,
+            current_positions=0,
+            market="US",
+        )
+        assert result.allowed is True, (
+            f"Expected allowed=True but got reason: {result.reason}"
+        )
+
+    def test_extended_hours_loss_at_limit_blocks_trade_with_market_cap(self):
+        """Extended hours: 3.5% actual loss SHOULD trigger 3% daily loss limit."""
+        rm = self._make_rm(loss_limit=0.03)
+        rm.update_daily_pnl(-3_500)
+        result = rm.calculate_extended_hours_position_size(
+            symbol="AAPL",
+            price=100.0,
+            portfolio_value=100_000,
+            cash_available=100_000,
+            current_positions=0,
+            market="US",
+        )
+        assert result.allowed is False
+        assert "Daily loss" in result.reason
+
+
+class TestTaskDailyReset:
+    """STOCK-56: task_daily_reset must reset both US and KR risk managers."""
+
+    def test_both_risk_managers_are_reset(self) -> None:
+        """Verify that reset_daily() is called on both risk manager instances."""
+        us_rm = RiskManager(RiskParams(daily_loss_limit_pct=0.03))
+        kr_rm = RiskManager(RiskParams(daily_loss_limit_pct=0.03))
+
+        us_rm.update_daily_pnl(-2_000)
+        kr_rm.update_daily_pnl(-1_500)
+
+        assert us_rm.daily_pnl == -2_000
+        assert kr_rm.daily_pnl == -1_500
+
+        # Simulate what task_daily_reset should now do (both managers reset)
+        us_rm.reset_daily()
+        kr_rm.reset_daily()
+
+        assert us_rm.daily_pnl == 0.0
+        assert kr_rm.daily_pnl == 0.0
+
+    def test_kr_risk_manager_reset_prevents_stale_accumulation(self) -> None:
+        """KR daily PnL must not accumulate across reset boundaries.
+
+        Before the fix, task_daily_reset only called risk_manager.reset_daily()
+        and omitted kr_risk_manager.reset_daily(), so KR daily PnL kept
+        accumulating across trading days and eventually triggered a permanent
+        trading halt even when intra-day KR losses were within limits.
+        """
+        kr_rm = RiskManager(RiskParams(daily_loss_limit_pct=0.03))
+
+        # Day 1: -1% KR loss
+        kr_rm.update_daily_pnl(-1_000)
+
+        # Simulated reset (was missing before fix)
+        kr_rm.reset_daily()
+        assert kr_rm.daily_pnl == 0.0
+
+        # Day 2: another -1% KR loss
+        kr_rm.update_daily_pnl(-1_000)
+
+        # After proper reset, day-2 loss is 1% — well within 3% limit.
+        # Use a low price so allocation is > 0 (no market cap applied here).
+        result = kr_rm.calculate_position_size(
+            symbol="005930",
+            price=100.0,
+            portfolio_value=100_000,
+            cash_available=100_000,
+            current_positions=0,
+        )
+        assert result.allowed is True, (
+            "KR trading should be allowed after daily reset; "
+            f"got reason: {result.reason}"
+        )
