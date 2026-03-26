@@ -105,6 +105,8 @@ class PositionTracker:
         take_profit_pct: float | None = None,
         trailing_activation_pct: float | None = None,
         trailing_stop_pct: float | None = None,
+        highest_price: float | None = None,  # STOCK-58: Restore from DB
+        partial_profit_taken: bool = False,  # STOCK-58: Restore from DB
     ) -> None:
         """Start tracking a position.
 
@@ -113,6 +115,9 @@ class PositionTracker:
                 Falls back to RiskParams default if None.
             trailing_stop_pct: Trail % from peak to trigger sell.
                 Falls back to RiskParams default if None.
+            highest_price: Restore from DB — highest price reached (for trailing stop).
+                Defaults to entry_price if not provided.
+            partial_profit_taken: Restore from DB — whether partial profit was taken.
         """
         # Apply trailing stop defaults from risk params when not specified
         trail_act = trailing_activation_pct
@@ -126,12 +131,13 @@ class PositionTracker:
             symbol=symbol,
             entry_price=entry_price,
             quantity=quantity,
-            highest_price=entry_price,
+            highest_price=highest_price or entry_price,
             strategy=strategy,
             stop_loss_pct=stop_loss_pct,
             take_profit_pct=take_profit_pct,
             trailing_activation_pct=trail_act,
             trailing_stop_pct=trail_pct,
+            partial_profit_taken=partial_profit_taken,
         )
         logger.info(
             "Tracking position: %s %d @ $%.2f (SL=%.1f%% TP=%.1f%% trail=%.1f%%/%.1f%%)",
@@ -1001,6 +1007,8 @@ class PositionTracker:
                 strategy=record.strategy_name or "unknown",
                 stop_loss_pct=record.stop_loss,
                 take_profit_pct=record.take_profit,
+                highest_price=record.highest_price,  # STOCK-58: Restore highest price
+                partial_profit_taken=record.partial_profit_taken or False,  # STOCK-58: Restore partial profit flag
             )
 
             pnl_pct = 0.0
@@ -1410,6 +1418,8 @@ class PositionTracker:
             record.take_profit = tracked.take_profit_pct
             record.trailing_stop = tracked.trailing_stop_pct
             record.strategy_name = tracked.strategy
+            record.highest_price = tracked.highest_price  # STOCK-58: Persist highest price
+            record.partial_profit_taken = tracked.partial_profit_taken  # STOCK-58: Persist partial profit flag
             if current_price is not None:
                 record.current_price = current_price
             if unrealized_pnl is not None:
@@ -1432,6 +1442,8 @@ class PositionTracker:
                 take_profit=tracked.take_profit_pct,
                 trailing_stop=tracked.trailing_stop_pct,
                 strategy_name=tracked.strategy,
+                highest_price=tracked.highest_price,  # STOCK-58: Persist highest price
+                partial_profit_taken=tracked.partial_profit_taken,  # STOCK-58: Persist partial profit flag
                 opened_at=opened_at,
                 updated_at=datetime.utcnow(),
             )
