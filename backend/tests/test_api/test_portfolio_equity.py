@@ -82,23 +82,23 @@ class TestTotalEquityWithTotAsstKrw:
     def test_uses_tot_asst_krw_with_usd_breakdown(self):
         """Primary path: split KRW portion + USD re-valued at market rate."""
         # tot_asst_krw = 18_603_296 (full account at pb_rate=1450)
-        # usd_deposit_krw = 13_050_000 (USD portion: ~$9,000 × 1450)
+        # usd_deposit_in_broker_krw = 13_050_000 (USD portion valued in KRW: ~$9,000 × 1450)
         # market_rate = 1498.7 (live rate)
         pb_rate = 1450.0
-        usd_krw_at_broker = 13_050_000.0  # frcr_evlu_tota
+        usd_deposit_in_broker_krw = 13_050_000.0  # frcr_evlu_tota: USD deposit amount in KRW at broker rate
         tot = 18_603_296.0
         market_rate = 1498.7
         app = _make_app(
             tot_asst_krw=tot,
-            usd_deposit_krw=usd_krw_at_broker,
+            usd_deposit_krw=usd_deposit_in_broker_krw,
             last_exchange_rate=pb_rate,
             adapter_exchange_rate=market_rate,
         )
         client = TestClient(app)
         data = client.get("/api/v1/portfolio/summary").json()
 
-        krw_portion = tot - usd_krw_at_broker
-        usd_value = usd_krw_at_broker / pb_rate
+        krw_portion = tot - usd_deposit_in_broker_krw
+        usd_value = usd_deposit_in_broker_krw / pb_rate
         expected = krw_portion + usd_value * market_rate
         assert abs(data["total_equity"] - expected) < 1.0  # within 1 KRW
 
@@ -116,7 +116,11 @@ class TestTotalEquityWithTotAsstKrw:
 
     def test_fallback_when_tot_asst_krw_zero(self):
         """When tot_asst_krw=0, falls back to krw_total + usd_total * rate."""
-        app = _make_app(tot_asst_krw=0, last_exchange_rate=1400.0)
+        app = _make_app(
+            tot_asst_krw=0,
+            last_exchange_rate=1400.0,
+            adapter_exchange_rate=1400.0,  # Explicitly set to match expected rate
+        )
         client = TestClient(app)
         data = client.get("/api/v1/portfolio/summary").json()
         # Default: krw_total=5_000_000, usd_total=5000, rate=1400

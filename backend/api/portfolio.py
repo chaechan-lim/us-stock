@@ -114,8 +114,9 @@ async def _combined_summary(request: Request) -> dict:
     # rate so that exchange-rate drift does not understate total equity.
     adapter = getattr(request.app.state, "adapter", None)
 
-    # Helper to safely extract numeric values from adapter. The `or 0` pattern
-    # handles the case where an attribute exists but is explicitly None.
+    # Helper to safely extract numeric values from adapter.
+    # Returns default if the attribute is missing, None, or falsy (e.g., 0).
+    # For this use case, 0 correctly signals 'value unavailable', so we treat it as falsy.
     def _get_adapter_num(attr: str, default: float = 0.0) -> float:
         val = getattr(adapter, attr, None) if adapter else None
         return float(val) if val else default
