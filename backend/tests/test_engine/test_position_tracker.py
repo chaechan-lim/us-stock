@@ -2017,12 +2017,16 @@ async def test_handle_sell_fill_fires_callbacks(adapter, risk, order_mgr):
 
 @pytest.mark.asyncio
 async def test_handle_sell_fill_already_untracked(adapter, risk, order_mgr):
-    """STOCK-52: handle_sell_fill is a no-op if position already untracked."""
+    """STOCK-52/STOCK-60: handle_sell_fill skips PnL when position already untracked.
+
+    PnL is not updated (no entry price available), but sell callbacks ARE still
+    fired so that sell cooldown is registered (STOCK-60 fix).
+    """
     tracker = PositionTracker(adapter, risk, order_mgr)
     # Don't track anything — symbol not in tracker
     initial_pnl = risk._daily_pnl
 
-    # Should not raise, should be no-op
+    # PnL must not change (no tracked entry price available)
     await tracker.handle_sell_fill("AAPL", filled_price=145.0, filled_quantity=10)
     assert risk._daily_pnl == initial_pnl
 
@@ -2239,3 +2243,175 @@ async def test_finalize_sell_tiered_trailing_stop_notification(adapter, risk, or
     assert "AAPL" not in tracker.tracked_symbols
     notif.notify_trailing_stop.assert_awaited_once()
     notif.notify_trade_executed.assert_not_awaited()
+
+
+# STOCK-60: sell cooldown via handle_sell_fill when already untracked
+# ------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_handle_sell_fill_already_untracked_fires_callbacks(adapter, risk, order_mgr):
+    """STOCK-60: handle_sell_fill fires sell callbacks even when already untracked.
+
+    Reproduces the HPSP bug: check_all removes tracker before reconciliation
+    arrives → handle_sell_fill early-return path must still fire callbacks so
+    that sell cooldown is registered and immediate re-buy is prevented.
+    """
+    tracker = PositionTracker(adapter, risk, order_mgr)
+    # Symbol is not tracked (simulates check_all having removed it already)
+
+    callback_calls: list[tuple[str, float]] = []
+
+    def on_sell(symbol: str, ts: float) -> None:
+        callback_calls.append((symbol, ts))
+
+    tracker.register_on_sell(on_sell)
+
+    await tracker.handle_sell_fill("HPSP", filled_price=42.0, filled_quantity=100)
+
+    # Callback must be fired even though position was already untracked
+    assert len(callback_calls) == 1
+    assert callback_calls[0][0] == "HPSP"
+    assert isinstance(callback_calls[0][1], float)
+
+
+@pytest.mark.asyncio
+async def test_handle_sell_fill_already_untracked_stop_loss_is_loss_true(
+    adapter, risk, order_mgr
+):
+    """STOCK-60: handle_sell_fill already-untracked path passes is_loss=True for stop_loss.
+
+    Ensures whipsaw detection counts loss sells correctly even when check_all
+    cleaned up the tracker before reconciliation.
+    """
+    tracker = PositionTracker(adapter, risk, order_mgr)
+
+    is_loss_values: list[bool] = []
+
+    def on_sell(symbol: str, ts: float, *, is_loss: bool = False) -> None:
+        is_loss_values.append(is_loss)
+
+    tracker.register_on_sell(on_sell)
+
+    await tracker.handle_sell_fill(
+        "HPSP", filled_price=38.0, filled_quantity=100, reason="stop_loss"
+    )
+
+    assert len(is_loss_values) == 1
+    assert is_loss_values[0] is True
+
+
+@pytest.mark.asyncio
+async def test_handle_sell_fill_already_untracked_trailing_stop_is_loss_true(
+    adapter, risk, order_mgr
+):
+    """STOCK-60: already-untracked path passes is_loss=True for trailing_stop."""
+    tracker = PositionTracker(adapter, risk, order_mgr)
+
+    is_loss_values: list[bool] = []
+
+    def on_sell(symbol: str, ts: float, *, is_loss: bool = False) -> None:
+        is_loss_values.append(is_loss)
+
+    tracker.register_on_sell(on_sell)
+
+    await tracker.handle_sell_fill(
+        "HPSP", filled_price=40.0, filled_quantity=100, reason="trailing_stop"
+    )
+
+    assert len(is_loss_values) == 1
+    assert is_loss_values[0] is True
+
+
+@pytest.mark.asyncio
+async def test_handle_sell_fill_already_untracked_take_profit_is_loss_false(
+    adapter, risk, order_mgr
+):
+    """STOCK-60: already-untracked path passes is_loss=False for take_profit."""
+    tracker = PositionTracker(adapter, risk, order_mgr)
+
+    is_loss_values: list[bool] = []
+
+    def on_sell(symbol: str, ts: float, *, is_loss: bool = False) -> None:
+        is_loss_values.append(is_loss)
+
+    tracker.register_on_sell(on_sell)
+
+    await tracker.handle_sell_fill(
+        "HPSP", filled_price=55.0, filled_quantity=100, reason="take_profit"
+    )
+
+    assert len(is_loss_values) == 1
+    assert is_loss_values[0] is False
+
+
+@pytest.mark.asyncio
+async def test_handle_sell_fill_already_untracked_no_pnl_update(adapter, risk, order_mgr):
+    """STOCK-60: already-untracked path fires callbacks but does NOT update PnL.
+
+    PnL cannot be computed without an entry price (tracked object is gone).
+    """
+    tracker = PositionTracker(adapter, risk, order_mgr)
+    initial_pnl = risk._daily_pnl
+
+    callback_calls: list[str] = []
+    tracker.register_on_sell(lambda s, t: callback_calls.append(s))
+
+    await tracker.handle_sell_fill("HPSP", filled_price=42.0, filled_quantity=100)
+
+    # Callback fired
+    assert len(callback_calls) == 1
+    # PnL unchanged (no entry price available)
+    assert risk._daily_pnl == initial_pnl
+
+
+@pytest.mark.asyncio
+async def test_handle_sell_fill_already_untracked_multiple_callbacks(adapter, risk, order_mgr):
+    """STOCK-60: already-untracked path fires all registered callbacks."""
+    tracker = PositionTracker(adapter, risk, order_mgr)
+
+    calls_a: list[str] = []
+    calls_b: list[str] = []
+
+    tracker.register_on_sell(lambda s, t: calls_a.append(s))
+    tracker.register_on_sell(lambda s, t: calls_b.append(s))
+
+    await tracker.handle_sell_fill("HPSP", filled_price=42.0, filled_quantity=100)
+
+    assert calls_a == ["HPSP"]
+    assert calls_b == ["HPSP"]
+
+
+@pytest.mark.asyncio
+async def test_check_all_position_gone_then_handle_sell_fill_fires_cooldown(
+    adapter, risk, order_mgr
+):
+    """STOCK-60: Integration — check_all removes tracker, then reconciliation fires callback.
+
+    Simulates the exact HPSP bug timeline:
+    1. check_all finds position gone → untrack (no callbacks)
+    2. reconciliation calls handle_sell_fill → already untracked → fires callbacks ✓
+    """
+    # Position is gone from exchange
+    adapter.fetch_positions = AsyncMock(return_value=[])
+
+    tracker = PositionTracker(adapter, risk, order_mgr)
+    tracker.track("HPSP", entry_price=42.0, quantity=100)
+
+    # Advance tracked_at beyond 5-minute grace period
+    tracker._tracked["HPSP"].tracked_at -= 400
+
+    callback_calls: list[str] = []
+    tracker.register_on_sell(lambda s, t: callback_calls.append(s))
+
+    # Step 1: check_all removes tracker (position gone from exchange, outside grace period)
+    await tracker.check_all()
+    assert "HPSP" not in tracker.tracked_symbols  # tracker removed
+    assert len(callback_calls) == 0  # no callbacks yet (pre-fix behavior of check_all)
+
+    # Step 2: reconciliation fires handle_sell_fill for the confirmed fill
+    await tracker.handle_sell_fill("HPSP", filled_price=43.0, filled_quantity=100)
+
+    # STOCK-60 fix: callback IS now fired, cooldown will be registered
+    assert len(callback_calls) == 1
+    assert callback_calls[0] == "HPSP"

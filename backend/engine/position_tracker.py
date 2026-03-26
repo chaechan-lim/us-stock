@@ -275,7 +275,25 @@ class PositionTracker:
         """
         tracked = self._tracked.get(symbol)
         if not tracked:
-            # Already untracked (e.g. by check_all finding position gone)
+            # STOCK-60: Already untracked (e.g. by check_all finding position gone
+            # before reconciliation arrived). Still fire sell callbacks so that
+            # sell cooldown is registered and immediate re-buy is prevented.
+            logger.info(
+                "handle_sell_fill: %s already untracked — firing callbacks for sell cooldown",
+                symbol,
+            )
+            is_loss = reason in ("stop_loss", "trailing_stop", "tiered_trailing_stop")
+            sell_ts = time.time()
+            for cb in self._on_sell_callbacks:
+                try:
+                    cb(symbol, sell_ts, is_loss=is_loss)  # type: ignore[call-arg]
+                except TypeError:
+                    try:
+                        cb(symbol, sell_ts)
+                    except Exception as e:
+                        logger.warning("on_sell callback failed for %s: %s", symbol, e)
+                except Exception as e:
+                    logger.warning("on_sell callback failed for %s: %s", symbol, e)
             return
 
         # Use explicit None checks — 0 and 0.0 should NOT silently fall back.
