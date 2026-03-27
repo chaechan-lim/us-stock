@@ -366,7 +366,7 @@ class ETFEngine:
                         # If it's still in held_symbols, the sell was blocked (min_hold).
                         logger.info(
                             "ETF Engine: SKIP BUY %s — sibling %s still held "
-                            "(exit sell was blocked, likely by min_hold)",
+                            "(exit sell did not complete)",
                             sym, sib,
                         )
                         skip_buy_for_sibling = True
@@ -403,6 +403,14 @@ class ETFEngine:
                                 "ETF Engine: SELL %s (sibling conflict with target %s)",
                                 sib, sym,
                             )
+                        else:
+                            # Order failed — sibling still held; can't guarantee exclusivity
+                            logger.warning(
+                                "ETF Engine: SELL %s (sibling of %s) failed — skipping buy",
+                                sib, sym,
+                            )
+                            skip_buy_for_sibling = True
+                            break
 
                 if skip_buy_for_sibling:
                     continue
@@ -710,11 +718,15 @@ class ETFEngine:
             logger.info("ETF Engine restore: no ETF positions found on broker")
             return restored
 
+        # Lazy import: core.models requires the full application stack (DB, SQLAlchemy),
+        # so it's imported here rather than at module level to stay testable without it.
+        if session_factory:
+            from core.models import Order
+
         # Look up entry info from DB orders table
         entry_info: dict[str, dict] = {}
         if session_factory:
             try:
-                from core.models import Order
                 async with session_factory() as session:
                     for pos in etf_positions:
                         # Skip if already tracked (idempotent)
@@ -727,7 +739,7 @@ class ETFEngine:
                                 Order.side == "BUY",
                                 Order.strategy_name.like("etf_engine_%"),
                                 Order.status.in_(["filled", "submitted"]),
-                                Order.is_paper == False,  # noqa: E712
+                                Order.is_paper.is_(False),
                             )
                             .order_by(desc(Order.created_at))
                             .limit(1)
@@ -749,7 +761,6 @@ class ETFEngine:
         # sell_cooldown_hours window) to avoid blocking buys for old sells.
         if session_factory:
             try:
-                from core.models import Order  # noqa: F811 (already imported above)
                 cutoff = datetime.now(timezone.utc) - timedelta(
                     hours=self._risk.sell_cooldown_hours,
                 )
@@ -761,7 +772,7 @@ class ETFEngine:
                             Order.side == "SELL",
                             Order.strategy_name.like("etf_engine_%"),
                             Order.status.in_(["filled", "submitted"]),
-                            Order.is_paper == False,  # noqa: E712
+                            Order.is_paper.is_(False),
                             Order.created_at >= cutoff,
                         )
                         .order_by(desc(Order.created_at))

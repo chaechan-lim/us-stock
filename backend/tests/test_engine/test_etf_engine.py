@@ -359,6 +359,14 @@ class TestSectorRotation:
 class TestMinHoldConstraint:
     """Test minimum hold duration enforcement before selling."""
 
+    @pytest.fixture(autouse=True)
+    def configure_is_leveraged(self, mock_etf_universe):
+        """Explicitly configure is_leveraged so 4h (leveraged) vs 2h (sector) threshold
+        dispatch is self-documenting and independent of changes to the shared fixture."""
+        mock_etf_universe.is_leveraged.side_effect = (
+            lambda s: s in {"TQQQ", "SQQQ", "SOXL", "SOXS"}
+        )
+
     @pytest.mark.asyncio
     async def test_skip_sell_if_min_hold_not_satisfied_leveraged(
         self, engine, mock_order_manager, mock_market_data,
@@ -774,6 +782,64 @@ def _make_order_mock(symbol: str, strategy_name: str, created_at: datetime | Non
     return order
 
 
+def _make_sell_order_mock(symbol: str, created_at: datetime | None = None):
+    """Create a mock SELL Order for cooldown-seeding tests."""
+    order = MagicMock()
+    order.symbol = symbol
+    order.created_at = created_at or datetime.now(UTC)
+    order.side = "SELL"
+    order.status = "filled"
+    return order
+
+
+def _mock_sell_session_factory(sell_orders=None):
+    """Create a mock async session factory for cooldown-seeding tests.
+
+    Returns None for BUY entry queries (scalar_one_or_none) and
+    the given list for SELL cooldown queries (scalars().all()).
+    """
+    sell_orders = sell_orders or []
+
+    class _FakeScalars:
+        def __init__(self, orders):
+            self._orders = orders
+
+        def all(self):
+            return self._orders
+
+    class _FakeResult:
+        def __init__(self, orders, is_sell_query):
+            self._orders = orders
+            self._is_sell = is_sell_query
+
+        def scalar_one_or_none(self):
+            return None
+
+        def scalars(self):
+            return _FakeScalars(self._orders if self._is_sell else [])
+
+    class _FakeSession:
+        async def execute(self, stmt):
+            compiled = stmt.compile(compile_kwargs={"literal_binds": True})
+            stmt_str = str(compiled)
+            assert "is_paper" in stmt_str, (
+                "Query missing is_paper filter — live/paper isolation required."
+            )
+            is_sell = "'SELL'" in stmt_str
+            return _FakeResult(sell_orders, is_sell)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+    def factory():
+        return _FakeSession()
+
+    return factory
+
+
 class TestRestoreManagedPositions:
     """Test restore_managed_positions() for server restart recovery."""
 
@@ -1021,3 +1087,65 @@ class TestRestoreManagedPositions:
         assert "quantity" in restored2[0]
         assert "sector" in restored2[0]
         assert restored2[0]["source"] == "already_tracked"
+
+
+class TestRestoreSellCooldownSeeding:
+    """Test _last_sell_times seeding from DB SELL orders in restore_managed_positions."""
+
+    @pytest.mark.asyncio
+    async def test_sell_within_window_seeds_last_sell_times(
+        self, engine, mock_market_data,
+    ):
+        """SELL order within cooldown window is seeded into _last_sell_times on restore."""
+        # Need a broker position so the function doesn't return early before seeding
+        pos = MagicMock(symbol="TQQQ", quantity=100, current_price=55.0, avg_price=50.0)
+        mock_market_data.get_positions.return_value = [pos]
+
+        sell_time = datetime.now(UTC) - timedelta(hours=2)  # 2h ago, within 4h cooldown
+        sell_order = _make_sell_order_mock("TQQQ", sell_time)
+        session_factory = _mock_sell_session_factory([sell_order])
+
+        await engine.restore_managed_positions(session_factory)
+
+        assert "TQQQ" in engine._last_sell_times
+        assert abs(engine._last_sell_times["TQQQ"] - sell_time.timestamp()) < 1.0
+
+    @pytest.mark.asyncio
+    async def test_no_recent_sell_leaves_last_sell_times_empty(
+        self, engine, mock_market_data,
+    ):
+        """No SELL orders returned (DB cutoff filtered) → _last_sell_times stays empty."""
+        pos = MagicMock(symbol="TQQQ", quantity=100, current_price=55.0, avg_price=50.0)
+        mock_market_data.get_positions.return_value = [pos]
+
+        # Factory returns empty list — simulates DB returning nothing within the cooldown window
+        session_factory = _mock_sell_session_factory([])
+
+        await engine.restore_managed_positions(session_factory)
+
+        assert "TQQQ" not in engine._last_sell_times
+
+    @pytest.mark.asyncio
+    async def test_db_failure_during_seeding_is_non_fatal(
+        self, engine, mock_market_data,
+    ):
+        """DB failure in cooldown-seeding block is non-fatal; _last_sell_times stays empty."""
+        pos = MagicMock(symbol="TQQQ", quantity=100, current_price=55.0, avg_price=50.0)
+        mock_market_data.get_positions.return_value = [pos]
+
+        class _FailingSession:
+            async def execute(self, stmt):
+                raise RuntimeError("DB connection lost")
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                pass
+
+        def failing_factory():
+            return _FailingSession()
+
+        await engine.restore_managed_positions(failing_factory)
+
+        assert engine._last_sell_times == {}
