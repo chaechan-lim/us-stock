@@ -1,4 +1,4 @@
-"""Tests for auto-migration of missing columns and indexes (STOCK-11/STOCK-13).
+"""Tests for auto-migration of missing columns and indexes (STOCK-11/STOCK-13/STOCK-63).
 
 Validates that ensure_columns() correctly detects and adds columns that
 exist in the ORM model but are missing from the physical DB schema, and
@@ -6,7 +6,11 @@ that ensure_indexes() creates missing indexes.
 
 STOCK-11: Auto-migration for is_paper column addition.
 STOCK-13: Also creates idx_orders_is_paper index and enforces NOT NULL.
+STOCK-63: run_alembic_upgrade() runs alembic upgrade head on startup.
 """
+
+from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pytest
 import pytest_asyncio
@@ -14,7 +18,7 @@ from sqlalchemy import Column, DateTime, Float, Integer, String, inspect, text
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.orm import DeclarativeBase
 
-from db.migrations import ensure_columns, ensure_indexes
+from db.migrations import ensure_columns, ensure_indexes, run_alembic_upgrade
 
 
 class _OldBase(DeclarativeBase):
@@ -464,3 +468,242 @@ async def test_reconcile_query_works_after_migration(old_engine):
     assert len(pending) == 1
     assert pending[0].symbol == "MSFT"
     assert pending[0].status == "pending"
+
+
+# ── run_alembic_upgrade tests (STOCK-63) ──────────────────────────────
+
+
+def _make_proc(returncode: int = 0, stdout: str = "", stderr: str = "") -> MagicMock:
+    """Build a mock CompletedProcess for subprocess.run."""
+    proc = MagicMock()
+    proc.returncode = returncode
+    proc.stdout = stdout
+    proc.stderr = stderr
+    return proc
+
+
+@pytest.fixture
+def alembic_ini_dir(tmp_path: Path) -> Path:
+    """Dummy backend dir for subprocess cwd (doesn't need real alembic.ini)."""
+    return tmp_path
+
+
+@pytest_asyncio.fixture
+async def fresh_engine():
+    """Engine with NO tables — simulates a brand-new database."""
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    yield engine
+    await engine.dispose()
+
+
+@pytest_asyncio.fixture
+async def legacy_engine_without_stock58():
+    """Engine with orders/portfolio_snapshots tables but WITHOUT stock-58 columns.
+
+    Simulates a production DB that was bootstrapped via create_all at the
+    initial schema but never had STOCK-58 migration applied.
+    """
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "CREATE TABLE orders ("
+                "id INTEGER PRIMARY KEY, symbol TEXT NOT NULL, side TEXT, "
+                "order_type TEXT, quantity REAL, price REAL, status TEXT, "
+                "exchange TEXT DEFAULT 'NASD', market TEXT DEFAULT 'US', "
+                "strategy_name TEXT, kis_order_id TEXT, pnl REAL, "
+                "created_at DATETIME, filled_at DATETIME, "
+                "filled_quantity REAL DEFAULT 0, filled_price REAL)"
+            )
+        )
+        await conn.execute(
+            text(
+                "CREATE TABLE portfolio_snapshots ("
+                "id INTEGER PRIMARY KEY, total_value_usd REAL NOT NULL, "
+                "cash_usd REAL NOT NULL, invested_usd REAL NOT NULL, "
+                "realized_pnl REAL, unrealized_pnl REAL, daily_pnl REAL, "
+                "drawdown_pct REAL, recorded_at DATETIME)"
+            )
+        )
+    yield engine
+    await engine.dispose()
+
+
+@pytest_asyncio.fixture
+async def legacy_engine_with_stock58():
+    """Engine with tables AND stock-58 columns — simulates fresh DB via create_all.
+
+    When create_all builds tables from current ORM models, all columns are
+    present.  We should stamp at head and skip running any migrations.
+    """
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "CREATE TABLE orders ("
+                "id INTEGER PRIMARY KEY, symbol TEXT NOT NULL, side TEXT, "
+                "order_type TEXT, quantity REAL, price REAL, status TEXT, "
+                "exchange TEXT DEFAULT 'NASD', market TEXT DEFAULT 'US', "
+                "strategy_name TEXT, kis_order_id TEXT, pnl REAL, "
+                "created_at DATETIME, filled_at DATETIME, "
+                "filled_quantity REAL DEFAULT 0, filled_price REAL)"
+            )
+        )
+        await conn.execute(
+            text(
+                "CREATE TABLE portfolio_snapshots ("
+                "id INTEGER PRIMARY KEY, total_value_usd REAL NOT NULL, "
+                "cash_usd REAL NOT NULL, invested_usd REAL NOT NULL, "
+                "realized_pnl REAL, unrealized_pnl REAL, daily_pnl REAL, "
+                "drawdown_pct REAL, recorded_at DATETIME, "
+                "usd_krw_rate REAL)"  # STOCK-58 column present
+            )
+        )
+    yield engine
+    await engine.dispose()
+
+
+@pytest_asyncio.fixture
+async def tracked_engine():
+    """Engine with tables and alembic_version — simulates fully tracked DB."""
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("CREATE TABLE orders (id INTEGER PRIMARY KEY, symbol TEXT NOT NULL, side TEXT)")
+        )
+        await conn.execute(
+            text("CREATE TABLE alembic_version (version_num TEXT NOT NULL PRIMARY KEY)")
+        )
+        await conn.execute(text("INSERT INTO alembic_version VALUES ('607feca4f8b7')"))
+    yield engine
+    await engine.dispose()
+
+
+# ── Fresh DB (no tables) ─────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_run_alembic_upgrade_fresh_db_no_stamp(fresh_engine, alembic_ini_dir):
+    """Fresh DB: no tables → no stamp call, just upgrade head."""
+    success_proc = _make_proc(0, "No migrations to apply.\n")
+
+    with patch("db.migrations._run_alembic_cmd", return_value=success_proc) as mock_cmd:
+        await run_alembic_upgrade(fresh_engine, ini_path=alembic_ini_dir)
+
+    # Only upgrade head should have been called — no stamp needed
+    calls = [c.args[0] for c in mock_cmd.call_args_list]
+    assert calls == [["upgrade", "head"]]
+
+
+# ── Legacy DB without STOCK-58 columns ───────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_run_alembic_upgrade_legacy_missing_stock58_stamps_initial(
+    legacy_engine_without_stock58, alembic_ini_dir
+):
+    """Legacy DB with tables but no STOCK-58 columns → stamp at initial revision."""
+    success_proc = _make_proc(0)
+
+    with patch("db.migrations._run_alembic_cmd", return_value=success_proc) as mock_cmd:
+        await run_alembic_upgrade(legacy_engine_without_stock58, ini_path=alembic_ini_dir)
+
+    calls = [c.args[0] for c in mock_cmd.call_args_list]
+    # First call should stamp at initial revision, then upgrade head
+    assert calls[0] == ["stamp", "cfbdf0cd6e1f"]
+    assert calls[1] == ["upgrade", "head"]
+
+
+# ── Legacy DB WITH STOCK-58 columns (fresh via create_all) ───────────
+
+
+@pytest.mark.asyncio
+async def test_run_alembic_upgrade_legacy_with_stock58_stamps_head(
+    legacy_engine_with_stock58, alembic_ini_dir
+):
+    """Legacy DB where create_all applied current ORM → stamp at head."""
+    success_proc = _make_proc(0)
+
+    with patch("db.migrations._run_alembic_cmd", return_value=success_proc) as mock_cmd:
+        await run_alembic_upgrade(legacy_engine_with_stock58, ini_path=alembic_ini_dir)
+
+    calls = [c.args[0] for c in mock_cmd.call_args_list]
+    assert calls[0] == ["stamp", "head"]
+    assert calls[1] == ["upgrade", "head"]
+
+
+# ── Tracked DB (alembic_version table present) ───────────────────────
+
+
+@pytest.mark.asyncio
+async def test_run_alembic_upgrade_tracked_db_no_stamp(tracked_engine, alembic_ini_dir):
+    """Tracked DB: alembic_version exists → no stamp, just upgrade head."""
+    success_proc = _make_proc(0)
+
+    with patch("db.migrations._run_alembic_cmd", return_value=success_proc) as mock_cmd:
+        await run_alembic_upgrade(tracked_engine, ini_path=alembic_ini_dir)
+
+    calls = [c.args[0] for c in mock_cmd.call_args_list]
+    assert calls == [["upgrade", "head"]]
+
+
+# ── Failure / error handling ─────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_run_alembic_upgrade_raises_on_upgrade_failure(tracked_engine, alembic_ini_dir):
+    """RuntimeError raised when alembic upgrade head exits non-zero."""
+    failure_proc = _make_proc(1, stderr="FATAL: column does not exist\n")
+
+    with patch("db.migrations._run_alembic_cmd", return_value=failure_proc):
+        with pytest.raises(RuntimeError, match="alembic upgrade head failed"):
+            await run_alembic_upgrade(tracked_engine, ini_path=alembic_ini_dir)
+
+
+@pytest.mark.asyncio
+async def test_run_alembic_upgrade_raises_on_stamp_failure(
+    legacy_engine_without_stock58, alembic_ini_dir
+):
+    """RuntimeError raised when alembic stamp exits non-zero."""
+    stamp_failure = _make_proc(1, stderr="stamp error\n")
+    success_proc = _make_proc(0)
+
+    # stamp fails, upgrade should never be reached
+    with patch(
+        "db.migrations._run_alembic_cmd",
+        side_effect=[stamp_failure, success_proc],
+    ):
+        with pytest.raises(RuntimeError, match="alembic stamp cfbdf0cd6e1f failed"):
+            await run_alembic_upgrade(legacy_engine_without_stock58, ini_path=alembic_ini_dir)
+
+
+@pytest.mark.asyncio
+async def test_run_alembic_upgrade_default_ini_path(tracked_engine):
+    """Default ini_path resolves to backend/ directory."""
+    success_proc = _make_proc(0)
+    captured_cwd: list[Path] = []
+
+    def _capturing_cmd(args: list, cwd: Path) -> MagicMock:  # type: ignore[no-untyped-def]
+        captured_cwd.append(cwd)
+        return success_proc
+
+    with patch("db.migrations._run_alembic_cmd", side_effect=_capturing_cmd):
+        await run_alembic_upgrade(tracked_engine)
+
+    assert len(captured_cwd) == 1
+    # Should point to the backend/ directory (parent of db/)
+    assert captured_cwd[0].name == "backend"
+
+
+@pytest.mark.asyncio
+async def test_run_alembic_upgrade_upgrade_head_called_last(
+    legacy_engine_without_stock58, alembic_ini_dir
+):
+    """upgrade head is always the final alembic command."""
+    success_proc = _make_proc(0)
+
+    with patch("db.migrations._run_alembic_cmd", return_value=success_proc) as mock_cmd:
+        await run_alembic_upgrade(legacy_engine_without_stock58, ini_path=alembic_ini_dir)
+
+    last_call_args = mock_cmd.call_args_list[-1].args[0]
+    assert last_call_args == ["upgrade", "head"]
