@@ -263,13 +263,15 @@ class TestMutualExclusivity:
 
     @pytest.mark.asyncio
     async def test_skip_buy_when_sibling_min_hold_blocks_sell(
-        self, engine, mock_order_manager, mock_market_data, mock_etf_universe,
+        self, engine, mock_order_manager, mock_market_data, mock_etf_universe, caplog,
     ):
         """If sibling min_hold prevents its sell, the target buy must also be skipped.
 
         Without this guard, the engine can simultaneously hold TQQQ + SQQQ (both bull
         and bear), violating mutual exclusivity and amplifying decay losses.
         """
+        import logging
+
         mock_market_data.get_ohlcv.return_value = _make_ohlcv_mock(50.0)
 
         # TQQQ held for only 1 hour — min_hold (4h) not satisfied
@@ -293,7 +295,8 @@ class TestMutualExclusivity:
             regime=MarketRegime.DOWNTREND,
             spy_distance_pct=-6.0, confidence=0.85,
         )
-        actions = await engine._manage_regime_etfs(bear_state)
+        with caplog.at_level(logging.INFO):
+            actions = await engine._manage_regime_etfs(bear_state)
 
         # TQQQ sell blocked by min_hold, SQQQ buy must also be skipped.
         # (SOXS may still be bought since it has no conflicting sibling held.)
@@ -308,6 +311,13 @@ class TestMutualExclusivity:
             if c.kwargs.get("symbol") == "SQQQ" or (c.args and c.args[0] == "SQQQ")
         ]
         assert len(sqqq_buy_calls) == 0, "place_buy should not have been called for SQQQ"
+        # Positive control: the guard code path must have been reached.
+        # Without this, the assertion above could pass vacuously if SQQQ was never
+        # a buy candidate in the first place (e.g. missing from the DOWNTREND list).
+        assert any(
+            "SKIP BUY SQQQ" in r.getMessage() and "TQQQ" in r.getMessage()
+            for r in caplog.records
+        ), "Expected 'SKIP BUY SQQQ' log — proves mutual-exclusivity guard was reached"
 
 
 class TestSectorRotation:
@@ -802,15 +812,16 @@ def _make_sell_order_mock(symbol: str, created_at: datetime | None = None):
 def _mock_sell_session_factory(sell_orders=None):
     """Create a mock async session factory for cooldown-seeding tests.
 
-    Discriminates between the BUY-entry query (first factory call per restore
-    invocation) and the SELL-cooldown query (second factory call) using factory
-    call count — avoiding fragile SQL string/dialect-dependent inspection.
+    Discriminates between the BUY-entry query and the SELL-cooldown query by
+    inspecting the compiled SQL for the `side` literal value.  SQL inspection
+    is more stable than call-count discrimination: it survives refactors that
+    change how many sessions are opened per block without silently misrouting
+    results.
 
-    First factory call  → session whose execute() returns scalar_one_or_none()=None
-    Second factory call → session whose execute() returns scalars().all()=sell_orders
+    BUY query  → scalar_one_or_none() = None (no entry order on record)
+    SELL query → scalars().all()      = sell_orders
     """
     sell_orders = sell_orders or []
-    call_count = [0]  # list so it is mutable inside the closure
 
     class _FakeScalars:
         def __init__(self, orders):
@@ -827,30 +838,24 @@ def _mock_sell_session_factory(sell_orders=None):
         def scalars(self):
             return _FakeScalars(sell_orders)
 
-    def _make_session(is_sell: bool):
-        result_cls = _SellResult if is_sell else _BuyResult
+    class _Session:
+        async def execute(self, stmt):
+            sql = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+            assert "is_paper" in sql, (
+                "Query missing is_paper filter — live/paper isolation required."
+            )
+            if "'SELL'" in sql:
+                return _SellResult()
+            return _BuyResult()
 
-        class _Session:
-            async def execute(self, stmt):
-                compiled = stmt.compile(compile_kwargs={"literal_binds": True})
-                assert "is_paper" in str(compiled), (
-                    "Query missing is_paper filter — live/paper isolation required."
-                )
-                return result_cls()
+        async def __aenter__(self):
+            return self
 
-            async def __aenter__(self):
-                return self
-
-            async def __aexit__(self, *args):
-                pass
-
-        return _Session()
+        async def __aexit__(self, *args):
+            pass
 
     def factory():
-        call_count[0] += 1
-        # First factory call: per-position BUY entry-info block.
-        # Second (and later) calls: SELL cooldown-seeding block.
-        return _make_session(is_sell=call_count[0] > 1)
+        return _Session()
 
     return factory
 

@@ -374,7 +374,7 @@ class ETFEngine:
 
                     # Sibling not in exit_etfs — try to sell it now
                     pos = next((p for p in positions if p.symbol == sib), None)
-                    if pos and pos.quantity > 0:
+                    if pos:  # quantity > 0 guaranteed by held_symbols construction
                         can_sell_sib, reason_sib = self._can_sell_etf(sib)
                         if not can_sell_sib:
                             logger.info(
@@ -718,15 +718,15 @@ class ETFEngine:
             logger.info("ETF Engine restore: no ETF positions found on broker")
             return restored
 
-        # Lazy import: core.models requires the full application stack (DB, SQLAlchemy),
-        # so it's imported here rather than at module level to stay testable without it.
-        if session_factory:
-            from core.models import Order
-
         # Look up entry info from DB orders table
         entry_info: dict[str, dict] = {}
         if session_factory:
             try:
+                # Lazy import: core.models requires the full application stack
+                # (DB, SQLAlchemy), so it is imported inside the try block to keep
+                # the engine testable without the full stack and so ImportError is
+                # caught like any other DB failure.
+                from core.models import Order
                 async with session_factory() as session:
                     for pos in etf_positions:
                         # Skip if already tracked (idempotent)
@@ -761,6 +761,7 @@ class ETFEngine:
         # sell_cooldown_hours window) to avoid blocking buys for old sells.
         if session_factory:
             try:
+                from core.models import Order  # already cached in sys.modules if first import succeeded
                 cutoff = datetime.now(timezone.utc) - timedelta(
                     hours=self._risk.sell_cooldown_hours,
                 )
