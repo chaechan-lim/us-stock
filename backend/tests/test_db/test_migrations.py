@@ -483,7 +483,7 @@ def _make_proc(returncode: int = 0, stdout: str = "", stderr: str = "") -> Magic
 
 
 @pytest.fixture
-def alembic_ini_dir(tmp_path: Path) -> Path:
+def alembic_dir(tmp_path: Path) -> Path:
     """Dummy backend dir for subprocess cwd (doesn't need real alembic.ini)."""
     return tmp_path
 
@@ -579,16 +579,44 @@ async def tracked_engine():
     await engine.dispose()
 
 
+@pytest_asyncio.fixture
+async def legacy_engine_only_orders():
+    """Engine with only the ``orders`` table — ``portfolio_snapshots`` does NOT exist.
+
+    Exercises the edge case where ``has_base_tables=True`` but
+    ``has_stock58_columns=False`` because the sentinel table itself is absent.
+    The code should stamp at ``_INITIAL_REVISION`` (not head) and then run
+    upgrade, which will create/alter ``portfolio_snapshots`` via the STOCK-58
+    migration.
+    """
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "CREATE TABLE orders ("
+                "id INTEGER PRIMARY KEY, symbol TEXT NOT NULL, side TEXT, "
+                "order_type TEXT, quantity REAL, price REAL, status TEXT, "
+                "exchange TEXT DEFAULT 'NASD', market TEXT DEFAULT 'US', "
+                "strategy_name TEXT, kis_order_id TEXT, pnl REAL, "
+                "created_at DATETIME, filled_at DATETIME, "
+                "filled_quantity REAL DEFAULT 0, filled_price REAL)"
+            )
+        )
+        # portfolio_snapshots intentionally NOT created here
+    yield engine
+    await engine.dispose()
+
+
 # ── Fresh DB (no tables) ─────────────────────────────────────────────
 
 
 @pytest.mark.asyncio
-async def test_run_alembic_upgrade_fresh_db_no_stamp(fresh_engine, alembic_ini_dir):
+async def test_run_alembic_upgrade_fresh_db_no_stamp(fresh_engine, alembic_dir):
     """Fresh DB: no tables → no stamp call, just upgrade head."""
     success_proc = _make_proc(0, "No migrations to apply.\n")
 
     with patch("db.migrations._run_alembic_cmd", return_value=success_proc) as mock_cmd:
-        await run_alembic_upgrade(fresh_engine, ini_path=alembic_ini_dir)
+        await run_alembic_upgrade(fresh_engine, alembic_dir=alembic_dir)
 
     # Only upgrade head should have been called — no stamp needed
     calls = [c.args[0] for c in mock_cmd.call_args_list]
@@ -600,13 +628,13 @@ async def test_run_alembic_upgrade_fresh_db_no_stamp(fresh_engine, alembic_ini_d
 
 @pytest.mark.asyncio
 async def test_run_alembic_upgrade_legacy_missing_stock58_stamps_initial(
-    legacy_engine_without_stock58, alembic_ini_dir
+    legacy_engine_without_stock58, alembic_dir
 ):
     """Legacy DB with tables but no STOCK-58 columns → stamp at initial revision."""
     success_proc = _make_proc(0)
 
     with patch("db.migrations._run_alembic_cmd", return_value=success_proc) as mock_cmd:
-        await run_alembic_upgrade(legacy_engine_without_stock58, ini_path=alembic_ini_dir)
+        await run_alembic_upgrade(legacy_engine_without_stock58, alembic_dir=alembic_dir)
 
     calls = [c.args[0] for c in mock_cmd.call_args_list]
     # First call should stamp at initial revision, then upgrade head
@@ -619,13 +647,13 @@ async def test_run_alembic_upgrade_legacy_missing_stock58_stamps_initial(
 
 @pytest.mark.asyncio
 async def test_run_alembic_upgrade_legacy_with_stock58_stamps_head(
-    legacy_engine_with_stock58, alembic_ini_dir
+    legacy_engine_with_stock58, alembic_dir
 ):
     """Legacy DB where create_all applied current ORM → stamp at head."""
     success_proc = _make_proc(0)
 
     with patch("db.migrations._run_alembic_cmd", return_value=success_proc) as mock_cmd:
-        await run_alembic_upgrade(legacy_engine_with_stock58, ini_path=alembic_ini_dir)
+        await run_alembic_upgrade(legacy_engine_with_stock58, alembic_dir=alembic_dir)
 
     calls = [c.args[0] for c in mock_cmd.call_args_list]
     assert calls[0] == ["stamp", "head"]
@@ -636,12 +664,12 @@ async def test_run_alembic_upgrade_legacy_with_stock58_stamps_head(
 
 
 @pytest.mark.asyncio
-async def test_run_alembic_upgrade_tracked_db_no_stamp(tracked_engine, alembic_ini_dir):
+async def test_run_alembic_upgrade_tracked_db_no_stamp(tracked_engine, alembic_dir):
     """Tracked DB: alembic_version exists → no stamp, just upgrade head."""
     success_proc = _make_proc(0)
 
     with patch("db.migrations._run_alembic_cmd", return_value=success_proc) as mock_cmd:
-        await run_alembic_upgrade(tracked_engine, ini_path=alembic_ini_dir)
+        await run_alembic_upgrade(tracked_engine, alembic_dir=alembic_dir)
 
     calls = [c.args[0] for c in mock_cmd.call_args_list]
     assert calls == [["upgrade", "head"]]
@@ -651,18 +679,18 @@ async def test_run_alembic_upgrade_tracked_db_no_stamp(tracked_engine, alembic_i
 
 
 @pytest.mark.asyncio
-async def test_run_alembic_upgrade_raises_on_upgrade_failure(tracked_engine, alembic_ini_dir):
+async def test_run_alembic_upgrade_raises_on_upgrade_failure(tracked_engine, alembic_dir):
     """RuntimeError raised when alembic upgrade head exits non-zero."""
     failure_proc = _make_proc(1, stderr="FATAL: column does not exist\n")
 
     with patch("db.migrations._run_alembic_cmd", return_value=failure_proc):
         with pytest.raises(RuntimeError, match="alembic upgrade head failed"):
-            await run_alembic_upgrade(tracked_engine, ini_path=alembic_ini_dir)
+            await run_alembic_upgrade(tracked_engine, alembic_dir=alembic_dir)
 
 
 @pytest.mark.asyncio
 async def test_run_alembic_upgrade_raises_on_stamp_failure(
-    legacy_engine_without_stock58, alembic_ini_dir
+    legacy_engine_without_stock58, alembic_dir
 ):
     """RuntimeError raised when alembic stamp exits non-zero."""
     stamp_failure = _make_proc(1, stderr="stamp error\n")
@@ -674,12 +702,12 @@ async def test_run_alembic_upgrade_raises_on_stamp_failure(
         side_effect=[stamp_failure, success_proc],
     ):
         with pytest.raises(RuntimeError, match="alembic stamp cfbdf0cd6e1f failed"):
-            await run_alembic_upgrade(legacy_engine_without_stock58, ini_path=alembic_ini_dir)
+            await run_alembic_upgrade(legacy_engine_without_stock58, alembic_dir=alembic_dir)
 
 
 @pytest.mark.asyncio
 async def test_run_alembic_upgrade_default_ini_path(tracked_engine):
-    """Default ini_path resolves to backend/ directory."""
+    """Default alembic_dir resolves to backend/ directory."""
     success_proc = _make_proc(0)
     captured_cwd: list[Path] = []
 
@@ -697,13 +725,39 @@ async def test_run_alembic_upgrade_default_ini_path(tracked_engine):
 
 @pytest.mark.asyncio
 async def test_run_alembic_upgrade_upgrade_head_called_last(
-    legacy_engine_without_stock58, alembic_ini_dir
+    legacy_engine_without_stock58, alembic_dir
 ):
     """upgrade head is always the final alembic command."""
     success_proc = _make_proc(0)
 
     with patch("db.migrations._run_alembic_cmd", return_value=success_proc) as mock_cmd:
-        await run_alembic_upgrade(legacy_engine_without_stock58, ini_path=alembic_ini_dir)
+        await run_alembic_upgrade(legacy_engine_without_stock58, alembic_dir=alembic_dir)
 
     last_call_args = mock_cmd.call_args_list[-1].args[0]
     assert last_call_args == ["upgrade", "head"]
+
+
+# ── Edge case: orders table only, portfolio_snapshots absent ──────────
+
+
+@pytest.mark.asyncio
+async def test_run_alembic_upgrade_only_orders_no_snapshots_stamps_initial(
+    legacy_engine_only_orders, alembic_dir
+):
+    """orders exists but portfolio_snapshots does NOT → stamp at _INITIAL_REVISION.
+
+    When only the orders table is present (portfolio_snapshots was never created),
+    has_base_tables=True but has_stock58_columns=False because the sentinel
+    table itself is absent.  The code should stamp at _INITIAL_REVISION so that
+    the STOCK-58 migration (which creates/alters portfolio_snapshots) is applied
+    by the subsequent upgrade head.
+    """
+    success_proc = _make_proc(0)
+
+    with patch("db.migrations._run_alembic_cmd", return_value=success_proc) as mock_cmd:
+        await run_alembic_upgrade(legacy_engine_only_orders, alembic_dir=alembic_dir)
+
+    calls = [c.args[0] for c in mock_cmd.call_args_list]
+    # Must stamp at _INITIAL_REVISION (not head) so upgrade applies STOCK-58
+    assert calls[0] == ["stamp", "cfbdf0cd6e1f"]
+    assert calls[1] == ["upgrade", "head"]
