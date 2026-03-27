@@ -39,6 +39,9 @@ class ETFRiskRules:
     max_single_etf_pct: float = 0.15
     require_stop_loss: bool = True
     default_stop_loss_pct: float = 0.08
+    min_hold_leveraged_hours: int = 4  # Min hold for leveraged ETFs before selling
+    min_hold_sector_hours: int = 2     # Min hold for sector ETFs before selling
+    sell_cooldown_hours: int = 4       # Prevent rebuy of same ETF for N hours after sell
 
 
 class ETFUniverse:

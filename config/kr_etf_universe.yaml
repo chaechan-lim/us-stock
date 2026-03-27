@@ -47,3 +47,6 @@ risk_rules:
   max_single_etf_pct: 0.15
   require_stop_loss: true
   default_stop_loss_pct: 0.08
+  min_hold_leveraged_hours: 4          # Min 4h hold for leveraged ETFs before selling
+  min_hold_sector_hours: 2             # Min 2h hold for sector ETFs before selling
+  sell_cooldown_hours: 4               # Don't rebuy same ETF for 4h after selling

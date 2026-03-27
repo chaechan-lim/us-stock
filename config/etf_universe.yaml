@@ -99,8 +99,11 @@ exchanges:
 
 # Risk limits for leveraged ETFs
 risk_rules:
-  max_hold_days: 20        # No holding leveraged >20 days (backtest: 10d too short)
-  max_portfolio_pct: 0.20  # Max 20% in leveraged ETFs
-  max_single_etf_pct: 0.10 # Max 10% in single ETF
-  require_stop_loss: true   # Always use stop-loss
+  max_hold_days: 20                    # No holding leveraged >20 days (backtest: 10d too short)
+  max_portfolio_pct: 0.20              # Max 20% in leveraged ETFs
+  max_single_etf_pct: 0.10             # Max 10% in single ETF
+  require_stop_loss: true              # Always use stop-loss
   default_stop_loss_pct: 0.08
+  min_hold_leveraged_hours: 4          # Min 4h hold for leveraged ETFs before selling
+  min_hold_sector_hours: 2             # Min 2h hold for sector ETFs before selling
+  sell_cooldown_hours: 4               # Don't rebuy same ETF for 4h after selling

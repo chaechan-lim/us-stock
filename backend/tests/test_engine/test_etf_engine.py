@@ -97,6 +97,13 @@ class TestRegimeSwitch:
         bull_state = MarketState(regime=MarketRegime.UPTREND)
         await engine._manage_regime_etfs(bull_state)
 
+        # Manually set TQQQ entry to be old enough for min_hold (4h)
+        engine._managed_positions["TQQQ"] = ETFPosition(
+            symbol="TQQQ",
+            entry_date=time.time() - 5 * 3600,  # 5 hours ago
+            reason="regime_bull",
+        )
+
         # Switch to bear with SPY barely below SMA200 (not qualified for bear entry)
         pos_tqqq = MagicMock(symbol="TQQQ", quantity=100, current_price=50.0)
         mock_market_data.get_positions.return_value = [pos_tqqq]
@@ -135,6 +142,13 @@ class TestRegimeSwitch:
         mock_market_data.get_ohlcv.return_value = _make_ohlcv_mock(50.0)
         engine._last_regime = MarketRegime.SIDEWAYS  # simulate prior regime
         await engine._manage_regime_etfs(MarketState(regime=MarketRegime.UPTREND))
+
+        # Manually set TQQQ entry to be old enough for min_hold (4h)
+        engine._managed_positions["TQQQ"] = ETFPosition(
+            symbol="TQQQ",
+            entry_date=time.time() - 5 * 3600,  # 5 hours ago
+            reason="regime_bull",
+        )
 
         # Simulate holding TQQQ
         pos = MagicMock(symbol="TQQQ", quantity=100, current_price=55.0)
@@ -216,6 +230,13 @@ class TestMutualExclusivity:
             MarketState(regime=MarketRegime.UPTREND)
         )
 
+        # Manually set TQQQ entry to be old enough for min_hold (4h)
+        engine._managed_positions["TQQQ"] = ETFPosition(
+            symbol="TQQQ",
+            entry_date=time.time() - 5 * 3600,  # 5 hours ago
+            reason="regime_bull",
+        )
+
         # Now switch to bear: SQQQ siblings include TQQQ
         pos_tqqq = MagicMock(symbol="TQQQ", quantity=100, current_price=50.0)
         mock_market_data.get_positions.return_value = [pos_tqqq]
@@ -235,6 +256,68 @@ class TestMutualExclusivity:
         # TQQQ sell should only appear once (from exit_etfs, not mutual exclusivity)
         tqqq_sells = [a for a in actions if "SELL" in a and "TQQQ" in a]
         assert len(tqqq_sells) == 1
+
+        # After TQQQ is cleared, SQQQ buy should proceed (exit sell must not block it)
+        sqqq_buys = [a for a in actions if "BUY" in a and "SQQQ" in a]
+        assert len(sqqq_buys) == 1, "SQQQ should be bought after TQQQ sibling is sold"
+
+    @pytest.mark.asyncio
+    async def test_skip_buy_when_sibling_min_hold_blocks_sell(
+        self, engine, mock_order_manager, mock_market_data, mock_etf_universe, caplog,
+    ):
+        """If sibling min_hold prevents its sell, the target buy must also be skipped.
+
+        Without this guard, the engine can simultaneously hold TQQQ + SQQQ (both bull
+        and bear), violating mutual exclusivity and amplifying decay losses.
+        """
+        import logging
+
+        mock_market_data.get_ohlcv.return_value = _make_ohlcv_mock(50.0)
+
+        # TQQQ held for only 1 hour — min_hold (4h) not satisfied
+        engine._managed_positions["TQQQ"] = ETFPosition(
+            symbol="TQQQ",
+            entry_date=time.time() - 1 * 3600,  # 1 hour, too new to sell
+            reason="regime_bull",
+        )
+        engine._last_regime = MarketRegime.UPTREND
+
+        pos_tqqq = MagicMock(symbol="TQQQ", quantity=100, current_price=50.0)
+        mock_market_data.get_positions.return_value = [pos_tqqq]
+
+        # Bear switch: wants to buy SQQQ, but must sell TQQQ first (sibling)
+        mock_etf_universe.get_pair_siblings.side_effect = lambda s: {
+            "SQQQ": ["QQQ", "TQQQ"],
+            "SOXS": ["SOXX", "SOXL"],
+        }.get(s, [])
+
+        bear_state = MarketState(
+            regime=MarketRegime.DOWNTREND,
+            spy_distance_pct=-6.0, confidence=0.85,
+        )
+        with caplog.at_level(logging.INFO):
+            actions = await engine._manage_regime_etfs(bear_state)
+
+        # TQQQ sell blocked by min_hold, SQQQ buy must also be skipped.
+        # (SOXS may still be bought since it has no conflicting sibling held.)
+        assert not any("SELL" in a and "TQQQ" in a for a in actions), (
+            "TQQQ should not be sold — min_hold constraint not satisfied"
+        )
+        assert not any("BUY" in a and "SQQQ" in a for a in actions), (
+            "SQQQ should not be bought — sibling TQQQ could not be cleared first"
+        )
+        sqqq_buy_calls = [
+            c for c in mock_order_manager.place_buy.call_args_list
+            if c.kwargs.get("symbol") == "SQQQ" or (c.args and c.args[0] == "SQQQ")
+        ]
+        assert len(sqqq_buy_calls) == 0, "place_buy should not have been called for SQQQ"
+        # Positive control: the guard code path must have been reached.
+        # Without this, the assertion above could pass vacuously if SQQQ was never
+        # a buy candidate in the first place (e.g. missing from the DOWNTREND list).
+        assert any(
+            "SKIP BUY SQQQ" in r.getMessage() and "TQQQ" in r.getMessage()
+            for r in caplog.records
+        ), "Expected 'SKIP BUY SQQQ' log — proves mutual-exclusivity guard was reached"
 
 
 class TestSectorRotation:
@@ -281,6 +364,216 @@ class TestSectorRotation:
         await engine._manage_sector_etfs(sector_data)
         actions = await engine._manage_sector_etfs(sector_data)
         assert actions == []
+
+
+class TestMinHoldConstraint:
+    """Test minimum hold duration enforcement before selling."""
+
+    @pytest.fixture(autouse=True)
+    def configure_is_leveraged(self, mock_etf_universe):
+        """Explicitly configure is_leveraged so 4h (leveraged) vs 2h (sector) threshold
+        dispatch is self-documenting and independent of changes to the shared fixture."""
+        mock_etf_universe.is_leveraged.side_effect = (
+            lambda s: s in {"TQQQ", "SQQQ", "SOXL", "SOXS"}
+        )
+
+    @pytest.mark.asyncio
+    async def test_skip_sell_if_min_hold_not_satisfied_leveraged(
+        self, engine, mock_order_manager, mock_market_data,
+    ):
+        """Leveraged ETF held < min_hold_leveraged_hours should not be sold."""
+        # Add TQQQ held for only 1 hour (min is 4h)
+        engine._managed_positions["TQQQ"] = ETFPosition(
+            symbol="TQQQ",
+            entry_date=time.time() - 1 * 3600,  # 1 hour ago
+            reason="regime_bull",
+        )
+
+        pos_tqqq = MagicMock(symbol="TQQQ", quantity=100, current_price=50.0, avg_price=48.0)
+        mock_market_data.get_positions.return_value = [pos_tqqq]
+        mock_market_data.get_ohlcv.return_value = _make_ohlcv_mock(50.0)
+
+        engine._last_regime = MarketRegime.UPTREND
+        # Switch to sideways → should exit TQQQ but will be blocked by min_hold
+        state = MarketState(regime=MarketRegime.SIDEWAYS)
+        actions = await engine._manage_regime_etfs(state)
+
+        # TQQQ should NOT be sold because it's too new
+        assert not any("SELL" in a and "TQQQ" in a for a in actions)
+        assert mock_order_manager.place_sell.call_count == 0
+
+    @pytest.mark.asyncio
+    async def test_sell_allowed_after_min_hold_satisfied_leveraged(
+        self, engine, mock_order_manager, mock_market_data,
+    ):
+        """Leveraged ETF held >= min_hold_leveraged_hours should be sold."""
+        # Add TQQQ held for 5 hours (min is 4h) ✓
+        engine._managed_positions["TQQQ"] = ETFPosition(
+            symbol="TQQQ",
+            entry_date=time.time() - 5 * 3600,  # 5 hours ago
+            reason="regime_bull",
+        )
+
+        pos_tqqq = MagicMock(symbol="TQQQ", quantity=100, current_price=55.0, avg_price=48.0)
+        mock_market_data.get_positions.return_value = [pos_tqqq]
+        mock_market_data.get_ohlcv.return_value = _make_ohlcv_mock(50.0)
+
+        engine._last_regime = MarketRegime.UPTREND
+        state = MarketState(regime=MarketRegime.SIDEWAYS)
+        actions = await engine._manage_regime_etfs(state)
+
+        # TQQQ should be sold because min_hold is satisfied
+        assert any("SELL" in a and "TQQQ" in a for a in actions)
+        assert mock_order_manager.place_sell.called
+
+    @pytest.mark.asyncio
+    async def test_skip_sell_if_min_hold_not_satisfied_sector(
+        self, engine, mock_order_manager, mock_market_data,
+    ):
+        """Sector ETF held < min_hold_sector_hours should not be sold."""
+        # Add XLE (sector) held for only 1 hour (min is 2h)
+        engine._managed_positions["XLE"] = ETFPosition(
+            symbol="XLE",
+            entry_date=time.time() - 1 * 3600,  # 1 hour ago
+            reason="sector_rotation",
+            sector="Energy",
+        )
+
+        pos_xle = MagicMock(symbol="XLE", quantity=50, current_price=80.0, avg_price=78.0)
+        mock_market_data.get_positions.return_value = [pos_xle]
+        mock_market_data.get_ohlcv.return_value = _make_ohlcv_mock(150.0)
+
+        sector_data = {
+            "Technology": {"symbol": "XLK", "return_1w": 3.0, "return_1m": 8.0, "return_3m": 15.0},
+            "Energy": {"symbol": "XLE", "return_1w": -3.0, "return_1m": -6.0, "return_3m": -10.0},
+            "Financials": {"symbol": "XLF", "return_1w": 2.0, "return_1m": 5.0, "return_3m": 12.0},
+        }
+        actions = await engine._manage_sector_etfs(sector_data)
+
+        # XLE should NOT be sold because it's too new, even though it's in bottom
+        assert not any("SELL" in a and "XLE" in a for a in actions)
+
+    @pytest.mark.asyncio
+    async def test_sell_allowed_after_min_hold_satisfied_sector(
+        self, engine, mock_order_manager, mock_market_data,
+    ):
+        """Sector ETF held >= min_hold_sector_hours should be sold."""
+        # Add XLE (sector) held for 3 hours (min is 2h) ✓
+        engine._managed_positions["XLE"] = ETFPosition(
+            symbol="XLE",
+            entry_date=time.time() - 3 * 3600,  # 3 hours ago
+            reason="sector_rotation",
+            sector="Energy",
+        )
+
+        pos_xle = MagicMock(symbol="XLE", quantity=50, current_price=80.0, avg_price=78.0)
+        mock_market_data.get_positions.return_value = [pos_xle]
+        mock_market_data.get_ohlcv.return_value = _make_ohlcv_mock(150.0)
+
+        sector_data = {
+            "Technology": {"symbol": "XLK", "return_1w": 3.0, "return_1m": 8.0, "return_3m": 15.0},
+            "Energy": {"symbol": "XLE", "return_1w": -3.0, "return_1m": -6.0, "return_3m": -10.0},
+            "Financials": {"symbol": "XLF", "return_1w": 2.0, "return_1m": 5.0, "return_3m": 12.0},
+        }
+        before_sell = time.time()
+        actions = await engine._manage_sector_etfs(sector_data)
+
+        # XLE should be sold because min_hold is satisfied
+        assert any("SELL" in a and "XLE" in a for a in actions)
+        assert mock_order_manager.place_sell.called
+        assert "XLE" in engine._last_sell_times, "sector ETF sell must record cooldown timestamp"
+        assert engine._last_sell_times["XLE"] >= before_sell
+
+
+class TestSellCooldownConstraint:
+    """Test sell cooldown enforcement to prevent rapid rebuy."""
+
+    @pytest.mark.asyncio
+    async def test_skip_buy_if_cooldown_not_satisfied(
+        self, engine, mock_order_manager, mock_market_data,
+    ):
+        """ETF sold < sell_cooldown_hours ago should not be bought."""
+        # Simulate TQQQ sold 1 hour ago (cooldown is 4h)
+        engine._last_sell_times["TQQQ"] = time.time() - 1 * 3600
+
+        mock_market_data.get_positions.return_value = []
+        mock_market_data.get_ohlcv.return_value = _make_ohlcv_mock(50.0)
+
+        engine._last_regime = MarketRegime.SIDEWAYS
+        state = MarketState(regime=MarketRegime.UPTREND, spy_price=500, confidence=0.8)
+        actions = await engine._manage_regime_etfs(state)
+
+        # TQQQ should NOT be bought because cooldown period not satisfied
+        assert not any("BUY" in a and "TQQQ" in a for a in actions)
+
+    @pytest.mark.asyncio
+    async def test_buy_allowed_after_cooldown_satisfied(
+        self, engine, mock_order_manager, mock_market_data,
+    ):
+        """ETF sold >= sell_cooldown_hours ago should be buyable."""
+        # Simulate TQQQ sold 5 hours ago (cooldown is 4h) ✓
+        engine._last_sell_times["TQQQ"] = time.time() - 5 * 3600
+
+        mock_market_data.get_positions.return_value = []
+        mock_market_data.get_ohlcv.return_value = _make_ohlcv_mock(50.0)
+
+        engine._last_regime = MarketRegime.SIDEWAYS
+        state = MarketState(regime=MarketRegime.UPTREND, spy_price=500, confidence=0.8)
+        actions = await engine._manage_regime_etfs(state)
+
+        # TQQQ should be bought because cooldown is satisfied
+        assert any("BUY" in a and "TQQQ" in a for a in actions)
+        call_symbols = [
+            c.kwargs.get("symbol") or (c.args[0] if c.args else None)
+            for c in mock_order_manager.place_buy.call_args_list
+        ]
+        assert "TQQQ" in call_symbols, f"Expected TQQQ buy call, got: {call_symbols}"
+
+    @pytest.mark.asyncio
+    async def test_sell_records_cooldown_timer(
+        self, engine, mock_order_manager, mock_market_data,
+    ):
+        """Successful sell should record time for cooldown tracking."""
+        engine._managed_positions["TQQQ"] = ETFPosition(
+            symbol="TQQQ",
+            entry_date=time.time() - 5 * 3600,  # 5 hours, min_hold satisfied
+            reason="regime_bull",
+        )
+
+        pos = MagicMock(symbol="TQQQ", quantity=100, current_price=55.0, avg_price=48.0)
+        mock_market_data.get_positions.return_value = [pos]
+        mock_market_data.get_ohlcv.return_value = _make_ohlcv_mock(50.0)
+
+        engine._last_regime = MarketRegime.UPTREND
+        before_sell = time.time()
+        await engine._manage_regime_etfs(MarketState(regime=MarketRegime.SIDEWAYS))
+        after_sell = time.time()
+
+        # Check that sell time was recorded
+        assert "TQQQ" in engine._last_sell_times
+        sell_time = engine._last_sell_times["TQQQ"]
+        assert before_sell <= sell_time <= after_sell
+
+    @pytest.mark.asyncio
+    async def test_sector_etf_cooldown_constraint(
+        self, engine, mock_order_manager, mock_market_data,
+    ):
+        """Sector ETF cooldown should prevent rapid rebuy."""
+        # Simulate XLE sold 1 hour ago (cooldown is 4h)
+        engine._last_sell_times["XLE"] = time.time() - 1 * 3600
+
+        mock_market_data.get_positions.return_value = []
+        mock_market_data.get_ohlcv.return_value = _make_ohlcv_mock(150.0)
+
+        sector_data = {
+            "Technology": {"symbol": "XLK", "return_1w": 1.0, "return_1m": 4.0, "return_3m": 10.0},
+            "Energy": {"symbol": "XLE", "return_1w": 3.0, "return_1m": 8.0, "return_3m": 15.0},
+            "Financials": {"symbol": "XLF", "return_1w": 2.0, "return_1m": 5.0, "return_3m": 12.0},
+        }
+        actions = await engine._manage_sector_etfs(sector_data)
+
+        # XLE should NOT be bought even though it's in top because cooldown not satisfied
+        assert not any("BUY" in a and "XLE" in a for a in actions)
 
 
 class TestHoldLimits:
@@ -368,6 +661,7 @@ class TestHoldLimits:
         # Simulate successful sell order
         mock_order_manager.place_sell.return_value = MagicMock()
 
+        before_sell = time.time()
         actions = await engine._check_hold_limits()
 
         assert mock_order_manager.place_sell.called
@@ -375,6 +669,9 @@ class TestHoldLimits:
         assert "TQQQ" in actions[0]
         # Tracking removed after successful sell
         assert "TQQQ" not in engine._managed_positions
+        # Cooldown timestamp must be recorded so rapid rebuy is blocked
+        assert "TQQQ" in engine._last_sell_times
+        assert engine._last_sell_times["TQQQ"] >= before_sell
 
 
 class TestExposureLimits:
@@ -500,6 +797,67 @@ def _make_order_mock(symbol: str, strategy_name: str, created_at: datetime | Non
     order.side = "BUY"
     order.status = "filled"
     return order
+
+
+def _make_sell_order_mock(symbol: str, created_at: datetime | None = None):
+    """Create a mock SELL Order for cooldown-seeding tests."""
+    order = MagicMock()
+    order.symbol = symbol
+    order.created_at = created_at or datetime.now(UTC)
+    order.side = "SELL"
+    order.status = "filled"
+    return order
+
+
+def _mock_sell_session_factory(sell_orders=None):
+    """Create a mock async session factory for cooldown-seeding tests.
+
+    Discriminates between the BUY-entry query and the SELL-cooldown query by
+    inspecting the compiled SQL for the `side` literal value.  SQL inspection
+    is more stable than call-count discrimination: it survives refactors that
+    change how many sessions are opened per block without silently misrouting
+    results.
+
+    BUY query  → scalar_one_or_none() = None (no entry order on record)
+    SELL query → scalars().all()      = sell_orders
+    """
+    sell_orders = sell_orders or []
+
+    class _FakeScalars:
+        def __init__(self, orders):
+            self._orders = orders
+
+        def all(self):
+            return self._orders
+
+    class _BuyResult:
+        def scalar_one_or_none(self):
+            return None  # no BUY order on record → restore uses inferred defaults
+
+    class _SellResult:
+        def scalars(self):
+            return _FakeScalars(sell_orders)
+
+    class _Session:
+        async def execute(self, stmt):
+            sql = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+            assert "is_paper" in sql, (
+                "Query missing is_paper filter — live/paper isolation required."
+            )
+            if "'SELL'" in sql:
+                return _SellResult()
+            return _BuyResult()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+    def factory():
+        return _Session()
+
+    return factory
 
 
 class TestRestoreManagedPositions:
@@ -749,3 +1107,65 @@ class TestRestoreManagedPositions:
         assert "quantity" in restored2[0]
         assert "sector" in restored2[0]
         assert restored2[0]["source"] == "already_tracked"
+
+
+class TestRestoreSellCooldownSeeding:
+    """Test _last_sell_times seeding from DB SELL orders in restore_managed_positions."""
+
+    @pytest.mark.asyncio
+    async def test_sell_within_window_seeds_last_sell_times(
+        self, engine, mock_market_data,
+    ):
+        """SELL order within cooldown window is seeded into _last_sell_times on restore."""
+        # Need a broker position so the function doesn't return early before seeding
+        pos = MagicMock(symbol="TQQQ", quantity=100, current_price=55.0, avg_price=50.0)
+        mock_market_data.get_positions.return_value = [pos]
+
+        sell_time = datetime.now(UTC) - timedelta(hours=2)  # 2h ago, within 4h cooldown
+        sell_order = _make_sell_order_mock("TQQQ", sell_time)
+        session_factory = _mock_sell_session_factory([sell_order])
+
+        await engine.restore_managed_positions(session_factory)
+
+        assert "TQQQ" in engine._last_sell_times
+        assert abs(engine._last_sell_times["TQQQ"] - sell_time.timestamp()) < 1.0
+
+    @pytest.mark.asyncio
+    async def test_no_recent_sell_leaves_last_sell_times_empty(
+        self, engine, mock_market_data,
+    ):
+        """No SELL orders returned (DB cutoff filtered) → _last_sell_times stays empty."""
+        pos = MagicMock(symbol="TQQQ", quantity=100, current_price=55.0, avg_price=50.0)
+        mock_market_data.get_positions.return_value = [pos]
+
+        # Factory returns empty list — simulates DB returning nothing within the cooldown window
+        session_factory = _mock_sell_session_factory([])
+
+        await engine.restore_managed_positions(session_factory)
+
+        assert "TQQQ" not in engine._last_sell_times
+
+    @pytest.mark.asyncio
+    async def test_db_failure_during_seeding_is_non_fatal(
+        self, engine, mock_market_data,
+    ):
+        """DB failure in cooldown-seeding block is non-fatal; _last_sell_times stays empty."""
+        pos = MagicMock(symbol="TQQQ", quantity=100, current_price=55.0, avg_price=50.0)
+        mock_market_data.get_positions.return_value = [pos]
+
+        class _FailingSession:
+            async def execute(self, stmt):
+                raise RuntimeError("DB connection lost")
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                pass
+
+        def failing_factory():
+            return _FailingSession()
+
+        await engine.restore_managed_positions(failing_factory)
+
+        assert engine._last_sell_times == {}
