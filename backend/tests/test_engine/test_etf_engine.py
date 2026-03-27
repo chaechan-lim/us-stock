@@ -257,6 +257,54 @@ class TestMutualExclusivity:
         tqqq_sells = [a for a in actions if "SELL" in a and "TQQQ" in a]
         assert len(tqqq_sells) == 1
 
+    @pytest.mark.asyncio
+    async def test_skip_buy_when_sibling_min_hold_blocks_sell(
+        self, engine, mock_order_manager, mock_market_data, mock_etf_universe,
+    ):
+        """If sibling min_hold prevents its sell, the target buy must also be skipped.
+
+        Without this guard, the engine can simultaneously hold TQQQ + SQQQ (both bull
+        and bear), violating mutual exclusivity and amplifying decay losses.
+        """
+        mock_market_data.get_ohlcv.return_value = _make_ohlcv_mock(50.0)
+
+        # TQQQ held for only 1 hour — min_hold (4h) not satisfied
+        engine._managed_positions["TQQQ"] = ETFPosition(
+            symbol="TQQQ",
+            entry_date=time.time() - 1 * 3600,  # 1 hour, too new to sell
+            reason="regime_bull",
+        )
+        engine._last_regime = MarketRegime.UPTREND
+
+        pos_tqqq = MagicMock(symbol="TQQQ", quantity=100, current_price=50.0)
+        mock_market_data.get_positions.return_value = [pos_tqqq]
+
+        # Bear switch: wants to buy SQQQ, but must sell TQQQ first (sibling)
+        mock_etf_universe.get_pair_siblings.side_effect = lambda s: {
+            "SQQQ": ["QQQ", "TQQQ"],
+            "SOXS": ["SOXX", "SOXL"],
+        }.get(s, [])
+
+        bear_state = MarketState(
+            regime=MarketRegime.DOWNTREND,
+            spy_distance_pct=-6.0, confidence=0.85,
+        )
+        actions = await engine._manage_regime_etfs(bear_state)
+
+        # TQQQ sell blocked by min_hold, SQQQ buy must also be skipped.
+        # (SOXS may still be bought since it has no conflicting sibling held.)
+        assert not any("SELL" in a and "TQQQ" in a for a in actions), (
+            "TQQQ should not be sold — min_hold constraint not satisfied"
+        )
+        assert not any("BUY" in a and "SQQQ" in a for a in actions), (
+            "SQQQ should not be bought — sibling TQQQ could not be cleared first"
+        )
+        sqqq_buy_calls = [
+            c for c in mock_order_manager.place_buy.call_args_list
+            if c.kwargs.get("symbol") == "SQQQ" or (c.args and c.args[0] == "SQQQ")
+        ]
+        assert len(sqqq_buy_calls) == 0, "place_buy should not have been called for SQQQ"
+
 
 class TestSectorRotation:
     """Test sector ETF rotation based on sector strength."""
@@ -450,7 +498,11 @@ class TestSellCooldownConstraint:
 
         # TQQQ should be bought because cooldown is satisfied
         assert any("BUY" in a and "TQQQ" in a for a in actions)
-        assert mock_order_manager.place_buy.called
+        call_symbols = [
+            c.kwargs.get("symbol") or (c.args[0] if c.args else None)
+            for c in mock_order_manager.place_buy.call_args_list
+        ]
+        assert "TQQQ" in call_symbols, f"Expected TQQQ buy call, got: {call_symbols}"
 
     @pytest.mark.asyncio
     async def test_sell_records_cooldown_timer(

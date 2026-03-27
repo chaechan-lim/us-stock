@@ -111,8 +111,13 @@ class ETFEngine:
         self._last_regime: MarketRegime | None = None
         self._last_top_sectors: list[str] = []
 
-        # Track when each ETF was last sold (for sell_cooldown)
-        self._last_sell_times: dict[str, float] = {}  # symbol -> timestamp
+        # Track when each ETF was last sold (for sell_cooldown).
+        # NOTE: This state is in-memory only. On process restart (crash, deploy,
+        # systemd restart) all cooldown timestamps are lost, which may allow
+        # immediate re-buys that should still be cooling down. A future improvement
+        # would persist these to Redis with a TTL equal to sell_cooldown_hours, or
+        # seed from same-day sell records in the orders DB on startup.
+        self._last_sell_times: dict[str, float] = {}  # symbol -> unix timestamp
 
     async def evaluate(
         self,
@@ -179,6 +184,12 @@ class ETFEngine:
         """
         pos = self._managed_positions.get(symbol)
         if not pos:
+            # Position exists on broker but not tracked in-memory (e.g. after restart
+            # before restore_managed_positions runs). Log so operators can detect the gap.
+            logger.warning(
+                "ETF Engine: _can_sell_etf: %s not in _managed_positions — skipping min_hold",
+                symbol,
+            )
             return True, ""
 
         now = time.time()
@@ -334,40 +345,63 @@ class ETFEngine:
         # Enter target ETFs (sell conflicting siblings first for mutual exclusivity)
         for sym in target_etfs:
             if sym not in held_symbols:
-                # Mutual exclusivity: sell any sibling (base/bull/bear) already held
+                # Mutual exclusivity: ensure no sibling (base/bull/bear) remains held.
+                # Case A: sibling in exit_etfs — already handled above, but may have
+                #         been skipped by min_hold. If it's still in held_symbols, the
+                #         exit sell was blocked, so we must not buy sym either.
+                # Case B: sibling not in exit_etfs — try to sell now, but if min_hold
+                #         blocks the sell, skip buying sym to avoid holding both sides.
                 siblings = self._etf.get_pair_siblings(sym)
+                skip_buy_for_sibling = False
                 for sib in siblings:
-                    if sib in held_symbols and sib not in exit_etfs:
-                        pos = next((p for p in positions if p.symbol == sib), None)
-                        if pos and pos.quantity > 0:
-                            # Check min_hold before selling sibling
-                            can_sell_sib, reason_sib = self._can_sell_etf(sib)
-                            if not can_sell_sib:
-                                logger.info(
-                                    "ETF Engine: SKIP SELL sibling %s (for %s) — min_hold: %s",
-                                    sib, sym, reason_sib,
-                                )
-                                continue
+                    if sib not in held_symbols:
+                        continue  # already cleared or never held
 
-                            price_sib = float(pos.current_price) if pos.current_price else 0
-                            sell_result = await self._order_manager.place_sell(
-                                symbol=sib,
-                                quantity=int(pos.quantity),
-                                price=price_sib,
-                                strategy_name="etf_engine_regime",
-                                exchange=self._etf.get_exchange(sib),
-                                entry_price=pos.avg_price,
-                                buy_strategy="etf_engine",
+                    if sib in exit_etfs:
+                        # Exit loop already tried to sell this sibling.
+                        # If it's still in held_symbols, the sell was blocked (min_hold).
+                        logger.info(
+                            "ETF Engine: SKIP BUY %s — sibling %s still held "
+                            "(exit sell was blocked, likely by min_hold)",
+                            sym, sib,
+                        )
+                        skip_buy_for_sibling = True
+                        break
+
+                    # Sibling not in exit_etfs — try to sell it now
+                    pos = next((p for p in positions if p.symbol == sib), None)
+                    if pos and pos.quantity > 0:
+                        can_sell_sib, reason_sib = self._can_sell_etf(sib)
+                        if not can_sell_sib:
+                            logger.info(
+                                "ETF Engine: SKIP BUY %s — sibling %s min_hold not met: %s",
+                                sym, sib, reason_sib,
                             )
-                            if sell_result:
-                                self._last_sell_times[sib] = time.time()
-                                self._managed_positions.pop(sib, None)
-                                held_symbols.discard(sib)
-                                actions.append(f"SELL {sib} (mutual exclusivity for {sym})")
-                                logger.info(
-                                    "ETF Engine: SELL %s (sibling conflict with target %s)",
-                                    sib, sym,
-                                )
+                            skip_buy_for_sibling = True
+                            break  # stop checking siblings; can't buy anyway
+
+                        price_sib = float(pos.current_price) if pos.current_price else 0
+                        sell_result = await self._order_manager.place_sell(
+                            symbol=sib,
+                            quantity=int(pos.quantity),
+                            price=price_sib,
+                            strategy_name="etf_engine_regime",
+                            exchange=self._etf.get_exchange(sib),
+                            entry_price=pos.avg_price,
+                            buy_strategy="etf_engine",
+                        )
+                        if sell_result:
+                            self._last_sell_times[sib] = time.time()
+                            self._managed_positions.pop(sib, None)
+                            held_symbols.discard(sib)
+                            actions.append(f"SELL {sib} (mutual exclusivity for {sym})")
+                            logger.info(
+                                "ETF Engine: SELL %s (sibling conflict with target %s)",
+                                sib, sym,
+                            )
+
+                if skip_buy_for_sibling:
+                    continue
 
                 # Check sell_cooldown before buying
                 can_buy, reason = self._can_buy_etf(sym)
