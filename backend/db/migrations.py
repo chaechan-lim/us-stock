@@ -29,16 +29,26 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 logger = logging.getLogger(__name__)
 
 # The first alembic revision (initial schema).  Used when stamping a legacy DB
-# that has tables but no alembic_version tracking table.
+# that has tables but no alembic_version tracking table and none of the
+# migration sentinels below are satisfied.
 _INITIAL_REVISION: str = "cfbdf0cd6e1f"
 
-# Column from migration 607feca4f8b7 (STOCK-58).  Its presence indicates that
-# all migrations up to STOCK-58 have already been applied on this DB.
-# MUST UPDATE: set this to a column added in the latest migration whenever a
-# new versioned migration is added, so that fully-migrated legacy DBs are
-# stamped at head rather than at _INITIAL_REVISION.
-_STOCK58_SENTINEL_TABLE: str = "portfolio_snapshots"
-_STOCK58_SENTINEL_COLUMN: str = "usd_krw_rate"
+# Ordered list of migration sentinels, **newest first**.  Each entry maps a
+# versioned migration to a detectable schema change it introduced:
+#   (revision_hash, sentinel_table, sentinel_column)
+#
+# ``run_alembic_upgrade`` walks this list from newest to oldest to find the
+# highest revision already applied to an untracked legacy DB, then stamps at
+# that revision before running ``upgrade head``.  This ensures that only
+# truly pending migrations are applied and avoids re-running migrations whose
+# schema changes are already present.
+#
+# When adding a new versioned migration, **prepend** its entry here:
+#   ("<new_rev>", "<sentinel_table>", "<column_added_by_migration>"),  # STOCK-N
+_MIGRATION_SENTINELS: list[tuple[str, str, str]] = [
+    # (revision_hash, sentinel_table, sentinel_column)
+    ("607feca4f8b7", "portfolio_snapshots", "usd_krw_rate"),  # STOCK-58
+]
 
 # PostgreSQL advisory lock ID used to serialise ``run_alembic_upgrade`` across
 # multiple workers that start up simultaneously (e.g. ``uvicorn --workers N``).
@@ -71,7 +81,8 @@ async def run_alembic_upgrade(
        the migration chain.
     2. **Legacy DB** (tables exist, no ``alembic_version`` table): the DB was
        bootstrapped via ``Base.metadata.create_all`` without alembic tracking.
-       We stamp at the appropriate revision so alembic only applies *pending*
+       We stamp at the highest already-applied revision (determined by walking
+       ``_MIGRATION_SENTINELS`` newest-first) so alembic only applies *pending*
        migrations, then run upgrade.
     3. **Tracked DB** (``alembic_version`` table exists): alembic applies only
        unapplied migrations as normal.
@@ -97,54 +108,58 @@ async def run_alembic_upgrade(
                 "alembic: acquiring pg_advisory_lock(%d) to serialise multi-worker startup",
                 _PG_MIGRATION_LOCK_ID,
             )
-            await conn.execute(text(f"SELECT pg_advisory_lock({_PG_MIGRATION_LOCK_ID})"))
+            await conn.execute(
+                text("SELECT pg_advisory_lock(:lid)").bindparams(lid=_PG_MIGRATION_LOCK_ID)
+            )
 
         try:
             # ── 1. Inspect current DB state ──────────────────────────────────────────
-            has_alembic_version: bool = False
-            has_base_tables: bool = False
-            has_stock58_columns: bool = False
-
-            def _inspect_state(sync_conn) -> tuple[bool, bool, bool]:  # type: ignore[no-untyped-def]
+            def _inspect_state(sync_conn) -> tuple[bool, bool, str]:  # type: ignore[no-untyped-def]
                 insp = inspect(sync_conn)
                 _has_alembic = insp.has_table("alembic_version")
                 _has_base = insp.has_table("orders")
-                _has_58 = False
-                if insp.has_table(_STOCK58_SENTINEL_TABLE):
-                    cols = {c["name"] for c in insp.get_columns(_STOCK58_SENTINEL_TABLE)}
-                    _has_58 = _STOCK58_SENTINEL_COLUMN in cols
-                return _has_alembic, _has_base, _has_58
+                # Walk sentinels newest-first to find the highest already-applied
+                # revision.  The first satisfied sentinel wins; fall back to the
+                # initial revision if none match.
+                _stamp_rev = _INITIAL_REVISION
+                for revision, table, column in _MIGRATION_SENTINELS:
+                    if insp.has_table(table):
+                        cols = {c["name"] for c in insp.get_columns(table)}
+                        if column in cols:
+                            _stamp_rev = revision
+                            break
+                return _has_alembic, _has_base, _stamp_rev
 
-            has_alembic_version, has_base_tables, has_stock58_columns = await conn.run_sync(
+            has_alembic_version, has_base_tables, legacy_stamp_rev = await conn.run_sync(
                 _inspect_state
             )
 
             # ── 2. Stamp legacy deployments so alembic upgrade is incremental ────────
             if not has_alembic_version and has_base_tables:
-                # Tables were created via create_all without alembic.
-                # Determine which revision to stamp based on what columns exist.
-                if has_stock58_columns:
-                    # All current migrations are already reflected in the schema
-                    # (e.g. fresh DB where create_all picked up the latest ORM models).
-                    stamp_rev = "head"
-                else:
-                    # Missing STOCK-58 columns → DB is at the initial revision.
-                    stamp_rev = _INITIAL_REVISION
-
-                logger.info("alembic: no version table found; stamping legacy DB at %s", stamp_rev)
+                # Tables were created via create_all without alembic tracking.
+                # Stamp at the highest revision whose schema changes are already
+                # present so that upgrade head only applies truly pending migrations.
+                logger.info(
+                    "alembic: no version table found; stamping legacy DB at %s",
+                    legacy_stamp_rev,
+                )
                 try:
                     stamp_proc = await asyncio.to_thread(
-                        functools.partial(_run_alembic_cmd, ["stamp", stamp_rev], backend_dir)
+                        functools.partial(
+                            _run_alembic_cmd, ["stamp", legacy_stamp_rev], backend_dir
+                        )
                     )
                 except subprocess.TimeoutExpired as exc:
-                    raise RuntimeError(f"alembic stamp {stamp_rev} timed out after 180 s") from exc
+                    raise RuntimeError(
+                        f"alembic stamp {legacy_stamp_rev} timed out after 180 s"
+                    ) from exc
                 if stamp_proc.stdout:
                     logger.info("alembic stamp stdout:\n%s", stamp_proc.stdout)
                 if stamp_proc.stderr:
                     logger.info("alembic stamp stderr:\n%s", stamp_proc.stderr)
                 if stamp_proc.returncode != 0:
                     raise RuntimeError(
-                        f"alembic stamp {stamp_rev} failed "
+                        f"alembic stamp {legacy_stamp_rev} failed "
                         f"(exit {stamp_proc.returncode}):\n{stamp_proc.stderr}"
                     )
 
@@ -171,7 +186,11 @@ async def run_alembic_upgrade(
         finally:
             if is_postgres:
                 try:
-                    await conn.execute(text(f"SELECT pg_advisory_unlock({_PG_MIGRATION_LOCK_ID})"))
+                    await conn.execute(
+                        text("SELECT pg_advisory_unlock(:lid)").bindparams(
+                            lid=_PG_MIGRATION_LOCK_ID
+                        )
+                    )
                 except Exception:
                     logger.warning(
                         "alembic: failed to release pg_advisory_lock(%d); "
