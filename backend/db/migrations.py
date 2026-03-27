@@ -15,6 +15,8 @@ start.  Using a subprocess avoids event-loop conflicts with alembic's async
 ``env.py`` which calls ``asyncio.run()`` internally.
 """
 
+import asyncio
+import functools
 import logging
 import subprocess
 import sys
@@ -31,24 +33,35 @@ logger = logging.getLogger(__name__)
 _INITIAL_REVISION: str = "cfbdf0cd6e1f"
 
 # Column from migration 607feca4f8b7 (STOCK-58).  Its presence indicates that
-# all migrations up to head have already been applied on this DB.
+# all migrations up to STOCK-58 have already been applied on this DB.
+# MUST UPDATE: set this to a column added in the latest migration whenever a
+# new versioned migration is added, so that fully-migrated legacy DBs are
+# stamped at head rather than at _INITIAL_REVISION.
 _STOCK58_SENTINEL_TABLE: str = "portfolio_snapshots"
 _STOCK58_SENTINEL_COLUMN: str = "usd_krw_rate"
 
+# PostgreSQL advisory lock ID used to serialise ``run_alembic_upgrade`` across
+# multiple workers that start up simultaneously (e.g. ``uvicorn --workers N``).
+# The value is an arbitrary project-specific constant.
+_PG_MIGRATION_LOCK_ID: int = 7625765983
 
-def _run_alembic_cmd(args: list[str], cwd: Path) -> subprocess.CompletedProcess:  # type: ignore[type-arg]
+
+def _run_alembic_cmd(args: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
     """Run an alembic sub-command as a subprocess.
 
     Returns the completed process.  Caller is responsible for checking
     ``returncode``.
+
+    Raises ``subprocess.TimeoutExpired`` if the command does not complete
+    within 180 seconds.
     """
     cmd = [sys.executable, "-m", "alembic"] + args
-    return subprocess.run(cmd, cwd=str(cwd), capture_output=True, text=True)
+    return subprocess.run(cmd, cwd=str(cwd), capture_output=True, text=True, timeout=180)
 
 
 async def run_alembic_upgrade(
     engine: AsyncEngine,
-    ini_path: Path | None = None,
+    alembic_dir: Path | None = None,
 ) -> None:
     """Run ``alembic upgrade head`` as a subprocess on server startup.
 
@@ -63,72 +76,108 @@ async def run_alembic_upgrade(
     3. **Tracked DB** (``alembic_version`` table exists): alembic applies only
        unapplied migrations as normal.
 
-    ``ini_path`` is the directory that contains ``alembic.ini``.  Defaults to
+    ``alembic_dir`` is the directory that contains ``alembic.ini``.  Defaults to
     the ``backend/`` directory (parent of this file's ``db/`` package).
 
-    Raises ``RuntimeError`` if any alembic command exits with a non-zero code,
-    which blocks server startup as required.
+    On PostgreSQL the entire inspect→stamp→upgrade sequence is protected by a
+    session-level advisory lock (``pg_advisory_lock``) so that concurrent
+    worker processes serialise correctly instead of racing on ``ALTER TABLE``.
+
+    Raises ``RuntimeError`` if any alembic command exits with a non-zero code
+    or times out, which blocks server startup as required.
     """
-    backend_dir: Path = ini_path if ini_path is not None else Path(__file__).parent.parent
+    backend_dir: Path = alembic_dir if alembic_dir is not None else Path(__file__).parent.parent
+    is_postgres: bool = engine.dialect.name == "postgresql"
 
-    # ── 1. Inspect current DB state ──────────────────────────────────────────
-    has_alembic_version: bool = False
-    has_base_tables: bool = False
-    has_stock58_columns: bool = False
-
+    # Keep a single connection open for the full migration sequence so that
+    # the PostgreSQL advisory lock (session-scoped) is held throughout.
     async with engine.connect() as conn:
+        if is_postgres:
+            logger.info(
+                "alembic: acquiring pg_advisory_lock(%d) to serialise multi-worker startup",
+                _PG_MIGRATION_LOCK_ID,
+            )
+            await conn.execute(text(f"SELECT pg_advisory_lock({_PG_MIGRATION_LOCK_ID})"))
 
-        def _inspect_state(sync_conn) -> tuple[bool, bool, bool]:  # type: ignore[no-untyped-def]
-            insp = inspect(sync_conn)
-            _has_alembic = insp.has_table("alembic_version")
-            _has_base = insp.has_table("orders")
-            _has_58 = False
-            if insp.has_table(_STOCK58_SENTINEL_TABLE):
-                cols = {c["name"] for c in insp.get_columns(_STOCK58_SENTINEL_TABLE)}
-                _has_58 = _STOCK58_SENTINEL_COLUMN in cols
-            return _has_alembic, _has_base, _has_58
+        try:
+            # ── 1. Inspect current DB state ──────────────────────────────────────────
+            has_alembic_version: bool = False
+            has_base_tables: bool = False
+            has_stock58_columns: bool = False
 
-        has_alembic_version, has_base_tables, has_stock58_columns = await conn.run_sync(
-            _inspect_state
-        )
+            def _inspect_state(sync_conn) -> tuple[bool, bool, bool]:  # type: ignore[no-untyped-def]
+                insp = inspect(sync_conn)
+                _has_alembic = insp.has_table("alembic_version")
+                _has_base = insp.has_table("orders")
+                _has_58 = False
+                if insp.has_table(_STOCK58_SENTINEL_TABLE):
+                    cols = {c["name"] for c in insp.get_columns(_STOCK58_SENTINEL_TABLE)}
+                    _has_58 = _STOCK58_SENTINEL_COLUMN in cols
+                return _has_alembic, _has_base, _has_58
 
-    # ── 2. Stamp legacy deployments so alembic upgrade is incremental ────────
-    if not has_alembic_version and has_base_tables:
-        # Tables were created via create_all without alembic.
-        # Determine which revision to stamp based on what columns exist.
-        if has_stock58_columns:
-            # All current migrations are already reflected in the schema
-            # (e.g. fresh DB where create_all picked up the latest ORM models).
-            stamp_rev = "head"
-        else:
-            # Missing STOCK-58 columns → DB is at the initial revision.
-            stamp_rev = _INITIAL_REVISION
-
-        logger.info("alembic: no version table found; stamping legacy DB at %s", stamp_rev)
-        stamp_proc = _run_alembic_cmd(["stamp", stamp_rev], backend_dir)
-        if stamp_proc.stdout:
-            logger.info("alembic stamp stdout:\n%s", stamp_proc.stdout)
-        if stamp_proc.stderr:
-            logger.info("alembic stamp stderr:\n%s", stamp_proc.stderr)
-        if stamp_proc.returncode != 0:
-            raise RuntimeError(
-                f"alembic stamp {stamp_rev} failed "
-                f"(exit {stamp_proc.returncode}):\n{stamp_proc.stderr}"
+            has_alembic_version, has_base_tables, has_stock58_columns = await conn.run_sync(
+                _inspect_state
             )
 
-    # ── 3. Run upgrade head ───────────────────────────────────────────────────
-    logger.info("alembic: running upgrade head …")
-    upgrade_proc = _run_alembic_cmd(["upgrade", "head"], backend_dir)
-    if upgrade_proc.stdout:
-        logger.info("alembic upgrade stdout:\n%s", upgrade_proc.stdout)
-    if upgrade_proc.stderr:
-        logger.info("alembic upgrade stderr:\n%s", upgrade_proc.stderr)
-    if upgrade_proc.returncode != 0:
-        raise RuntimeError(
-            f"alembic upgrade head failed (exit {upgrade_proc.returncode}):\n{upgrade_proc.stderr}"
-        )
+            # ── 2. Stamp legacy deployments so alembic upgrade is incremental ────────
+            if not has_alembic_version and has_base_tables:
+                # Tables were created via create_all without alembic.
+                # Determine which revision to stamp based on what columns exist.
+                if has_stock58_columns:
+                    # All current migrations are already reflected in the schema
+                    # (e.g. fresh DB where create_all picked up the latest ORM models).
+                    stamp_rev = "head"
+                else:
+                    # Missing STOCK-58 columns → DB is at the initial revision.
+                    stamp_rev = _INITIAL_REVISION
 
-    logger.info("alembic: upgrade head complete")
+                logger.info("alembic: no version table found; stamping legacy DB at %s", stamp_rev)
+                try:
+                    stamp_proc = await asyncio.to_thread(
+                        functools.partial(_run_alembic_cmd, ["stamp", stamp_rev], backend_dir)
+                    )
+                except subprocess.TimeoutExpired as exc:
+                    raise RuntimeError(f"alembic stamp {stamp_rev} timed out after 180 s") from exc
+                if stamp_proc.stdout:
+                    logger.info("alembic stamp stdout:\n%s", stamp_proc.stdout)
+                if stamp_proc.stderr:
+                    logger.info("alembic stamp stderr:\n%s", stamp_proc.stderr)
+                if stamp_proc.returncode != 0:
+                    raise RuntimeError(
+                        f"alembic stamp {stamp_rev} failed "
+                        f"(exit {stamp_proc.returncode}):\n{stamp_proc.stderr}"
+                    )
+
+            # ── 3. Run upgrade head ───────────────────────────────────────────────────
+            logger.info("alembic: running upgrade head …")
+            try:
+                upgrade_proc = await asyncio.to_thread(
+                    functools.partial(_run_alembic_cmd, ["upgrade", "head"], backend_dir)
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise RuntimeError("alembic upgrade head timed out after 180 s") from exc
+            if upgrade_proc.stdout:
+                logger.info("alembic upgrade stdout:\n%s", upgrade_proc.stdout)
+            if upgrade_proc.stderr:
+                logger.info("alembic upgrade stderr:\n%s", upgrade_proc.stderr)
+            if upgrade_proc.returncode != 0:
+                raise RuntimeError(
+                    f"alembic upgrade head failed "
+                    f"(exit {upgrade_proc.returncode}):\n{upgrade_proc.stderr}"
+                )
+
+            logger.info("alembic: upgrade head complete")
+
+        finally:
+            if is_postgres:
+                try:
+                    await conn.execute(text(f"SELECT pg_advisory_unlock({_PG_MIGRATION_LOCK_ID})"))
+                except Exception:
+                    logger.warning(
+                        "alembic: failed to release pg_advisory_lock(%d); "
+                        "lock will expire when connection closes",
+                        _PG_MIGRATION_LOCK_ID,
+                    )
 
 
 # Columns that may be missing from existing deployments.
