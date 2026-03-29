@@ -1169,3 +1169,79 @@ class TestRestoreSellCooldownSeeding:
         await engine.restore_managed_positions(failing_factory)
 
         assert engine._last_sell_times == {}
+
+    @pytest.mark.asyncio
+    async def test_cutoff_datetime_is_timezone_aware(
+        self, engine, mock_market_data,
+    ):
+        """Cutoff datetime passed to DB query must be timezone-aware (offset-aware).
+
+        Regression test for:
+            invalid input for query argument $3:
+            can't subtract offset-naive and offset-aware datetimes
+
+        PostgreSQL rejects comparisons between offset-naive and offset-aware
+        datetimes.  The cutoff used in the sell-cooldown DB query must carry
+        tzinfo so that SQLAlchemy/asyncpg can bind it correctly against the
+        timezone-aware ``created_at`` column.
+        """
+        pos = MagicMock(symbol="TQQQ", quantity=100, current_price=55.0, avg_price=50.0)
+        mock_market_data.get_positions.return_value = [pos]
+
+        captured_cutoffs: list = []
+
+        class _CutoffCapturingSession:
+            """Captures the cutoff literal from the compiled SELL query."""
+
+            async def execute(self, stmt):
+                sql = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+                if "'SELL'" in sql:
+                    # Extract the bound parameters from the statement before
+                    # compilation so we can inspect the raw Python datetime object.
+                    for param in stmt.whereclause.clauses:
+                        try:
+                            right = param.right
+                            if hasattr(right, "value") and isinstance(right.value, datetime):
+                                captured_cutoffs.append(right.value)
+                        except AttributeError:
+                            pass
+
+                    class _FakeScalars:
+                        def all(self_inner):
+                            return []
+
+                    class _SellResult:
+                        def scalars(self_inner):
+                            return _FakeScalars()
+
+                    return _SellResult()
+
+                class _BuyResult:
+                    def scalar_one_or_none(self_inner):
+                        return None
+
+                return _BuyResult()
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                pass
+
+        def capturing_factory():
+            return _CutoffCapturingSession()
+
+        await engine.restore_managed_positions(capturing_factory)
+
+        # At least one cutoff datetime must have been captured from the SELL query.
+        # If none were captured the test is inconclusive — warn rather than false-pass.
+        assert captured_cutoffs, (
+            "No cutoff datetime was captured from the SELL query. "
+            "Check that the factory correctly intercepts the statement."
+        )
+        for cutoff in captured_cutoffs:
+            assert cutoff.tzinfo is not None, (
+                f"Cutoff datetime {cutoff!r} is offset-naive. "
+                "Use datetime.now(timezone.utc) to produce an offset-aware cutoff "
+                "so PostgreSQL can compare it against timezone-aware created_at values."
+            )
