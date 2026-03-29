@@ -72,11 +72,17 @@ async def lifespan(app: FastAPI):
         await conn.run_sync(Base.metadata.create_all)
     logger.info("Database tables created")
 
+    # Run alembic upgrade head to apply all versioned schema migrations.
+    # Using a subprocess avoids event-loop conflicts with alembic's async env.py.
+    # Raises RuntimeError on failure — intentionally blocks server startup so
+    # schema drift never silently causes runtime errors (STOCK-63).
+    from db.migrations import ensure_columns, ensure_indexes, run_alembic_upgrade
+
+    await run_alembic_upgrade(engine)
+
     # Auto-migrate: add columns/indexes that exist in the ORM model but are
     # missing from the physical DB (e.g. is_paper, buy_strategy added after
-    # initial deploy)
-    from db.migrations import ensure_columns, ensure_indexes
-
+    # initial deploy — pre-alembic columns with no dedicated migration).
     added_cols = await ensure_columns(engine)
     if added_cols:
         logger.info("Auto-migration added columns: %s", ", ".join(added_cols))

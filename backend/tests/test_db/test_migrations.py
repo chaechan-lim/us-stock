@@ -1,4 +1,4 @@
-"""Tests for auto-migration of missing columns and indexes (STOCK-11/STOCK-13).
+"""Tests for auto-migration of missing columns and indexes (STOCK-11/STOCK-13/STOCK-63).
 
 Validates that ensure_columns() correctly detects and adds columns that
 exist in the ORM model but are missing from the physical DB schema, and
@@ -6,7 +6,12 @@ that ensure_indexes() creates missing indexes.
 
 STOCK-11: Auto-migration for is_paper column addition.
 STOCK-13: Also creates idx_orders_is_paper index and enforces NOT NULL.
+STOCK-63: run_alembic_upgrade() runs alembic upgrade head on startup.
 """
+
+import subprocess
+from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import pytest_asyncio
@@ -14,7 +19,13 @@ from sqlalchemy import Column, DateTime, Float, Integer, String, inspect, text
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.orm import DeclarativeBase
 
-from db.migrations import ensure_columns, ensure_indexes
+from db.migrations import (
+    _INITIAL_REVISION,
+    _MIGRATION_SENTINELS,
+    ensure_columns,
+    ensure_indexes,
+    run_alembic_upgrade,
+)
 
 
 class _OldBase(DeclarativeBase):
@@ -464,3 +475,405 @@ async def test_reconcile_query_works_after_migration(old_engine):
     assert len(pending) == 1
     assert pending[0].symbol == "MSFT"
     assert pending[0].status == "pending"
+
+
+# ── run_alembic_upgrade tests (STOCK-63) ──────────────────────────────
+
+
+def _make_proc(returncode: int = 0, stdout: str = "", stderr: str = "") -> MagicMock:
+    """Build a mock CompletedProcess for subprocess.run."""
+    proc = MagicMock()
+    proc.returncode = returncode
+    proc.stdout = stdout
+    proc.stderr = stderr
+    return proc
+
+
+@pytest.fixture
+def alembic_dir(tmp_path: Path) -> Path:
+    """Dummy backend dir for subprocess cwd (doesn't need real alembic.ini)."""
+    return tmp_path
+
+
+@pytest_asyncio.fixture
+async def fresh_engine():
+    """Engine with NO tables — simulates a brand-new database.
+
+    Note: in the normal ``main.py`` startup sequence ``Base.metadata.create_all``
+    runs *before* ``run_alembic_upgrade``, so ``run_alembic_upgrade`` never
+    receives a truly empty DB through the production path.  This fixture
+    exercises the function in isolation (e.g. when called directly without the
+    preceding ``create_all``).  The production new-install scenario is captured
+    by ``legacy_engine_with_stock58`` (tables created by ``create_all`` with the
+    current ORM models already applied).
+    """
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    yield engine
+    await engine.dispose()
+
+
+@pytest_asyncio.fixture
+async def legacy_engine_without_stock58():
+    """Engine with orders/portfolio_snapshots tables but WITHOUT stock-58 columns.
+
+    Simulates a production DB that was bootstrapped via create_all at the
+    initial schema but never had STOCK-58 migration applied.
+    """
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "CREATE TABLE orders ("
+                "id INTEGER PRIMARY KEY, symbol TEXT NOT NULL, side TEXT, "
+                "order_type TEXT, quantity REAL, price REAL, status TEXT, "
+                "exchange TEXT DEFAULT 'NASD', market TEXT DEFAULT 'US', "
+                "strategy_name TEXT, kis_order_id TEXT, pnl REAL, "
+                "created_at DATETIME, filled_at DATETIME, "
+                "filled_quantity REAL DEFAULT 0, filled_price REAL)"
+            )
+        )
+        await conn.execute(
+            text(
+                "CREATE TABLE portfolio_snapshots ("
+                "id INTEGER PRIMARY KEY, total_value_usd REAL NOT NULL, "
+                "cash_usd REAL NOT NULL, invested_usd REAL NOT NULL, "
+                "realized_pnl REAL, unrealized_pnl REAL, daily_pnl REAL, "
+                "drawdown_pct REAL, recorded_at DATETIME)"
+            )
+        )
+    yield engine
+    await engine.dispose()
+
+
+@pytest_asyncio.fixture
+async def legacy_engine_with_stock58():
+    """Engine with tables AND stock-58 columns — simulates fresh DB via create_all.
+
+    When create_all builds tables from current ORM models, all columns are
+    present.  We should stamp at the latest sentinel revision and then run
+    upgrade (which will be a no-op since schema is already current).
+    """
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "CREATE TABLE orders ("
+                "id INTEGER PRIMARY KEY, symbol TEXT NOT NULL, side TEXT, "
+                "order_type TEXT, quantity REAL, price REAL, status TEXT, "
+                "exchange TEXT DEFAULT 'NASD', market TEXT DEFAULT 'US', "
+                "strategy_name TEXT, kis_order_id TEXT, pnl REAL, "
+                "created_at DATETIME, filled_at DATETIME, "
+                "filled_quantity REAL DEFAULT 0, filled_price REAL)"
+            )
+        )
+        await conn.execute(
+            text(
+                "CREATE TABLE portfolio_snapshots ("
+                "id INTEGER PRIMARY KEY, total_value_usd REAL NOT NULL, "
+                "cash_usd REAL NOT NULL, invested_usd REAL NOT NULL, "
+                "realized_pnl REAL, unrealized_pnl REAL, daily_pnl REAL, "
+                "drawdown_pct REAL, recorded_at DATETIME, "
+                "usd_krw_rate REAL)"  # STOCK-58 column present
+            )
+        )
+    yield engine
+    await engine.dispose()
+
+
+@pytest_asyncio.fixture
+async def tracked_engine():
+    """Engine with tables and alembic_version — simulates fully tracked DB."""
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("CREATE TABLE orders (id INTEGER PRIMARY KEY, symbol TEXT NOT NULL, side TEXT)")
+        )
+        await conn.execute(
+            text("CREATE TABLE alembic_version (version_num TEXT NOT NULL PRIMARY KEY)")
+        )
+        await conn.execute(text("INSERT INTO alembic_version VALUES ('607feca4f8b7')"))
+    yield engine
+    await engine.dispose()
+
+
+@pytest_asyncio.fixture
+async def legacy_engine_only_orders():
+    """Engine with only the ``orders`` table — ``portfolio_snapshots`` does NOT exist.
+
+    Exercises the edge case where ``has_base_tables=True`` but
+    ``has_stock58_columns=False`` because the sentinel table itself is absent.
+    The code should stamp at ``_INITIAL_REVISION`` (not head) and then run
+    upgrade, which will create/alter ``portfolio_snapshots`` via the STOCK-58
+    migration.
+    """
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "CREATE TABLE orders ("
+                "id INTEGER PRIMARY KEY, symbol TEXT NOT NULL, side TEXT, "
+                "order_type TEXT, quantity REAL, price REAL, status TEXT, "
+                "exchange TEXT DEFAULT 'NASD', market TEXT DEFAULT 'US', "
+                "strategy_name TEXT, kis_order_id TEXT, pnl REAL, "
+                "created_at DATETIME, filled_at DATETIME, "
+                "filled_quantity REAL DEFAULT 0, filled_price REAL)"
+            )
+        )
+        # portfolio_snapshots intentionally NOT created here
+    yield engine
+    await engine.dispose()
+
+
+# ── Fresh DB (no tables) ─────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_run_alembic_upgrade_fresh_db_no_stamp(fresh_engine, alembic_dir):
+    """Fresh DB: no tables → no stamp call, just upgrade head.
+
+    Note: in production ``create_all`` always runs before ``run_alembic_upgrade``
+    (see ``main.py``), so this zero-table state is only reached when calling the
+    function directly.  The production new-install path is covered by
+    ``test_run_alembic_upgrade_legacy_with_all_sentinels_stamps_at_latest_revision``.
+    """
+    success_proc = _make_proc(0, "No migrations to apply.\n")
+
+    with patch("db.migrations._run_alembic_cmd", return_value=success_proc) as mock_cmd:
+        await run_alembic_upgrade(fresh_engine, alembic_dir=alembic_dir)
+
+    # Only upgrade head should have been called — no stamp needed
+    calls = [c.args[0] for c in mock_cmd.call_args_list]
+    assert calls == [["upgrade", "head"]]
+
+
+# ── Legacy DB without STOCK-58 columns ───────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_run_alembic_upgrade_legacy_without_stock58_stamps_initial(
+    legacy_engine_without_stock58, alembic_dir
+):
+    """Legacy DB without STOCK-58 columns → stamp at _INITIAL_REVISION then upgrade."""
+    success_proc = _make_proc(0)
+
+    with patch("db.migrations._run_alembic_cmd", return_value=success_proc) as mock_cmd:
+        await run_alembic_upgrade(legacy_engine_without_stock58, alembic_dir=alembic_dir)
+
+    calls = [c.args[0] for c in mock_cmd.call_args_list]
+    assert calls[0] == ["stamp", _INITIAL_REVISION]
+    assert calls[1] == ["upgrade", "head"]
+
+
+# ── Legacy DB with all sentinel columns present ───────────────────────
+
+
+@pytest.mark.asyncio
+async def test_run_alembic_upgrade_legacy_with_all_sentinels_stamps_at_latest_revision(
+    legacy_engine_with_stock58, alembic_dir
+):
+    """Legacy DB with all sentinel columns → stamp at newest sentinel, then upgrade."""
+    success_proc = _make_proc(0)
+
+    with patch("db.migrations._run_alembic_cmd", return_value=success_proc) as mock_cmd:
+        await run_alembic_upgrade(legacy_engine_with_stock58, alembic_dir=alembic_dir)
+
+    calls = [c.args[0] for c in mock_cmd.call_args_list]
+    # Should stamp at the newest sentinel's revision (not the dynamic "head" string),
+    # so that the stamp target is deterministic regardless of when alembic resolves it.
+    assert calls[0] == ["stamp", _MIGRATION_SENTINELS[0][0]]
+    assert calls[1] == ["upgrade", "head"]
+
+
+# ── Tracked DB (alembic_version table present) ───────────────────────
+
+
+@pytest.mark.asyncio
+async def test_run_alembic_upgrade_tracked_db_no_stamp(tracked_engine, alembic_dir):
+    """Tracked DB: alembic_version exists → no stamp, just upgrade head."""
+    success_proc = _make_proc(0)
+
+    with patch("db.migrations._run_alembic_cmd", return_value=success_proc) as mock_cmd:
+        await run_alembic_upgrade(tracked_engine, alembic_dir=alembic_dir)
+
+    calls = [c.args[0] for c in mock_cmd.call_args_list]
+    assert calls == [["upgrade", "head"]]
+
+
+# ── Failure / error handling ─────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_run_alembic_upgrade_raises_on_upgrade_failure(tracked_engine, alembic_dir):
+    """RuntimeError raised when alembic upgrade head exits non-zero."""
+    failure_proc = _make_proc(1, stderr="FATAL: column does not exist\n")
+
+    with patch("db.migrations._run_alembic_cmd", return_value=failure_proc):
+        with pytest.raises(RuntimeError, match="alembic upgrade head failed"):
+            await run_alembic_upgrade(tracked_engine, alembic_dir=alembic_dir)
+
+
+@pytest.mark.asyncio
+async def test_run_alembic_upgrade_raises_on_stamp_failure(
+    legacy_engine_without_stock58, alembic_dir
+):
+    """RuntimeError raised when alembic stamp exits non-zero."""
+    stamp_failure = _make_proc(1, stderr="stamp error\n")
+    success_proc = _make_proc(0)
+
+    # stamp fails, upgrade should never be reached
+    with patch(
+        "db.migrations._run_alembic_cmd",
+        side_effect=[stamp_failure, success_proc],
+    ):
+        with pytest.raises(RuntimeError, match=f"alembic stamp {_INITIAL_REVISION} failed"):
+            await run_alembic_upgrade(legacy_engine_without_stock58, alembic_dir=alembic_dir)
+
+
+@pytest.mark.asyncio
+async def test_run_alembic_upgrade_default_ini_path(tracked_engine):
+    """Default alembic_dir resolves to backend/ directory."""
+    success_proc = _make_proc(0)
+    captured_cwd: list[Path] = []
+
+    def _capturing_cmd(args: list, cwd: Path) -> MagicMock:  # type: ignore[no-untyped-def]
+        captured_cwd.append(cwd)
+        return success_proc
+
+    with patch("db.migrations._run_alembic_cmd", side_effect=_capturing_cmd):
+        await run_alembic_upgrade(tracked_engine)
+
+    assert len(captured_cwd) == 1
+    # Should point to the backend/ directory (parent of db/)
+    assert captured_cwd[0].name == "backend"
+
+
+@pytest.mark.asyncio
+async def test_run_alembic_upgrade_upgrade_head_called_last(
+    legacy_engine_without_stock58, alembic_dir
+):
+    """upgrade head is always the final alembic command."""
+    success_proc = _make_proc(0)
+
+    with patch("db.migrations._run_alembic_cmd", return_value=success_proc) as mock_cmd:
+        await run_alembic_upgrade(legacy_engine_without_stock58, alembic_dir=alembic_dir)
+
+    last_call_args = mock_cmd.call_args_list[-1].args[0]
+    assert last_call_args == ["upgrade", "head"]
+
+
+# ── Edge case: orders table only, portfolio_snapshots absent ──────────
+
+
+@pytest.mark.asyncio
+async def test_run_alembic_upgrade_only_orders_no_snapshots_stamps_initial(
+    legacy_engine_only_orders, alembic_dir
+):
+    """orders exists but portfolio_snapshots does NOT → stamp at _INITIAL_REVISION.
+
+    When only the orders table is present (portfolio_snapshots was never created),
+    has_base_tables=True but the sentinel column cannot be found because the
+    sentinel table itself is absent.  The code should stamp at _INITIAL_REVISION
+    so that the STOCK-58 migration (which creates/alters portfolio_snapshots) is
+    applied by the subsequent upgrade head.
+    """
+    success_proc = _make_proc(0)
+
+    with patch("db.migrations._run_alembic_cmd", return_value=success_proc) as mock_cmd:
+        await run_alembic_upgrade(legacy_engine_only_orders, alembic_dir=alembic_dir)
+
+    calls = [c.args[0] for c in mock_cmd.call_args_list]
+    # Must stamp at _INITIAL_REVISION (not head) so upgrade applies STOCK-58
+    assert calls[0] == ["stamp", _INITIAL_REVISION]
+    assert calls[1] == ["upgrade", "head"]
+
+
+# ── Timeout error handling ────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_run_alembic_upgrade_raises_on_upgrade_timeout(tracked_engine, alembic_dir):
+    """RuntimeError raised when alembic upgrade head times out (TimeoutExpired)."""
+    with patch(
+        "db.migrations._run_alembic_cmd",
+        side_effect=subprocess.TimeoutExpired(cmd=[], timeout=180),
+    ):
+        with pytest.raises(RuntimeError, match="alembic upgrade head timed out after 180 s"):
+            await run_alembic_upgrade(tracked_engine, alembic_dir=alembic_dir)
+
+
+@pytest.mark.asyncio
+async def test_run_alembic_upgrade_raises_on_stamp_timeout(
+    legacy_engine_without_stock58, alembic_dir
+):
+    """RuntimeError raised when alembic stamp times out (TimeoutExpired)."""
+    with patch(
+        "db.migrations._run_alembic_cmd",
+        side_effect=subprocess.TimeoutExpired(cmd=[], timeout=180),
+    ):
+        with pytest.raises(RuntimeError, match=f"alembic stamp {_INITIAL_REVISION} timed out"):
+            await run_alembic_upgrade(legacy_engine_without_stock58, alembic_dir=alembic_dir)
+
+
+# ── PostgreSQL advisory lock ──────────────────────────────────────────
+
+
+def _make_pg_engine(mock_conn: AsyncMock) -> MagicMock:
+    """Build a minimal mock engine that reports its dialect as PostgreSQL."""
+    mock_engine = MagicMock()
+    mock_engine.dialect.name = "postgresql"
+    cm = MagicMock()
+    cm.__aenter__ = AsyncMock(return_value=mock_conn)
+    cm.__aexit__ = AsyncMock(return_value=False)
+    mock_engine.connect.return_value = cm
+    return mock_engine
+
+
+@pytest.mark.asyncio
+async def test_pg_advisory_lock_acquired_and_released(alembic_dir):
+    """pg_advisory_lock is acquired before migration and released after success."""
+    executed_sqls: list[str] = []
+
+    mock_conn = AsyncMock()
+
+    def _record(stmt, *args, **kwargs):  # type: ignore[no-untyped-def]
+        executed_sqls.append(str(stmt))
+
+    mock_conn.execute.side_effect = _record
+    # Simulate a tracked DB so no stamp is attempted
+    mock_conn.run_sync = AsyncMock(return_value=(True, True, _INITIAL_REVISION))
+
+    mock_engine = _make_pg_engine(mock_conn)
+    success_proc = _make_proc(0)
+
+    with patch("db.migrations._run_alembic_cmd", return_value=success_proc):
+        await run_alembic_upgrade(mock_engine, alembic_dir=alembic_dir)
+
+    lock_sqls = [s for s in executed_sqls if "pg_advisory_lock" in s and "unlock" not in s]
+    unlock_sqls = [s for s in executed_sqls if "pg_advisory_unlock" in s]
+    assert len(lock_sqls) == 1, f"expected 1 lock SQL, got: {lock_sqls}"
+    assert len(unlock_sqls) == 1, f"expected 1 unlock SQL, got: {unlock_sqls}"
+
+
+@pytest.mark.asyncio
+async def test_pg_advisory_lock_released_on_failure(alembic_dir):
+    """pg_advisory_unlock is called in the finally block even when upgrade raises."""
+    executed_sqls: list[str] = []
+
+    mock_conn = AsyncMock()
+
+    def _record(stmt, *args, **kwargs):  # type: ignore[no-untyped-def]
+        executed_sqls.append(str(stmt))
+
+    mock_conn.execute.side_effect = _record
+    mock_conn.run_sync = AsyncMock(return_value=(True, True, _INITIAL_REVISION))
+
+    mock_engine = _make_pg_engine(mock_conn)
+    failure_proc = _make_proc(1, stderr="upgrade failed\n")
+
+    with patch("db.migrations._run_alembic_cmd", return_value=failure_proc):
+        with pytest.raises(RuntimeError, match="alembic upgrade head failed"):
+            await run_alembic_upgrade(mock_engine, alembic_dir=alembic_dir)
+
+    # Lock must be released even though upgrade raised
+    unlock_sqls = [s for s in executed_sqls if "pg_advisory_unlock" in s]
+    assert len(unlock_sqls) == 1, f"expected 1 unlock SQL, got: {unlock_sqls}"

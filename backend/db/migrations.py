@@ -8,15 +8,196 @@ TABLE / CREATE INDEX is applied.
 
 This module inspects the live schema on startup and adds any columns or
 indexes that are defined in the model but absent from the physical table.
+
+``run_alembic_upgrade`` is also provided to run ``alembic upgrade head`` as a
+subprocess so that all versioned schema migrations are applied on every server
+start.  Using a subprocess avoids event-loop conflicts with alembic's async
+``env.py`` which calls ``asyncio.run()`` internally.
 """
 
+import asyncio
+import functools
 import logging
+import subprocess
+import sys
+from pathlib import Path
 from typing import Sequence
 
 from sqlalchemy import inspect, text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 logger = logging.getLogger(__name__)
+
+# The first alembic revision (initial schema).  Used when stamping a legacy DB
+# that has tables but no alembic_version tracking table and none of the
+# migration sentinels below are satisfied.
+_INITIAL_REVISION: str = "cfbdf0cd6e1f"
+
+# Ordered list of migration sentinels, **newest first**.  Each entry maps a
+# versioned migration to a detectable schema change it introduced:
+#   (revision_hash, sentinel_table, sentinel_column)
+#
+# ``run_alembic_upgrade`` walks this list from newest to oldest to find the
+# highest revision already applied to an untracked legacy DB, then stamps at
+# that revision before running ``upgrade head``.  This ensures that only
+# truly pending migrations are applied and avoids re-running migrations whose
+# schema changes are already present.
+#
+# When adding a new versioned migration, **prepend** its entry here:
+#   ("<new_rev>", "<sentinel_table>", "<column_added_by_migration>"),  # STOCK-N
+_MIGRATION_SENTINELS: list[tuple[str, str, str]] = [
+    # (revision_hash, sentinel_table, sentinel_column)
+    ("607feca4f8b7", "portfolio_snapshots", "usd_krw_rate"),  # STOCK-58
+]
+
+# PostgreSQL advisory lock ID used to serialise ``run_alembic_upgrade`` across
+# multiple workers that start up simultaneously (e.g. ``uvicorn --workers N``).
+# The value is an arbitrary project-specific constant.
+_PG_MIGRATION_LOCK_ID: int = 7625765983
+
+
+def _run_alembic_cmd(args: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
+    """Run an alembic sub-command as a subprocess.
+
+    Returns the completed process.  Caller is responsible for checking
+    ``returncode``.
+
+    Raises ``subprocess.TimeoutExpired`` if the command does not complete
+    within 180 seconds.
+    """
+    cmd = [sys.executable, "-m", "alembic"] + args
+    return subprocess.run(cmd, cwd=str(cwd), capture_output=True, text=True, timeout=180)
+
+
+async def run_alembic_upgrade(
+    engine: AsyncEngine,
+    alembic_dir: Path | None = None,
+) -> None:
+    """Run ``alembic upgrade head`` as a subprocess on server startup.
+
+    Handles three DB states safely:
+
+    1. **Fresh DB** (no tables yet): alembic creates all tables from scratch via
+       the migration chain.
+    2. **Legacy DB** (tables exist, no ``alembic_version`` table): the DB was
+       bootstrapped via ``Base.metadata.create_all`` without alembic tracking.
+       We stamp at the highest already-applied revision (determined by walking
+       ``_MIGRATION_SENTINELS`` newest-first) so alembic only applies *pending*
+       migrations, then run upgrade.
+    3. **Tracked DB** (``alembic_version`` table exists): alembic applies only
+       unapplied migrations as normal.
+
+    ``alembic_dir`` is the directory that contains ``alembic.ini``.  Defaults to
+    the ``backend/`` directory (parent of this file's ``db/`` package).
+
+    On PostgreSQL the entire inspect→stamp→upgrade sequence is protected by a
+    session-level advisory lock (``pg_advisory_lock``) so that concurrent
+    worker processes serialise correctly instead of racing on ``ALTER TABLE``.
+
+    Raises ``RuntimeError`` if any alembic command exits with a non-zero code
+    or times out, which blocks server startup as required.
+    """
+    backend_dir: Path = alembic_dir if alembic_dir is not None else Path(__file__).parent.parent
+    is_postgres: bool = engine.dialect.name == "postgresql"
+
+    # Keep a single connection open for the full migration sequence so that
+    # the PostgreSQL advisory lock (session-scoped) is held throughout.
+    async with engine.connect() as conn:
+        if is_postgres:
+            logger.info(
+                "alembic: acquiring pg_advisory_lock(%d) to serialise multi-worker startup",
+                _PG_MIGRATION_LOCK_ID,
+            )
+            await conn.execute(
+                text("SELECT pg_advisory_lock(:lid)").bindparams(lid=_PG_MIGRATION_LOCK_ID)
+            )
+
+        try:
+            # ── 1. Inspect current DB state ──────────────────────────────────────────
+            def _inspect_state(sync_conn) -> tuple[bool, bool, str]:  # type: ignore[no-untyped-def]
+                insp = inspect(sync_conn)
+                _has_alembic = insp.has_table("alembic_version")
+                _has_base = insp.has_table("orders")
+                # Walk sentinels newest-first to find the highest already-applied
+                # revision.  The first satisfied sentinel wins; fall back to the
+                # initial revision if none match.
+                _stamp_rev = _INITIAL_REVISION
+                for revision, table, column in _MIGRATION_SENTINELS:
+                    if insp.has_table(table):
+                        cols = {c["name"] for c in insp.get_columns(table)}
+                        if column in cols:
+                            _stamp_rev = revision
+                            break
+                return _has_alembic, _has_base, _stamp_rev
+
+            has_alembic_version, has_base_tables, legacy_stamp_rev = await conn.run_sync(
+                _inspect_state
+            )
+
+            # ── 2. Stamp legacy deployments so alembic upgrade is incremental ────────
+            if not has_alembic_version and has_base_tables:
+                # Tables were created via create_all without alembic tracking.
+                # Stamp at the highest revision whose schema changes are already
+                # present so that upgrade head only applies truly pending migrations.
+                logger.info(
+                    "alembic: no version table found; stamping legacy DB at %s",
+                    legacy_stamp_rev,
+                )
+                try:
+                    stamp_proc = await asyncio.to_thread(
+                        functools.partial(
+                            _run_alembic_cmd, ["stamp", legacy_stamp_rev], backend_dir
+                        )
+                    )
+                except subprocess.TimeoutExpired as exc:
+                    raise RuntimeError(
+                        f"alembic stamp {legacy_stamp_rev} timed out after 180 s"
+                    ) from exc
+                if stamp_proc.stdout:
+                    logger.info("alembic stamp stdout:\n%s", stamp_proc.stdout)
+                if stamp_proc.stderr:
+                    logger.info("alembic stamp stderr:\n%s", stamp_proc.stderr)
+                if stamp_proc.returncode != 0:
+                    raise RuntimeError(
+                        f"alembic stamp {legacy_stamp_rev} failed "
+                        f"(exit {stamp_proc.returncode}):\n{stamp_proc.stderr}"
+                    )
+
+            # ── 3. Run upgrade head ───────────────────────────────────────────────────
+            logger.info("alembic: running upgrade head …")
+            try:
+                upgrade_proc = await asyncio.to_thread(
+                    functools.partial(_run_alembic_cmd, ["upgrade", "head"], backend_dir)
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise RuntimeError("alembic upgrade head timed out after 180 s") from exc
+            if upgrade_proc.stdout:
+                logger.info("alembic upgrade stdout:\n%s", upgrade_proc.stdout)
+            if upgrade_proc.stderr:
+                logger.info("alembic upgrade stderr:\n%s", upgrade_proc.stderr)
+            if upgrade_proc.returncode != 0:
+                raise RuntimeError(
+                    f"alembic upgrade head failed "
+                    f"(exit {upgrade_proc.returncode}):\n{upgrade_proc.stderr}"
+                )
+
+            logger.info("alembic: upgrade head complete")
+
+        finally:
+            if is_postgres:
+                try:
+                    await conn.execute(
+                        text("SELECT pg_advisory_unlock(:lid)").bindparams(
+                            lid=_PG_MIGRATION_LOCK_ID
+                        )
+                    )
+                except Exception:
+                    logger.warning(
+                        "alembic: failed to release pg_advisory_lock(%d); "
+                        "lock will expire when connection closes",
+                        _PG_MIGRATION_LOCK_ID,
+                    )
+
 
 # Columns that may be missing from existing deployments.
 # Format: (table_name, column_name, SQL_type, default_value, not_null)
@@ -65,7 +246,11 @@ async def ensure_columns(engine: AsyncEngine) -> list[str]:
                 added.append(f"{table}.{column}")
                 logger.info(
                     "Added missing column: %s.%s (%s%s%s)",
-                    table, column, sql_type, not_null_clause, default_clause,
+                    table,
+                    column,
+                    sql_type,
+                    not_null_clause,
+                    default_clause,
                 )
 
         await conn.run_sync(_sync_check_and_add)
@@ -101,14 +286,14 @@ async def ensure_indexes(engine: AsyncEngine) -> list[str]:
                 if column not in existing_cols:
                     logger.debug(
                         "Skipping index %s: column %s.%s does not exist yet",
-                        index_name, table, column,
+                        index_name,
+                        table,
+                        column,
                     )
                     continue
 
                 # Check if index already exists
-                existing_indexes = {
-                    idx["name"] for idx in insp.get_indexes(table)
-                }
+                existing_indexes = {idx["name"] for idx in insp.get_indexes(table)}
                 if index_name in existing_indexes:
                     continue
 
@@ -117,7 +302,9 @@ async def ensure_indexes(engine: AsyncEngine) -> list[str]:
                 created.append(index_name)
                 logger.info(
                     "Created missing index: %s ON %s(%s)",
-                    index_name, table, column,
+                    index_name,
+                    table,
+                    column,
                 )
 
         await conn.run_sync(_sync_check_and_create)
@@ -125,7 +312,8 @@ async def ensure_indexes(engine: AsyncEngine) -> list[str]:
     if created:
         logger.info(
             "Auto-migration complete: created %d index(es): %s",
-            len(created), ", ".join(created),
+            len(created),
+            ", ".join(created),
         )
     else:
         logger.debug("Auto-migration: all expected indexes already present")
