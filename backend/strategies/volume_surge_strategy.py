@@ -3,17 +3,28 @@
 Detects abnormal volume spikes and determines buy/sell signals
 based on price-volume confirmation patterns.
 
-Buy: Volume surge (≥ threshold) + price rising + trend confirmation
-Sell: Volume surge + price falling (distribution) OR held position weakening
+Buy: Volume surge (>= threshold) + price rising + positive momentum
+     + RSI probabilistic scoring (gradient, not binary)
+Sell: Volume surge + price falling (distribution)
 
-Key insight: Volume precedes price. A surge with rising price = accumulation (buy),
-a surge with falling price = distribution (sell).
+Key insight: Volume precedes price.
+  Surge + rising price = accumulation (buy).
+  Surge + falling price = distribution (sell).
+
+STOCK-72 enhancements:
+  - RSI probabilistic scoring: gradient contribution instead of
+    binary overbought cutoff. RSI 30-50 is best zone (+0.10),
+    50-65 neutral (+0.05), 65-75 slight penalty (+0.02),
+    75-85 strong penalty (-0.05), 85+ severe penalty (-0.10).
+  - Momentum AND condition: require both volume surge AND
+    positive momentum (3-bar ROC > 0) for BUY signals.
+  - New indicators: rsi_score, momentum_confirmed.
 """
 
 import pandas as pd
 
-from strategies.base import BaseStrategy, Signal
 from core.enums import SignalType
+from strategies.base import BaseStrategy, Signal
 
 
 class VolumeSurgeStrategy(BaseStrategy):
@@ -25,11 +36,19 @@ class VolumeSurgeStrategy(BaseStrategy):
 
     def __init__(self, params: dict | None = None):
         p = params or {}
-        self._volume_threshold = p.get("volume_threshold", 1.8)
-        self._confirmation_bars = p.get("confirmation_bars", 1)
-        self._min_price_change = p.get("min_price_change", 0.3)  # %
+        self._volume_threshold = p.get(
+            "volume_threshold", 1.8,
+        )
+        self._confirmation_bars = p.get(
+            "confirmation_bars", 1,
+        )
+        self._min_price_change = p.get(
+            "min_price_change", 0.3,
+        )  # %
 
-    async def analyze(self, df: pd.DataFrame, symbol: str) -> Signal:
+    async def analyze(
+        self, df: pd.DataFrame, symbol: str,
+    ) -> Signal:
         if len(df) < self.min_candles_required:
             return self._hold("Insufficient data")
 
@@ -49,77 +68,116 @@ class VolumeSurgeStrategy(BaseStrategy):
 
         volume_ratio = float(volume_ratio)
 
+        # RSI probabilistic score (STOCK-72)
+        rsi_score = self._calc_rsi_score(rsi)
+
+        # Price change analysis
+        prev_close = float(prev["close"])
+        price_change_pct = (
+            (price - prev_close) / prev_close * 100
+        )
+
+        # Multi-bar price momentum — 3-bar ROC
+        if len(df) >= 4:
+            close_3 = float(df.iloc[-4]["close"])
+            momentum_3d = (
+                (price - close_3) / close_3 * 100
+            )
+        else:
+            momentum_3d = price_change_pct
+
+        # Momentum AND condition (STOCK-72):
+        # Require positive 3-bar momentum for BUY signals
+        momentum_confirmed = momentum_3d > 0
+
         indicators = {
             "volume_ratio": volume_ratio,
-            "rsi": float(rsi) if rsi is not None and not pd.isna(rsi) else 50,
-            "adx": float(adx) if adx is not None and not pd.isna(adx) else 0,
-            "macd_histogram": float(macd_hist) if macd_hist is not None and not pd.isna(macd_hist) else 0,
+            "rsi": (
+                float(rsi)
+                if rsi is not None and not pd.isna(rsi)
+                else 50
+            ),
+            "adx": (
+                float(adx)
+                if adx is not None and not pd.isna(adx)
+                else 0
+            ),
+            "macd_histogram": (
+                float(macd_hist)
+                if macd_hist is not None
+                and not pd.isna(macd_hist)
+                else 0
+            ),
+            "rsi_score": rsi_score,
+            "momentum_confirmed": momentum_confirmed,
         }
 
         # Not a surge — hold
         if volume_ratio < self._volume_threshold:
-            return self._hold(f"Volume ratio {volume_ratio:.1f}x below threshold")
+            return self._hold(
+                f"Volume ratio {volume_ratio:.1f}x "
+                f"below threshold"
+            )
 
-        # Price change analysis
-        prev_close = float(prev["close"])
-        price_change_pct = (price - prev_close) / prev_close * 100
-
-        # Multi-bar price momentum (3-bar)
-        if len(df) >= 4:
-            close_3 = float(df.iloc[-4]["close"])
-            momentum_3d = (price - close_3) / close_3 * 100
-        else:
-            momentum_3d = price_change_pct
-
-        # OBV trend (rising = accumulation, falling = distribution)
+        # OBV trend (rising=accumulation, falling=distribution)
         obv_rising = False
-        if obv is not None and not pd.isna(obv) and len(df) >= 6:
+        if (
+            obv is not None
+            and not pd.isna(obv)
+            and len(df) >= 6
+        ):
             obv_5 = df.iloc[-6:-1]["obv"].dropna()
             if len(obv_5) >= 3:
-                obv_rising = float(obv) > float(obv_5.mean())
+                obv_rising = float(obv) > float(
+                    obv_5.mean()
+                )
 
         # Trend filter: price above EMA20
         above_ema = True
         if ema_20 is not None and not pd.isna(ema_20):
             above_ema = price > float(ema_20)
 
-        # Confirmation: check if previous bars also show volume interest
-        confirmed = self._check_confirmation(df)
-
         # === BUY SIGNAL ===
-        # Volume surge + price rising + trend/momentum confirmation
+        # STOCK-72: Volume surge + price rising
+        #   + momentum AND (3-bar ROC > 0)
+        #   + trend confirmation
         if (
             price_change_pct > self._min_price_change
-            and (momentum_3d > 0 or price_change_pct > 1.5)
-            and (above_ema or volume_ratio >= self._volume_threshold * 1.5)
+            and momentum_confirmed
+            and (
+                above_ema
+                or volume_ratio
+                >= self._volume_threshold * 1.5
+            )
         ):
             confidence = self._calc_buy_confidence(
-                volume_ratio, price_change_pct, rsi, adx, obv_rising,
+                volume_ratio,
+                price_change_pct,
+                rsi_score,
+                adx,
+                obv_rising,
             )
-
-            # RSI overbought filter — reduce confidence, don't buy into extreme
-            if rsi is not None and not pd.isna(rsi) and float(rsi) > 80:
-                return self._hold("Volume surge but RSI overbought")
 
             return Signal(
                 signal_type=SignalType.BUY,
                 confidence=confidence,
                 strategy_name=self.name,
                 reason=(
-                    f"Volume surge {volume_ratio:.1f}x with "
-                    f"price +{price_change_pct:.1f}% (accumulation)"
+                    f"Volume surge {volume_ratio:.1f}x "
+                    f"with price "
+                    f"+{price_change_pct:.1f}% "
+                    f"(accumulation)"
                 ),
                 suggested_price=price,
                 indicators=indicators,
             )
 
         # === SELL SIGNAL ===
-        # Volume surge + price falling = distribution pattern
+        # Volume surge + price falling = distribution
         if (
             price_change_pct < -self._min_price_change
             and volume_ratio >= self._volume_threshold
         ):
-            # Stronger sell if below EMA and MACD bearish
             bearish_macd = (
                 macd_hist is not None
                 and not pd.isna(macd_hist)
@@ -142,33 +200,82 @@ class VolumeSurgeStrategy(BaseStrategy):
                 confidence=confidence,
                 strategy_name=self.name,
                 reason=(
-                    f"Volume surge {volume_ratio:.1f}x with "
-                    f"price {price_change_pct:.1f}% (distribution)"
+                    f"Volume surge {volume_ratio:.1f}x "
+                    f"with price "
+                    f"{price_change_pct:.1f}% "
+                    f"(distribution)"
                 ),
                 suggested_price=price,
                 indicators=indicators,
             )
 
         return self._hold(
-            f"Volume surge {volume_ratio:.1f}x but no clear direction "
+            f"Volume surge {volume_ratio:.1f}x but "
+            f"no clear direction "
             f"(price {price_change_pct:+.1f}%)"
         )
 
-    def _check_confirmation(self, df: pd.DataFrame) -> bool:
-        """Check if volume has been elevated for N consecutive bars."""
+    @staticmethod
+    def _calc_rsi_score(rsi) -> float:
+        """RSI probabilistic score (STOCK-72).
+
+        Returns a gradient-based score reflecting how
+        favorable the RSI zone is for buying:
+          RSI < 30:  oversold, strong buy zone    → +0.10
+          30-50:     accumulation zone             → +0.10
+          50-65:     neutral/healthy               → +0.05
+          65-75:     warming, slight caution       → +0.02
+          75-85:     overbought, penalty           → -0.05
+          85+:       extreme overbought, strong    → -0.10
+          N/A:       neutral fallback              → 0.00
+        """
+        if rsi is None or pd.isna(rsi):
+            return 0.0
+        rsi_val = float(rsi)
+        if rsi_val < 30:
+            return 0.10
+        if rsi_val < 50:
+            return 0.10
+        if rsi_val < 65:
+            return 0.05
+        if rsi_val < 75:
+            return 0.02
+        if rsi_val < 85:
+            return -0.05
+        return -0.10
+
+    def _check_confirmation(
+        self, df: pd.DataFrame,
+    ) -> bool:
+        """Check volume elevated for N consecutive bars."""
         if len(df) < self._confirmation_bars + 1:
             return False
 
         for i in range(1, self._confirmation_bars + 1):
             vr = df.iloc[-(i + 1)].get("volume_ratio")
-            if vr is None or pd.isna(vr) or float(vr) < 1.5:
+            if (
+                vr is None
+                or pd.isna(vr)
+                or float(vr) < 1.5
+            ):
                 return False
         return True
 
     def _calc_buy_confidence(
-        self, volume_ratio: float, price_change: float,
-        rsi, adx, obv_rising: bool,
+        self,
+        volume_ratio: float,
+        price_change: float,
+        rsi_score: float,
+        adx,
+        obv_rising: bool,
     ) -> float:
+        """Calculate buy confidence with RSI gradient.
+
+        STOCK-72: Uses rsi_score (gradient) instead of
+        binary RSI zone check. This allows the RSI
+        contribution to smoothly scale confidence up
+        or down based on the current RSI level.
+        """
         conf = 0.50
 
         # Volume strength
@@ -186,22 +293,21 @@ class VolumeSurgeStrategy(BaseStrategy):
             conf += 0.05
 
         # Trend strength (ADX)
-        if adx is not None and not pd.isna(adx) and float(adx) > 25:
+        if (
+            adx is not None
+            and not pd.isna(adx)
+            and float(adx) > 25
+        ):
             conf += 0.10
 
-        # RSI in healthy zone (not overbought)
-        if rsi is not None and not pd.isna(rsi):
-            rsi_val = float(rsi)
-            if 45 < rsi_val < 65:
-                conf += 0.05
-            elif 65 <= rsi_val < 75:
-                conf += 0.02
+        # RSI probabilistic contribution (STOCK-72)
+        conf += rsi_score
 
         # OBV confirmation
         if obv_rising:
             conf += 0.05
 
-        return min(conf, 0.90)
+        return max(0.10, min(conf, 0.90))
 
     def _hold(self, reason: str) -> Signal:
         return Signal(
@@ -219,6 +325,15 @@ class VolumeSurgeStrategy(BaseStrategy):
         }
 
     def set_params(self, params: dict) -> None:
-        self._volume_threshold = params.get("volume_threshold", self._volume_threshold)
-        self._confirmation_bars = params.get("confirmation_bars", self._confirmation_bars)
-        self._min_price_change = params.get("min_price_change", self._min_price_change)
+        self._volume_threshold = params.get(
+            "volume_threshold",
+            self._volume_threshold,
+        )
+        self._confirmation_bars = params.get(
+            "confirmation_bars",
+            self._confirmation_bars,
+        )
+        self._min_price_change = params.get(
+            "min_price_change",
+            self._min_price_change,
+        )
