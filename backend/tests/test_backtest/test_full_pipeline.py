@@ -16,6 +16,7 @@ from backtest.full_pipeline import (
 )
 from backtest.data_loader import BacktestData
 from backtest.metrics import Trade
+from core.enums import SignalType
 
 
 def _make_ohlcv(n_days: int = 500, start_price: float = 100.0, trend: float = 0.0005) -> pd.DataFrame:
@@ -130,6 +131,7 @@ class TestRiskExits:
         config = PipelineConfig(universe=["AAPL"])
         engine = FullPipelineBacktest(config)
         engine._cash = 90_000
+        engine._day_count = 10  # Past min hold period
 
         # Create position at $100 with 5% SL
         engine._positions["AAPL"] = _Position(
@@ -158,6 +160,7 @@ class TestRiskExits:
         config = PipelineConfig(universe=["AAPL"])
         engine = FullPipelineBacktest(config)
         engine._cash = 90_000
+        engine._day_count = 10
 
         engine._positions["AAPL"] = _Position(
             symbol="AAPL", quantity=100, avg_price=100.0,
@@ -186,6 +189,7 @@ class TestRiskExits:
         )
         engine = FullPipelineBacktest(config)
         engine._cash = 90_000
+        engine._day_count = 10
 
         # Entry at 100, peaked at 110 (+10%), now at 106 (trail from 110: -3.6%)
         engine._positions["AAPL"] = _Position(
@@ -207,6 +211,151 @@ class TestRiskExits:
 
         engine._check_risk_exits(stock_data, 299, df.index[299])
         assert "AAPL" not in engine._positions
+
+
+class TestTradingGates:
+    """Trading gates: cooldown, whipsaw, min hold — matching live behavior."""
+
+    def test_sell_cooldown_blocks_rebuy(self):
+        """After selling, can't re-buy same symbol within cooldown period."""
+        config = PipelineConfig(
+            universe=["AAPL"], sell_cooldown_days=2,
+            dynamic_sl_tp=False, default_stop_loss_pct=0.08,
+            default_take_profit_pct=0.20,
+        )
+        engine = FullPipelineBacktest(config)
+        engine._cash = 100_000
+        engine._day_count = 5
+
+        # Record a recent sell
+        engine._sell_cooldown["AAPL"] = 4  # sold on day 4
+
+        signal = MagicMock()
+        signal.strategy_name = "momentum"
+        signal.confidence = 0.80
+        signal.signal_type = SignalType.BUY
+
+        df = _make_ohlcv(10, start_price=100.0)
+        from data.indicator_service import IndicatorService
+        df = IndicatorService.add_all_indicators(df)
+        stock_data = {"AAPL": BacktestData("AAPL", df, "2023-01-01", "2023-06-01")}
+
+        engine._execute_buy("AAPL", stock_data, 5, df.index[5], signal, "uptrend")
+        assert "AAPL" not in engine._positions  # Blocked by cooldown
+
+    def test_sell_cooldown_expires(self):
+        """After cooldown period, re-buy is allowed."""
+        config = PipelineConfig(
+            universe=["AAPL"], sell_cooldown_days=1,
+            dynamic_sl_tp=False, default_stop_loss_pct=0.08,
+            default_take_profit_pct=0.20,
+        )
+        engine = FullPipelineBacktest(config)
+        engine._cash = 100_000
+        engine._day_count = 5
+
+        engine._sell_cooldown["AAPL"] = 3  # sold on day 3, now day 5 → 2 days passed
+
+        signal = MagicMock()
+        signal.strategy_name = "momentum"
+        signal.confidence = 0.80
+        signal.signal_type = SignalType.BUY
+
+        df = _make_ohlcv(10, start_price=100.0)
+        from data.indicator_service import IndicatorService
+        df = IndicatorService.add_all_indicators(df)
+        stock_data = {"AAPL": BacktestData("AAPL", df, "2023-01-01", "2023-06-01")}
+
+        engine._execute_buy("AAPL", stock_data, 5, df.index[5], signal, "uptrend")
+        assert "AAPL" in engine._positions  # Cooldown expired
+
+    def test_whipsaw_blocks_after_losses(self):
+        """Two loss sells in 7 days blocks re-entry."""
+        config = PipelineConfig(
+            universe=["AAPL"], whipsaw_max_losses=2,
+            sell_cooldown_days=0,  # Disable cooldown to isolate whipsaw
+            dynamic_sl_tp=False, default_stop_loss_pct=0.08,
+            default_take_profit_pct=0.20,
+        )
+        engine = FullPipelineBacktest(config)
+        engine._cash = 100_000
+        engine._day_count = 10
+
+        # Two loss sells in last 7 days
+        engine._loss_sell_history["AAPL"] = [5, 8]
+
+        signal = MagicMock()
+        signal.strategy_name = "momentum"
+        signal.confidence = 0.80
+        signal.signal_type = SignalType.BUY
+
+        df = _make_ohlcv(15, start_price=100.0)
+        from data.indicator_service import IndicatorService
+        df = IndicatorService.add_all_indicators(df)
+        stock_data = {"AAPL": BacktestData("AAPL", df, "2023-01-01", "2023-06-01")}
+
+        engine._execute_buy("AAPL", stock_data, 10, df.index[10], signal, "uptrend")
+        assert "AAPL" not in engine._positions  # Blocked by whipsaw
+
+    def test_min_hold_prevents_early_sl(self):
+        """SL doesn't trigger if min hold not met and not hard SL."""
+        config = PipelineConfig(
+            universe=["AAPL"], min_hold_days=2,
+        )
+        engine = FullPipelineBacktest(config)
+        engine._cash = 90_000
+        engine._day_count = 1  # Just 1 day held (entry at day 0)
+
+        engine._positions["AAPL"] = _Position(
+            symbol="AAPL", quantity=100, avg_price=100.0,
+            entry_date="2023-06-01", strategy_name="test",
+            highest_price=100.0,
+            stop_loss_pct=0.05, take_profit_pct=0.20,
+            entry_day_count=0,
+        )
+
+        # Low breaches SL but only -7% (not hard SL at -15%)
+        df = _make_ohlcv(5, start_price=100.0)
+        df.iloc[1, df.columns.get_loc("low")] = 93.0
+        df.iloc[1, df.columns.get_loc("open")] = 97.0
+        df.iloc[1, df.columns.get_loc("close")] = 94.0
+
+        from data.indicator_service import IndicatorService
+        df = IndicatorService.add_all_indicators(df)
+        stock_data = {"AAPL": BacktestData("AAPL", df, "2023-01-01", "2023-06-01")}
+
+        engine._check_risk_exits(stock_data, 1, df.index[1])
+        assert "AAPL" in engine._positions  # Min hold prevents exit
+
+    def test_hard_sl_bypasses_min_hold(self):
+        """Hard SL (-15%+) triggers even if min hold not met."""
+        config = PipelineConfig(
+            universe=["AAPL"], min_hold_days=5, hard_sl_pct=0.15,
+        )
+        engine = FullPipelineBacktest(config)
+        engine._cash = 90_000
+        engine._day_count = 1
+
+        engine._positions["AAPL"] = _Position(
+            symbol="AAPL", quantity=100, avg_price=100.0,
+            entry_date="2023-06-01", strategy_name="test",
+            highest_price=100.0,
+            stop_loss_pct=0.05, take_profit_pct=0.20,
+            entry_day_count=0,
+        )
+
+        # Low at $83 = -17% (exceeds hard SL of 15%)
+        df = _make_ohlcv(5, start_price=100.0)
+        df.iloc[1, df.columns.get_loc("low")] = 83.0
+        df.iloc[1, df.columns.get_loc("open")] = 84.0
+        df.iloc[1, df.columns.get_loc("close")] = 84.0
+
+        from data.indicator_service import IndicatorService
+        df = IndicatorService.add_all_indicators(df)
+        stock_data = {"AAPL": BacktestData("AAPL", df, "2023-01-01", "2023-06-01")}
+
+        engine._check_risk_exits(stock_data, 1, df.index[1])
+        assert "AAPL" not in engine._positions  # Hard SL bypasses min hold
 
 
 class TestPortfolioEquity:

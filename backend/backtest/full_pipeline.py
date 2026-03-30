@@ -126,6 +126,12 @@ class PipelineConfig:
     # Re-entry after stop loss
     recovery_watch_days: int = 7  # Keep stopped-out symbols in eval set for N days
 
+    # Trading gates (matching live evaluation_loop behavior)
+    sell_cooldown_days: int = 1  # Block re-buy for N days after sell (0=disabled)
+    whipsaw_max_losses: int = 2  # Block re-buy after N loss sells in 7 days
+    min_hold_days: int = 1  # Minimum holding period in trading days
+    hard_sl_pct: float = 0.15  # Hard SL bypasses min hold (e.g. -15%)
+
     # Extended hours simulation (backtest-optimized)
     extended_hours_enabled: bool = False
     extended_hours_max_position_pct: float = 0.05  # 5% per position
@@ -170,6 +176,7 @@ class _Position:
     stop_loss_pct: float
     take_profit_pct: float
     session: str = "regular"  # "regular" or "extended"
+    entry_day_count: int = 0  # day_count at entry (for min hold check)
 
 
 @dataclass
@@ -286,6 +293,10 @@ class FullPipelineBacktest:
         # {symbol: day_count_when_sold}
         self._recovery_watch: dict[str, int] = {}
         self._day_count: int = 0
+
+        # Trading gates (matching live evaluation_loop)
+        self._sell_cooldown: dict[str, int] = {}  # symbol → day_count when sold
+        self._loss_sell_history: dict[str, list[int]] = {}  # symbol → [day_counts]
 
         # Daily buy limit tracking
         self._daily_buy_count: int = 0
@@ -877,9 +888,17 @@ class FullPipelineBacktest:
             if high > pos.highest_price:
                 pos.highest_price = high
 
+            # Min hold check: skip non-hard-SL exits if held too briefly
+            held_days = self._day_count - pos.entry_day_count
+            min_hold = self._config.min_hold_days
+            unrealized_pct = (low - pos.avg_price) / pos.avg_price
+            is_hard_sl = unrealized_pct <= -self._config.hard_sl_pct
+
             # Stop-loss (gap-through: open below SL → fill at open)
             sl_price = pos.avg_price * (1 - pos.stop_loss_pct)
             if low <= sl_price:
+                if held_days < min_hold and not is_hard_sl:
+                    continue  # Min hold not met, not hard SL
                 fill = open_price if open_price <= sl_price else sl_price
                 self._close_position(symbol, fill, date, "stop_loss")
                 continue
@@ -887,6 +906,8 @@ class FullPipelineBacktest:
             # Take-profit (gap-through: open above TP → fill at open)
             tp_price = pos.avg_price * (1 + pos.take_profit_pct)
             if high >= tp_price:
+                if held_days < min_hold:
+                    continue  # Min hold not met for TP
                 fill = open_price if open_price >= tp_price else tp_price
                 self._close_position(symbol, fill, date, "take_profit")
                 continue
@@ -898,6 +919,8 @@ class FullPipelineBacktest:
                 if gain >= cfg.trailing_activation_pct:
                     trail_price = pos.highest_price * (1 - cfg.trailing_trail_pct)
                     if low <= trail_price:
+                        if held_days < min_hold and not is_hard_sl:
+                            continue
                         fill = open_price if open_price <= trail_price else trail_price
                         self._close_position(
                             symbol, fill, date, "trailing_stop",
@@ -1173,6 +1196,7 @@ class FullPipelineBacktest:
                 stop_loss_pct=sl_pct,
                 take_profit_pct=tp_pct,
                 session="extended",
+                entry_day_count=self._day_count,
             )
             active_positions += 1
             ext_count += 1
@@ -1235,6 +1259,19 @@ class FullPipelineBacktest:
             return  # Already holding
 
         cfg = self._config
+
+        # Trading gate: sell cooldown
+        if cfg.sell_cooldown_days > 0 and symbol in self._sell_cooldown:
+            days_since = self._day_count - self._sell_cooldown[symbol]
+            if days_since < cfg.sell_cooldown_days:
+                return
+
+        # Trading gate: whipsaw counter
+        if cfg.whipsaw_max_losses > 0 and symbol in self._loss_sell_history:
+            cutoff = self._day_count - 7
+            recent = [d for d in self._loss_sell_history[symbol] if d >= cutoff]
+            if len(recent) >= cfg.whipsaw_max_losses:
+                return
         data = stock_data[symbol]
         if date_idx >= len(data.df):
             return
@@ -1317,6 +1354,7 @@ class FullPipelineBacktest:
             highest_price=exec_price,
             stop_loss_pct=sl_pct,
             take_profit_pct=tp_pct,
+            entry_day_count=self._day_count,
         )
 
     def _execute_sell(
@@ -1334,6 +1372,15 @@ class FullPipelineBacktest:
         data = stock_data.get(symbol)
         if not data or date_idx >= len(data.df):
             return
+
+        # Min hold check for signal-based sells
+        pos = self._positions[symbol]
+        held_days = self._day_count - pos.entry_day_count
+        if held_days < self._config.min_hold_days:
+            price = float(data.df.iloc[date_idx]["close"])
+            unrealized_pct = (price - pos.avg_price) / pos.avg_price
+            if unrealized_pct > -self._config.hard_sl_pct:
+                return  # Min hold not met, not hard SL
 
         price = float(data.df.iloc[date_idx]["close"])
         self._close_position(symbol, price, date, "signal_sell")
@@ -1387,8 +1434,17 @@ class FullPipelineBacktest:
 
         del self._positions[symbol]
 
-        # Add to recovery watch for re-entry evaluation
+        # Trading gate tracking
         if reason not in ("end_of_backtest",):
+            # Sell cooldown: record when this symbol was sold
+            self._sell_cooldown[symbol] = self._day_count
+            # Whipsaw tracking: record loss sells
+            if pnl < 0:
+                self._loss_sell_history.setdefault(symbol, []).append(
+                    self._day_count,
+                )
+
+            # Add to recovery watch for re-entry evaluation
             self._recovery_watch[symbol] = self._day_count
 
     def _close_all_positions(
