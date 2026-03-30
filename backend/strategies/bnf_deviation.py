@@ -9,8 +9,8 @@ Sell: price deviates above SMA by threshold (overbought)
 
 import pandas as pd
 
-from strategies.base import BaseStrategy, Signal
 from core.enums import SignalType
+from strategies.base import BaseStrategy, Signal
 
 
 class BNFDeviationStrategy(BaseStrategy):
@@ -26,6 +26,8 @@ class BNFDeviationStrategy(BaseStrategy):
         self._buy_deviation = p.get("buy_deviation", -5.0)
         self._sell_deviation = p.get("sell_deviation", 3.0)
         self._rsi_boost_threshold = p.get("rsi_boost_threshold", 35.0)
+        self._trend_filter_enabled = p.get("trend_filter_enabled", True)
+        self._trend_sma_period = p.get("trend_sma_period", 200)
 
     async def analyze(self, df: pd.DataFrame, symbol: str) -> Signal:
         if len(df) < self.min_candles_required:
@@ -39,16 +41,24 @@ class BNFDeviationStrategy(BaseStrategy):
 
         deviation = (price - sma) / sma * 100
         rsi = self._get_rsi(df)
+        trend_bearish = self._is_trend_bearish(df, price)
 
         indicators = {
             "deviation_pct": round(deviation, 2),
             "sma": round(sma, 2),
             "rsi": round(rsi, 2) if rsi is not None else None,
             "price": price,
+            "trend_bearish": trend_bearish,
         }
 
         # BUY: oversold deviation
         if deviation <= self._buy_deviation:
+            # Block buy in confirmed downtrend (catching falling knife)
+            if trend_bearish:
+                return self._hold(
+                    f"Oversold (dev={deviation:+.1f}%) but downtrend — buy suppressed"
+                )
+
             if deviation <= -10:
                 confidence = 0.85
             elif deviation <= -7:
@@ -96,6 +106,26 @@ class BNFDeviationStrategy(BaseStrategy):
             return float(df["close"].iloc[-self._sma_period:].mean())
         return None
 
+    def _is_trend_bearish(self, df: pd.DataFrame, price: float) -> bool:
+        """Check if price is in a confirmed downtrend using long-term SMA."""
+        if not self._trend_filter_enabled:
+            return False
+        trend_sma = self._get_trend_sma(df)
+        if trend_sma is None:
+            return False  # No data → assume neutral
+        return price < trend_sma
+
+    def _get_trend_sma(self, df: pd.DataFrame) -> float | None:
+        """Get long-term SMA (e.g. SMA-200) for trend determination."""
+        for col in [f"sma_{self._trend_sma_period}", f"SMA_{self._trend_sma_period}"]:
+            if col in df.columns:
+                val = df[col].iloc[-1]
+                if not pd.isna(val):
+                    return float(val)
+        if len(df) >= self._trend_sma_period:
+            return float(df["close"].iloc[-self._trend_sma_period:].mean())
+        return None
+
     def _get_rsi(self, df: pd.DataFrame) -> float | None:
         for col in ["rsi", "rsi_14", "RSI_14"]:
             if col in df.columns:
@@ -118,9 +148,12 @@ class BNFDeviationStrategy(BaseStrategy):
             "buy_deviation": self._buy_deviation,
             "sell_deviation": self._sell_deviation,
             "rsi_boost_threshold": self._rsi_boost_threshold,
+            "trend_filter_enabled": self._trend_filter_enabled,
+            "trend_sma_period": self._trend_sma_period,
         }
 
     def set_params(self, params: dict) -> None:
-        for key in ["sma_period", "buy_deviation", "sell_deviation", "rsi_boost_threshold"]:
+        for key in ["sma_period", "buy_deviation", "sell_deviation",
+                     "rsi_boost_threshold", "trend_filter_enabled", "trend_sma_period"]:
             if key in params:
                 setattr(self, f"_{key}", params[key])
