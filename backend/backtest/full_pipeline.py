@@ -78,6 +78,8 @@ class PipelineConfig:
     slippage_pct: float = 0.05  # 0.05%
     commission_per_order: float = 0.0
 
+    volume_adjusted_slippage: bool = True  # Scale slippage by participation rate
+
     # Screening
     screen_interval: int = 20  # Re-screen every N trading days
     max_watchlist: int = 30  # Max symbols in active watchlist
@@ -1245,6 +1247,20 @@ class FullPipelineBacktest:
     # Execution
     # ------------------------------------------------------------------
 
+    def _effective_slippage(self, volume: float, quantity: int) -> float:
+        """Return slippage pct adjusted by participation rate if enabled."""
+        base = self._config.slippage_pct
+        if not self._config.volume_adjusted_slippage or volume <= 0:
+            return base
+        participation = quantity / volume
+        if participation > 0.10:
+            return base * 3.0
+        if participation > 0.05:
+            return base * 2.0
+        if participation > 0.01:
+            return base * 1.5
+        return base
+
     def _execute_buy(
         self,
         symbol: str,
@@ -1313,8 +1329,12 @@ class FullPipelineBacktest:
         if not sizing.allowed:
             return
 
-        # Apply slippage
-        exec_price = price * (1 + cfg.slippage_pct / 100)
+        # Apply slippage (volume-adjusted if enabled)
+        row = data.df.iloc[date_idx]
+        volume = float(row["volume"]) if "volume" in row.index else 0
+        est_quantity = int(sizing.allocation_usd / price) if price > 0 else 0
+        slippage = self._effective_slippage(volume, est_quantity)
+        exec_price = price * (1 + slippage / 100)
         quantity = int(sizing.allocation_usd / exec_price)
         if quantity <= 0:
             return

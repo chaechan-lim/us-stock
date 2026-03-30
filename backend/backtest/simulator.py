@@ -39,6 +39,7 @@ class SimConfig:
     take_profit_pct: float = 0.0  # 0 = disabled, e.g. 0.20 = 20% TP
     trailing_stop_activation_pct: float = 0.0  # 0 = disabled
     trailing_stop_trail_pct: float = 0.0  # trail distance from peak
+    volume_adjusted_slippage: bool = False  # Scale slippage by participation rate
 
 
 class BacktestSimulator:
@@ -88,13 +89,14 @@ class BacktestSimulator:
             low = float(row["low"]) if "low" in row.index else price
 
             open_price = float(row["open"]) if "open" in row.index else price
+            volume = float(row["volume"]) if "volume" in row.index else 0
 
             # Check SL/TP/trailing stop on existing positions
             self._check_risk_exits(symbol, open_price, low, high, price, date)
 
             signal = signals.get(i)
             if signal:
-                self._process_signal(signal, symbol, price, date)
+                self._process_signal(signal, symbol, price, date, volume)
 
             # Update highest price for trailing stop
             pos = self._positions.get(symbol)
@@ -149,16 +151,32 @@ class BacktestSimulator:
                     self._close_position(symbol, fill, date)
                     return
 
+    def _effective_slippage(self, volume: float, quantity: int) -> float:
+        """Return slippage pct adjusted by participation rate if enabled."""
+        base = self._config.slippage_pct
+        if not self._config.volume_adjusted_slippage or volume <= 0:
+            return base
+        participation = quantity / volume
+        if participation > 0.10:
+            return base * 3.0
+        if participation > 0.05:
+            return base * 2.0
+        if participation > 0.01:
+            return base * 1.5
+        return base
+
     def _process_signal(
-        self, signal: Signal, symbol: str, price: float, date
+        self, signal: Signal, symbol: str, price: float, date,
+        volume: float = 0,
     ) -> None:
         if signal.signal_type == SignalType.BUY:
-            self._open_position(symbol, price, date, signal)
+            self._open_position(symbol, price, date, signal, volume)
         elif signal.signal_type == SignalType.SELL:
             self._close_position(symbol, price, date)
 
     def _open_position(
-        self, symbol: str, price: float, date, signal: Signal
+        self, symbol: str, price: float, date, signal: Signal,
+        volume: float = 0,
     ) -> None:
         if symbol in self._positions:
             return  # Already holding
@@ -172,7 +190,8 @@ class BacktestSimulator:
             return
 
         # Apply slippage (buy higher)
-        exec_price = price * (1 + self._config.slippage_pct / 100)
+        slippage = self._effective_slippage(volume, int(allocation / price))
+        exec_price = price * (1 + slippage / 100)
         quantity = int(allocation / exec_price)
         if quantity <= 0:
             return

@@ -426,6 +426,82 @@ class TestGapThrough:
         assert trade.exit_price == 115.0
 
 
+class TestVolumeAdjustedSlippage:
+    """Volume-adjusted slippage scales by participation rate."""
+
+    def test_high_volume_base_slippage(self):
+        """High volume → base slippage (participation < 1%)."""
+        config = SimConfig(
+            initial_equity=100_000, slippage_pct=0.05,
+            volume_adjusted_slippage=True, max_position_pct=0.10,
+        )
+        sim = BacktestSimulator(config)
+
+        # Volume = 10M, buying ~$10K = ~100 shares = 0.001% participation
+        prices = [100.0] * 5
+        dates = pd.bdate_range("2021-01-01", periods=5)
+        df = pd.DataFrame({
+            "open": prices, "high": [101] * 5, "low": [99] * 5,
+            "close": prices, "volume": [10_000_000] * 5,
+        }, index=dates)
+
+        signals = {1: _buy_signal()}
+        sim.run(df, signals, "AAPL")
+
+        assert "AAPL" in sim.positions
+        pos = sim.positions["AAPL"]
+        # Should be base slippage: 100 * 1.0005 = 100.05
+        assert abs(pos.avg_price - 100.05) < 0.01
+
+    def test_low_volume_higher_slippage(self):
+        """Low volume → 3x slippage (participation > 10%)."""
+        config = SimConfig(
+            initial_equity=100_000, slippage_pct=0.05,
+            volume_adjusted_slippage=True, max_position_pct=0.10,
+        )
+        sim = BacktestSimulator(config)
+
+        # Volume = 50, buying ~$10K = ~100 shares = 200% participation → 3x
+        prices = [100.0] * 5
+        dates = pd.bdate_range("2021-01-01", periods=5)
+        df = pd.DataFrame({
+            "open": prices, "high": [101] * 5, "low": [99] * 5,
+            "close": prices, "volume": [50] * 5,
+        }, index=dates)
+
+        signals = {1: _buy_signal()}
+        sim.run(df, signals, "AAPL")
+
+        assert "AAPL" in sim.positions
+        pos = sim.positions["AAPL"]
+        # Should be 3x slippage: 100 * 1.0015 = 100.15
+        assert abs(pos.avg_price - 100.15) < 0.01
+
+    def test_disabled_uses_base_slippage(self):
+        """volume_adjusted_slippage=False → always base slippage."""
+        config = SimConfig(
+            initial_equity=100_000, slippage_pct=0.05,
+            volume_adjusted_slippage=False, max_position_pct=0.10,
+        )
+        sim = BacktestSimulator(config)
+
+        # Very low volume but feature disabled
+        prices = [100.0] * 5
+        dates = pd.bdate_range("2021-01-01", periods=5)
+        df = pd.DataFrame({
+            "open": prices, "high": [101] * 5, "low": [99] * 5,
+            "close": prices, "volume": [10] * 5,
+        }, index=dates)
+
+        signals = {1: _buy_signal()}
+        sim.run(df, signals, "AAPL")
+
+        assert "AAPL" in sim.positions
+        pos = sim.positions["AAPL"]
+        # Base slippage only
+        assert abs(pos.avg_price - 100.05) < 0.01
+
+
 class TestSimConfig:
     def test_defaults(self):
         c = SimConfig()
