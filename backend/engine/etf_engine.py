@@ -762,7 +762,7 @@ class ETFEngine:
         if session_factory:
             try:
                 from core.models import Order  # already cached in sys.modules if first import succeeded
-                cutoff = datetime.now(timezone.utc) - timedelta(
+                cutoff = datetime.utcnow() - timedelta(
                     hours=self._risk.sell_cooldown_hours,
                 )
                 async with session_factory() as session:

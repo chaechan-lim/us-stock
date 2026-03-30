@@ -1171,19 +1171,18 @@ class TestRestoreSellCooldownSeeding:
         assert engine._last_sell_times == {}
 
     @pytest.mark.asyncio
-    async def test_cutoff_datetime_is_timezone_aware(
+    async def test_cutoff_datetime_is_timezone_naive(
         self, engine, mock_market_data,
     ):
-        """Cutoff datetime passed to DB query must be timezone-aware (offset-aware).
+        """Cutoff datetime passed to DB query must be timezone-naive (offset-naive).
 
-        Regression test for:
+        Regression test for STOCK-64:
             invalid input for query argument $3:
             can't subtract offset-naive and offset-aware datetimes
 
-        PostgreSQL rejects comparisons between offset-naive and offset-aware
-        datetimes.  The cutoff used in the sell-cooldown DB query must carry
-        tzinfo so that SQLAlchemy/asyncpg can bind it correctly against the
-        timezone-aware ``created_at`` column.
+        The DB column ``created_at`` is ``timestamp without time zone`` and
+        stores UTC-naive values via ``datetime.utcnow()``.  The cutoff must
+        also be naive (``datetime.utcnow()``) so asyncpg can compare them.
         """
         pos = MagicMock(symbol="TQQQ", quantity=100, current_price=55.0, avg_price=50.0)
         mock_market_data.get_positions.return_value = [pos]
@@ -1240,8 +1239,8 @@ class TestRestoreSellCooldownSeeding:
             "Check that the factory correctly intercepts the statement."
         )
         for cutoff in captured_cutoffs:
-            assert cutoff.tzinfo is not None, (
-                f"Cutoff datetime {cutoff!r} is offset-naive. "
-                "Use datetime.now(timezone.utc) to produce an offset-aware cutoff "
-                "so PostgreSQL can compare it against timezone-aware created_at values."
+            assert cutoff.tzinfo is None, (
+                f"Cutoff datetime {cutoff!r} is offset-aware. "
+                "Use datetime.utcnow() to produce an offset-naive cutoff "
+                "matching the 'timestamp without time zone' DB column."
             )
