@@ -715,7 +715,7 @@ async def lifespan(app: FastAPI):
                             "strategy": change.get("strategy", ""),
                             "status": "filled",
                             "market": "US",
-                            "created_at": datetime.now().isoformat(),
+                            "created_at": datetime.utcnow().isoformat(),
                         }
                     )
                     # STOCK-52: When a pending SELL order is confirmed filled,
@@ -1534,7 +1534,7 @@ async def lifespan(app: FastAPI):
                             "strategy": change.get("strategy", ""),
                             "status": "filled",
                             "market": "KR",
-                            "created_at": datetime.now().isoformat(),
+                            "created_at": datetime.utcnow().isoformat(),
                         }
                     )
                     # STOCK-52: When a pending SELL order is confirmed filled,
