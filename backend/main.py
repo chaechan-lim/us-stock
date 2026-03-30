@@ -223,12 +223,13 @@ async def lifespan(app: FastAPI):
     be_lock_ratio = be_cfg.get("lock_ratio", 0.75)
     be_lock_pct = be_cfg.get("lock_pct", 0.50)
 
+    # STOCK-66: US optimized params (grid search: +19.2%, Sharpe 1.43, MDD -5.4%)
     risk_params = RiskParams(
         market_allocations=market_allocs,
-        max_position_pct=0.08,  # 8% per position (diversified, backtest optimal)
-        max_positions=20,  # More positions, better diversification
-        default_stop_loss_pct=0.12,  # Wider SL: more room for volatility
-        default_take_profit_pct=0.20,  # Realistic TP: capture gains before reversal
+        max_position_pct=0.20,  # 20% per position (concentrated, backtest optimal)
+        max_positions=8,  # Fewer, bigger positions
+        default_stop_loss_pct=0.10,  # 10% SL (grid search optimal)
+        default_take_profit_pct=0.15,  # 15% TP (grid search optimal)
         tiered_trailing_tiers=tiered_tiers,
         breakeven_stop_enabled=be_enabled,
         breakeven_stop_activation_ratio=be_activation,
@@ -236,6 +237,9 @@ async def lifespan(app: FastAPI):
         breakeven_stop_lock_pct=be_lock_pct,
     )
     risk_manager = RiskManager(params=risk_params)
+    # STOCK-66: US Kelly sizing — full Kelly, 12% min position
+    risk_manager._kelly._kelly_fraction = 1.00
+    risk_manager._kelly._min_position_pct = 0.12
 
     # KR-specific risk params: STOCK-65 grid-search optimized settings
     kr_risk_cfg = registry.config_loader.get_market_risk_config("KR")
@@ -473,6 +477,20 @@ async def lifespan(app: FastAPI):
     evaluation_loop._hard_sl_pct = registry.config_loader.get_hard_sl_pct()
     evaluation_loop.set_cache(cache)
     position_tracker.register_on_sell(evaluation_loop.register_sell_cooldown)
+    # STOCK-66: US market-specific strategy selection
+    # Grid search optimal: only sector_rotation + volume_profile + volume_surge
+    _all_strategies = [
+        "trend_following", "donchian_breakout", "supertrend", "macd_histogram",
+        "dual_momentum", "rsi_divergence", "bollinger_squeeze", "volume_profile",
+        "regime_switch", "sector_rotation", "cis_momentum", "larry_williams",
+        "bnf_deviation", "volume_surge",
+    ]
+    _us_enabled = {"sector_rotation", "volume_profile", "volume_surge"}
+    evaluation_loop.set_disabled_strategies(
+        [s for s in _all_strategies if s not in _us_enabled]
+    )
+    evaluation_loop.set_min_confidence(0.30)
+    evaluation_loop.set_min_active_ratio(0.0)
     app.state.evaluation_loop = evaluation_loop
 
     # Stock scanner & sector analyzer

@@ -14,7 +14,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import TYPE_CHECKING, Any
+from typing import Any, TYPE_CHECKING
 
 import pandas as pd
 
@@ -119,23 +119,15 @@ class EvaluationLoop:
         from collections import deque
 
         self._recent_signals: deque[dict] = deque(maxlen=200)
-        # STOCK-65: Market-specific disabled strategies (e.g. KR only runs supertrend+dual_momentum)
+        # STOCK-65/66: Market-specific disabled strategies
         self._disabled_strategies: frozenset[str] = frozenset()
-        # STOCK-65: Per-market min_confidence override (None = use combiner default 0.35)
+        # STOCK-65/66: Per-market min_confidence override (None = use combiner default)
         self._min_confidence: float | None = None
-        # STOCK-65: Per-market min_active_ratio override (None = use 0.15 for held, else None)
+        # STOCK-65/66: Per-market min_active_ratio override (None = use per-call defaults)
         self._min_active_ratio: float | None = None
 
     def set_disabled_strategies(self, names: list[str]) -> None:
-        """Set market-specific disabled strategy names.
-
-        STOCK-65: Allows per-market strategy filtering without modifying the
-        global StrategyRegistry. Strategies listed here are excluded from
-        evaluation even if globally enabled in strategies.yaml.
-
-        Args:
-            names: List of strategy names to disable for this market.
-        """
+        """Set market-specific disabled strategy names."""
         self._disabled_strategies = frozenset(names)
         logger.info(
             "Market %s: disabled strategies = %s",
@@ -144,39 +136,21 @@ class EvaluationLoop:
         )
 
     def set_min_confidence(self, value: float | None) -> None:
-        """Set per-market minimum confidence threshold for signal combining.
-
-        STOCK-65: Provides a proper setter with validation and audit logging,
-        matching the pattern of set_disabled_strategies().
-
-        Args:
-            value: Confidence floor in [0, 1], or None to use combiner default.
-        """
+        """Set per-market minimum confidence threshold for signal combining."""
         if value is not None and not (0.0 <= value <= 1.0):
             raise ValueError(f"min_confidence must be in [0, 1], got {value}")
         self._min_confidence = value
         logger.info("Market %s: min_confidence = %s", self._market, value)
 
     def set_min_active_ratio(self, value: float | None) -> None:
-        """Set per-market minimum active signal ratio for signal combining.
-
-        STOCK-65: When set, this overrides the default held-position logic
-        (0.15 for held symbols) unconditionally for all evaluations in this market.
-
-        Args:
-            value: Active ratio floor in [0, 1], or None to use per-call defaults.
-        """
+        """Set per-market minimum active signal ratio for signal combining."""
         if value is not None and not (0.0 <= value <= 1.0):
             raise ValueError(f"min_active_ratio must be in [0, 1], got {value}")
         self._min_active_ratio = value
         logger.info("Market %s: min_active_ratio = %s", self._market, value)
 
     def set_sell_cooldown_secs(self, value: int) -> None:
-        """Set the sell-cooldown duration for this market instance.
-
-        STOCK-65: Replaces direct private-attribute assignment with a validated
-        setter, matching the set_min_confidence / set_min_active_ratio pattern.
-        """
+        """Set the sell-cooldown duration for this market instance."""
         if value < 0:
             raise ValueError(f"sell_cooldown_secs must be >= 0, got {value}")
         self._sell_cooldown_secs = value
@@ -199,11 +173,7 @@ class EvaluationLoop:
         )
 
     def _get_active_strategies(self) -> list[BaseStrategy]:
-        """Return enabled strategies minus the market-specific disabled list.
-
-        STOCK-65: Centralises the disabled-strategy filtering so both
-        evaluate_symbol() and tests call the same production code path.
-        """
+        """Return enabled strategies minus the market-specific disabled list."""
         all_strategies = self._registry.get_enabled()
         if not self._disabled_strategies:
             return all_strategies
@@ -433,7 +403,7 @@ class EvaluationLoop:
             # Add indicators
             df = self._indicator_svc.add_all_indicators(df)
 
-            # Run all enabled strategies (filter market-specific disabled list)
+            # Run all enabled strategies (filtered by market-specific disabled list)
             strategies = self._get_active_strategies()
             signals: list[Signal] = []
             for strategy in strategies:
@@ -486,7 +456,7 @@ class EvaluationLoop:
                     signals = evaluated
 
             # Combine signals with per-stock weights
-            # STOCK-65: per-market overrides take unconditional precedence;
+            # STOCK-65/66: per-market overrides take precedence;
             # fall back to global defaults (0.15 for held, None otherwise).
             combine_kwargs: dict[str, Any] = {
                 "min_active_ratio": (
@@ -608,7 +578,7 @@ class EvaluationLoop:
                 self._maybe_classify(symbol, df)
                 df = self._indicator_svc.add_all_indicators(df)
 
-                strategies = self._registry.get_enabled()
+                strategies = self._get_active_strategies()
                 signals = []
                 for strategy in strategies:
                     try:
@@ -691,7 +661,12 @@ class EvaluationLoop:
                         held_sell_bias=_hsb,
                     )
                 else:
-                    combined = self._combiner.combine(signals, weights)
+                    _ckw: dict[str, Any] = {}
+                    if self._min_confidence is not None:
+                        _ckw["min_confidence"] = self._min_confidence
+                    if self._min_active_ratio is not None:
+                        _ckw["min_active_ratio"] = self._min_active_ratio
+                    combined = self._combiner.combine(signals, weights, **_ckw)
 
                 # Sell on indifference: if no strategy has a strong opinion
                 # (HOLD) and the held position is losing beyond threshold,

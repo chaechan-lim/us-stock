@@ -1,0 +1,340 @@
+{
+  "key": "949d7cf11c1008f6",
+  "strategy": "sl_tp_trend_following",
+  "symbol": "AAPL,JPM,MSFT,NVDA,XOM",
+  "period": "3y",
+  "mode": "sl_tp",
+  "params": {},
+  "timestamp": "2026-03-26T22:57:01.587497",
+  "result": {
+    "strategy": "trend_following",
+    "best_preset": "trailing_wide",
+    "best_config": {
+      "stop_loss_pct": 0.1,
+      "take_profit_pct": 0.0,
+      "trailing_stop_activation_pct": 0.08,
+      "trailing_stop_trail_pct": 0.05
+    },
+    "all_presets": {
+      "conservative": {
+        "config": {
+          "stop_loss_pct": 0.05,
+          "take_profit_pct": 0.15,
+          "trailing_stop_activation_pct": 0.0,
+          "trailing_stop_trail_pct": 0.0
+        },
+        "avg_sharpe_ratio": -0.011722363383717165,
+        "avg_cagr": 0.05566119256254407,
+        "avg_win_rate": 42.89341377576672,
+        "per_symbol": {
+          "AAPL": {
+            "sharpe_ratio": -0.004074830145100362,
+            "cagr": 0.03648244499990949,
+            "max_drawdown_pct": -13.857385505203968,
+            "win_rate": 44.44444444444444,
+            "total_trades": 9,
+            "profit_factor": 1.9358932663196156
+          },
+          "MSFT": {
+            "sharpe_ratio": -0.6287034873319721,
+            "cagr": -0.012937916696016294,
+            "max_drawdown_pct": -19.728966554616775,
+            "win_rate": 25.0,
+            "total_trades": 12,
+            "profit_factor": 0.8080163695881646
+          },
+          "NVDA": {
+            "sharpe_ratio": 0.969798126590424,
+            "cagr": 0.21208574078176867,
+            "max_drawdown_pct": -13.744454816129933,
+            "win_rate": 41.17647058823529,
+            "total_trades": 17,
+            "profit_factor": 2.559322806683012
+          },
+          "JPM": {
+            "sharpe_ratio": -0.2606840648887331,
+            "cagr": 0.014264625046982449,
+            "max_drawdown_pct": -18.027081848576092,
+            "win_rate": 53.84615384615385,
+            "total_trades": 13,
+            "profit_factor": 1.1833270786542145
+          },
+          "XOM": {
+            "sharpe_ratio": -0.13494756114320425,
+            "cagr": 0.028411068680076035,
+            "max_drawdown_pct": -8.742047358897723,
+            "win_rate": 50.0,
+            "total_trades": 6,
+            "profit_factor": 1.228108796533767
+          }
+        }
+      },
+      "moderate": {
+        "config": {
+          "stop_loss_pct": 0.08,
+          "take_profit_pct": 0.2,
+          "trailing_stop_activation_pct": 0.0,
+          "trailing_stop_trail_pct": 0.0
+        },
+        "avg_sharpe_ratio": 0.0821484387542393,
+        "avg_cagr": 0.06345538163288147,
+        "avg_win_rate": 45.22222222222222,
+        "per_symbol": {
+          "AAPL": {
+            "sharpe_ratio": 0.1536633946193047,
+            "cagr": 0.05089082569303982,
+            "max_drawdown_pct": -13.813641869820911,
+            "win_rate": 44.44444444444444,
+            "total_trades": 9,
+            "profit_factor": 2.2802292234473542
+          },
+          "MSFT": {
+            "sharpe_ratio": -0.41069906446014887,
+            "cagr": 0.0012588307963259382,
+            "max_drawdown_pct": -19.651434527132174,
+            "win_rate": 25.0,
+            "total_trades": 12,
+            "profit_factor": 1.0190151722092355
+          },
+          "NVDA": {
+            "sharpe_ratio": 0.9221708802888943,
+            "cagr": 0.21445306975163891,
+            "max_drawdown_pct": -14.742368921137292,
+            "win_rate": 58.333333333333336,
+            "total_trades": 12,
+            "profit_factor": 3.067188156200308
+          },
+          "JPM": {
+            "sharpe_ratio": -0.31269779489372523,
+            "cagr": 0.0083196514786128,
+            "max_drawdown_pct": -19.700591311152778,
+            "win_rate": 58.333333333333336,
+            "total_trades": 12,
+            "profit_factor": 1.1390666172988664
+          },
+          "XOM": {
+            "sharpe_ratio": 0.05830477821687161,
+            "cagr": 0.04235453044478987,
+            "max_drawdown_pct": -9.207823924718964,
+            "win_rate": 40.0,
+            "total_trades": 5,
+            "profit_factor": 1.5867106132306517
+          }
+        }
+      },
+      "wide": {
+        "config": {
+          "stop_loss_pct": 0.12,
+          "take_profit_pct": 0.3,
+          "trailing_stop_activation_pct": 0.0,
+          "trailing_stop_trail_pct": 0.0
+        },
+        "avg_sharpe_ratio": 0.046307211913121586,
+        "avg_cagr": 0.06535978825735192,
+        "avg_win_rate": 45.1010101010101,
+        "per_symbol": {
+          "AAPL": {
+            "sharpe_ratio": -0.036622947410017516,
+            "cagr": 0.03269993206740884,
+            "max_drawdown_pct": -15.814673817642147,
+            "win_rate": 44.44444444444444,
+            "total_trades": 9,
+            "profit_factor": 1.84909251483312
+          },
+          "MSFT": {
+            "sharpe_ratio": -0.5232761185031034,
+            "cagr": -0.006104548126618425,
+            "max_drawdown_pct": -19.651434527132174,
+            "win_rate": 27.27272727272727,
+            "total_trades": 11,
+            "profit_factor": 0.8925814483906543
+          },
+          "NVDA": {
+            "sharpe_ratio": 1.0685718508308333,
+            "cagr": 0.25134959980257965,
+            "max_drawdown_pct": -18.654537086270974,
+            "win_rate": 45.45454545454545,
+            "total_trades": 11,
+            "profit_factor": 3.877797930549246
+          },
+          "JPM": {
+            "sharpe_ratio": -0.31269779489372523,
+            "cagr": 0.0083196514786128,
+            "max_drawdown_pct": -19.700591311152778,
+            "win_rate": 58.333333333333336,
+            "total_trades": 12,
+            "profit_factor": 1.1390666172988664
+          },
+          "XOM": {
+            "sharpe_ratio": 0.03556106954162077,
+            "cagr": 0.040534306064776704,
+            "max_drawdown_pct": -9.207823924718964,
+            "win_rate": 50.0,
+            "total_trades": 4,
+            "profit_factor": 1.8477129088239195
+          }
+        }
+      },
+      "trailing_tight": {
+        "config": {
+          "stop_loss_pct": 0.08,
+          "take_profit_pct": 0.0,
+          "trailing_stop_activation_pct": 0.05,
+          "trailing_stop_trail_pct": 0.03
+        },
+        "avg_sharpe_ratio": 0.057949867615015596,
+        "avg_cagr": 0.06742589347532071,
+        "avg_win_rate": 52.84498207885305,
+        "per_symbol": {
+          "AAPL": {
+            "sharpe_ratio": -0.07643986433729888,
+            "cagr": 0.030966502645298766,
+            "max_drawdown_pct": -10.9733530469914,
+            "win_rate": 50.0,
+            "total_trades": 14,
+            "profit_factor": 1.6727240512778745
+          },
+          "MSFT": {
+            "sharpe_ratio": -0.6525311759695049,
+            "cagr": -0.014807433030440742,
+            "max_drawdown_pct": -18.38518852506542,
+            "win_rate": 31.25,
+            "total_trades": 16,
+            "profit_factor": 0.828602422895596
+          },
+          "NVDA": {
+            "sharpe_ratio": 1.3219239296195695,
+            "cagr": 0.27185217949455476,
+            "max_drawdown_pct": -12.653480277682858,
+            "win_rate": 77.41935483870968,
+            "total_trades": 31,
+            "profit_factor": 3.5719145236816225
+          },
+          "JPM": {
+            "sharpe_ratio": -0.16887559703264354,
+            "cagr": 0.02207113228691404,
+            "max_drawdown_pct": -19.666418528754516,
+            "win_rate": 50.0,
+            "total_trades": 14,
+            "profit_factor": 1.2559615917620595
+          },
+          "XOM": {
+            "sharpe_ratio": -0.13432795420504418,
+            "cagr": 0.02704708598027672,
+            "max_drawdown_pct": -9.527926257340019,
+            "win_rate": 55.55555555555556,
+            "total_trades": 9,
+            "profit_factor": 1.5251121639398861
+          }
+        }
+      },
+      "trailing_wide": {
+        "config": {
+          "stop_loss_pct": 0.1,
+          "take_profit_pct": 0.0,
+          "trailing_stop_activation_pct": 0.08,
+          "trailing_stop_trail_pct": 0.05
+        },
+        "avg_sharpe_ratio": 0.12065971434756399,
+        "avg_cagr": 0.07398217167889812,
+        "avg_win_rate": 48.710407239819006,
+        "per_symbol": {
+          "AAPL": {
+            "sharpe_ratio": -0.0034338748255387107,
+            "cagr": 0.03622802791243096,
+            "max_drawdown_pct": -13.816101082081229,
+            "win_rate": 50.0,
+            "total_trades": 10,
+            "profit_factor": 1.9346598334911247
+          },
+          "MSFT": {
+            "sharpe_ratio": -0.45152512057257566,
+            "cagr": 0.0008395772296780901,
+            "max_drawdown_pct": -18.433167022637814,
+            "win_rate": 25.0,
+            "total_trades": 12,
+            "profit_factor": 1.0135533974882578
+          },
+          "NVDA": {
+            "sharpe_ratio": 1.2265968250521833,
+            "cagr": 0.2723850914834425,
+            "max_drawdown_pct": -16.90890850882361,
+            "win_rate": 64.70588235294117,
+            "total_trades": 17,
+            "profit_factor": 3.1927623195565573
+          },
+          "JPM": {
+            "sharpe_ratio": -0.21174606085401626,
+            "cagr": 0.019188561627137224,
+            "max_drawdown_pct": -16.78179985557035,
+            "win_rate": 53.84615384615385,
+            "total_trades": 13,
+            "profit_factor": 1.3032075045354843
+          },
+          "XOM": {
+            "sharpe_ratio": 0.043406802937767316,
+            "cagr": 0.04126960014180181,
+            "max_drawdown_pct": -9.207823924718964,
+            "win_rate": 50.0,
+            "total_trades": 6,
+            "profit_factor": 1.6526637803340891
+          }
+        }
+      },
+      "none": {
+        "config": {
+          "stop_loss_pct": 0.0,
+          "take_profit_pct": 0.0,
+          "trailing_stop_activation_pct": 0.0,
+          "trailing_stop_trail_pct": 0.0
+        },
+        "avg_sharpe_ratio": 0.023108421230281402,
+        "avg_cagr": 0.06088779769801169,
+        "avg_win_rate": 46.01010101010101,
+        "per_symbol": {
+          "AAPL": {
+            "sharpe_ratio": -0.036622947410017516,
+            "cagr": 0.03269993206740884,
+            "max_drawdown_pct": -15.814673817642147,
+            "win_rate": 44.44444444444444,
+            "total_trades": 9,
+            "profit_factor": 1.84909251483312
+          },
+          "MSFT": {
+            "sharpe_ratio": -0.5232761185031034,
+            "cagr": -0.006104548126618425,
+            "max_drawdown_pct": -19.651434527132174,
+            "win_rate": 27.27272727272727,
+            "total_trades": 11,
+            "profit_factor": 0.8925814483906543
+          },
+          "NVDA": {
+            "sharpe_ratio": 0.9525778974166323,
+            "cagr": 0.22898964700587854,
+            "max_drawdown_pct": -18.650474260419156,
+            "win_rate": 50.0,
+            "total_trades": 8,
+            "profit_factor": 4.44974164133374
+          },
+          "JPM": {
+            "sharpe_ratio": -0.31269779489372523,
+            "cagr": 0.0083196514786128,
+            "max_drawdown_pct": -19.700591311152778,
+            "win_rate": 58.333333333333336,
+            "total_trades": 12,
+            "profit_factor": 1.1390666172988664
+          },
+          "XOM": {
+            "sharpe_ratio": 0.03556106954162077,
+            "cagr": 0.040534306064776704,
+            "max_drawdown_pct": -9.207823924718964,
+            "win_rate": 50.0,
+            "total_trades": 4,
+            "profit_factor": 1.8477129088239195
+          }
+        }
+      }
+    },
+    "elapsed_sec": 2.836163946078159
+  }
+}
