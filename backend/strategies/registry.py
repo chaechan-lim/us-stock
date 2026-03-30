@@ -65,6 +65,11 @@ class StrategyRegistry:
                 self._strategies[name] = cls(params=params)
                 logger.info("Loaded strategy: %s", name)
 
+    @property
+    def config_loader(self) -> StrategyConfigLoader:
+        """Public accessor for the config loader (avoids coupling callers to internal layout)."""
+        return self._config_loader
+
     def get(self, name: str) -> BaseStrategy | None:
         return self._strategies.get(name)
 

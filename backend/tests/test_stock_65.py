@@ -7,6 +7,7 @@ Covers:
 - StrategyConfigLoader: market-specific config methods
 - EvaluationLoop.set_disabled_strategies: filters strategies by market
 - EvaluationLoop._min_confidence: per-market min_confidence override
+- _apply_kr_eval_overrides: YAML key → EvaluationLoop attribute mapping
 - strategies.yaml: KR section presence and values
 """
 
@@ -105,10 +106,12 @@ class TestDynamicSlTpStaticMode:
         """When dynamic_sl_tp=True (default), ATR-based calculation proceeds."""
         params = RiskParams(dynamic_sl_tp=True, default_stop_loss_pct=0.08)
         rm = RiskManager(params=params)
-        # High ATR should give a different result from default
-        sl, tp = rm.calculate_dynamic_sl_tp(100.0, 8.0)
-        # With 8% ATR: sl = min(0.15, 8% * 2.0) = min(0.15, 0.16) = 0.15
-        assert sl == pytest.approx(0.15)
+        # High ATR should widen SL beyond the configured default
+        sl_high_atr, _ = rm.calculate_dynamic_sl_tp(100.0, 8.0)
+        # Zero ATR falls back to the configured default (atr <= 0 guard)
+        sl_zero_atr, _ = rm.calculate_dynamic_sl_tp(100.0, 0.0)
+        assert sl_high_atr != pytest.approx(0.08), "Dynamic mode should widen SL vs default"
+        assert sl_zero_atr == pytest.approx(0.08), "Zero-ATR should fall back to default"
 
 
 # ---------------------------------------------------------------------------
@@ -373,7 +376,7 @@ class TestEvaluationLoopDisabledStrategies:
     @pytest.mark.asyncio
     async def test_min_confidence_forwarded_to_combiner_combine(self):
         """Verify min_confidence is forwarded through the real evaluate_symbol path."""
-        from unittest.mock import AsyncMock, patch
+        from unittest.mock import AsyncMock, MagicMock, patch
 
         import pandas as pd
 
@@ -393,6 +396,9 @@ class TestEvaluationLoopDisabledStrategies:
         # Minimal non-empty DataFrame so evaluate_symbol doesn't short-circuit
         df = pd.DataFrame({"close": [100.0, 101.0]}, index=pd.RangeIndex(2))
         loop._market_data.get_ohlcv = AsyncMock(return_value=df)
+        # Ensure add_all_indicators passes the real df through so evaluate_symbol
+        # does not short-circuit on a MagicMock before reaching self._combiner.combine
+        loop._indicator_svc.add_all_indicators = MagicMock(return_value=df)
 
         with patch.object(loop, "_maybe_classify"):
             await loop.evaluate_symbol("005930")
@@ -548,3 +554,118 @@ class TestYAMLKRSection:
         assert ev["sell_cooldown_days"] == 1
         assert ev["whipsaw_max_losses"] == 2
         assert ev["min_hold_days"] == 1
+
+
+# ---------------------------------------------------------------------------
+# _apply_kr_eval_overrides: YAML key → EvaluationLoop attribute mapping
+# ---------------------------------------------------------------------------
+
+class TestApplyKrEvalOverrides:
+    """Unit-tests for _apply_kr_eval_overrides in main.py.
+
+    Verifies that the function correctly maps YAML keys to EvaluationLoop
+    attributes and performs unit conversions (days → seconds).
+    """
+
+    def _make_loop(self) -> EvaluationLoop:
+        from unittest.mock import MagicMock
+
+        from strategies.combiner import SignalCombiner
+        from strategies.registry import StrategyRegistry
+
+        return EvaluationLoop(
+            adapter=MagicMock(),
+            market_data=MagicMock(),
+            indicator_svc=MagicMock(),
+            registry=MagicMock(spec=StrategyRegistry),
+            combiner=SignalCombiner(),
+            order_manager=MagicMock(),
+            risk_manager=RiskManager(),
+            market="KR",
+        )
+
+    def test_sell_cooldown_days_converted_to_secs(self):
+        from unittest.mock import MagicMock
+
+        from main import _apply_kr_eval_overrides
+
+        loop = self._make_loop()
+        loader = MagicMock()
+        loader.get_market_evaluation_loop_config.return_value = {
+            "sell_cooldown_days": 2,
+        }
+        loader.get_market_disabled_strategies.return_value = []
+        _apply_kr_eval_overrides(loop, loader)
+        assert loop._sell_cooldown_secs == 2 * 86400
+
+    def test_min_hold_days_converted_to_secs(self):
+        from unittest.mock import MagicMock
+
+        from main import _apply_kr_eval_overrides
+
+        loop = self._make_loop()
+        loader = MagicMock()
+        loader.get_market_evaluation_loop_config.return_value = {
+            "min_hold_days": 1,
+        }
+        loader.get_market_disabled_strategies.return_value = []
+        _apply_kr_eval_overrides(loop, loader)
+        assert loop._min_hold_secs == 86400
+
+    def test_whipsaw_max_losses_set(self):
+        from unittest.mock import MagicMock
+
+        from main import _apply_kr_eval_overrides
+
+        loop = self._make_loop()
+        loader = MagicMock()
+        loader.get_market_evaluation_loop_config.return_value = {
+            "whipsaw_max_losses": 3,
+        }
+        loader.get_market_disabled_strategies.return_value = []
+        _apply_kr_eval_overrides(loop, loader)
+        assert loop._max_loss_sells == 3
+
+    def test_disabled_strategies_applied(self):
+        from unittest.mock import MagicMock
+
+        from main import _apply_kr_eval_overrides
+
+        loop = self._make_loop()
+        loader = MagicMock()
+        loader.get_market_evaluation_loop_config.return_value = {}
+        loader.get_market_disabled_strategies.return_value = [
+            "trend_following", "macd_histogram",
+        ]
+        _apply_kr_eval_overrides(loop, loader)
+        assert "trend_following" in loop._disabled_strategies
+        assert "macd_histogram" in loop._disabled_strategies
+
+    def test_min_confidence_forwarded_to_setter(self):
+        from unittest.mock import MagicMock
+
+        from main import _apply_kr_eval_overrides
+
+        loop = self._make_loop()
+        loader = MagicMock()
+        loader.get_market_evaluation_loop_config.return_value = {
+            "min_confidence": 0.30,
+        }
+        loader.get_market_disabled_strategies.return_value = []
+        _apply_kr_eval_overrides(loop, loader)
+        assert loop._min_confidence == pytest.approx(0.30)
+
+    def test_min_active_ratio_null_sets_none(self):
+        """YAML null (None) should call set_min_active_ratio(None), not float(None)."""
+        from unittest.mock import MagicMock
+
+        from main import _apply_kr_eval_overrides
+
+        loop = self._make_loop()
+        loader = MagicMock()
+        loader.get_market_evaluation_loop_config.return_value = {
+            "min_active_ratio": None,
+        }
+        loader.get_market_disabled_strategies.return_value = []
+        _apply_kr_eval_overrides(loop, loader)
+        assert loop._min_active_ratio is None

@@ -63,6 +63,11 @@ def _apply_kr_eval_overrides(
 
     STOCK-65: Called at startup AND after every hot-reload so that runtime
     config changes to markets.KR.evaluation_loop take effect immediately.
+
+    NOTE: KR *risk* params (kelly_fraction, max_position_pct, dynamic_sl_tp,
+    default_stop_loss_pct, etc.) are set once at startup from the YAML and are
+    NOT updated by hot-reload.  Changes to markets.KR.risk require a full
+    service restart to take effect.
     """
     kr_eval_cfg = config_loader.get_market_evaluation_loop_config("KR")
     if kr_eval_cfg:
@@ -201,13 +206,13 @@ async def lifespan(app: FastAPI):
     }
 
     # Load tiered trailing stop and breakeven stop config from strategies.yaml (STOCK-24)
-    tiered_cfg = registry._config_loader.get_tiered_trailing_stop_config()
+    tiered_cfg = registry.config_loader.get_tiered_trailing_stop_config()
     tiered_tiers = None
     if tiered_cfg.get("enabled", False):
         raw_tiers = tiered_cfg.get("tiers", [])
         tiered_tiers = [(t["gain_pct"], t["trail_pct"]) for t in raw_tiers]
 
-    be_cfg = registry._config_loader.get_breakeven_stop_config()
+    be_cfg = registry.config_loader.get_breakeven_stop_config()
     be_enabled = be_cfg.get("enabled", True)
     be_activation = be_cfg.get("activation_ratio", 0.50)
     be_lock_ratio = be_cfg.get("lock_ratio", 0.75)
@@ -228,7 +233,7 @@ async def lifespan(app: FastAPI):
     risk_manager = RiskManager(params=risk_params)
 
     # KR-specific risk params: STOCK-65 grid-search optimized settings
-    kr_risk_cfg = registry._config_loader.get_market_risk_config("KR")
+    kr_risk_cfg = registry.config_loader.get_market_risk_config("KR")
     # STOCK-65: log resolved dynamic_sl_tp so startup is auditable;
     # intentional False default mirrors KR grid-search intent (static SL/TP).
     kr_dynamic_sl_tp: bool = kr_risk_cfg.get("dynamic_sl_tp", False)
@@ -262,7 +267,7 @@ async def lifespan(app: FastAPI):
     )
     app.state.risk_manager = risk_manager
     app.state.order_manager = order_manager
-    consensus_cfg = registry._config_loader.get_consensus_config()
+    consensus_cfg = registry.config_loader.get_consensus_config()
     app.state.combiner = SignalCombiner(consensus_config=consensus_cfg)
 
     # Wire trade recording
@@ -304,8 +309,8 @@ async def lifespan(app: FastAPI):
     # Adaptive weight manager (per-stock strategy selection)
     from engine.adaptive_weights import AdaptiveWeightManager
 
-    adaptive_cfg = registry._config_loader.get_adaptive_config()
-    stock_profiles = registry._config_loader.get_stock_profiles() or None
+    adaptive_cfg = registry.config_loader.get_adaptive_config()
+    stock_profiles = registry.config_loader.get_stock_profiles() or None
     adaptive_weights = AdaptiveWeightManager(
         alpha=adaptive_cfg.get("alpha", 0.6),
         ema_decay=adaptive_cfg.get("ema_decay", 0.1),
@@ -460,7 +465,7 @@ async def lifespan(app: FastAPI):
     # STOCK-43: Apply config cooldown + Redis persistence + PositionTracker callback
     evaluation_loop._sell_cooldown_secs = config.trading.cooldown_after_sell_sec
     # STOCK-61: Load hard_sl_pct from config (default -15%, was -7%)
-    evaluation_loop._hard_sl_pct = registry._config_loader.get_hard_sl_pct()
+    evaluation_loop._hard_sl_pct = registry.config_loader.get_hard_sl_pct()
     evaluation_loop.set_cache(cache)
     position_tracker.register_on_sell(evaluation_loop.register_sell_cooldown)
     app.state.evaluation_loop = evaluation_loop
@@ -1534,15 +1539,15 @@ async def lifespan(app: FastAPI):
     # STOCK-43: Apply config cooldown + Redis persistence + PositionTracker callback
     kr_evaluation_loop._sell_cooldown_secs = config.trading.cooldown_after_sell_sec
     # STOCK-61: Load hard_sl_pct from config (default -15%, was -7%)
-    kr_evaluation_loop._hard_sl_pct = registry._config_loader.get_hard_sl_pct()
+    kr_evaluation_loop._hard_sl_pct = registry.config_loader.get_hard_sl_pct()
     kr_evaluation_loop.set_cache(cache)
     kr_position_tracker.register_on_sell(kr_evaluation_loop.register_sell_cooldown)
 
     # STOCK-65: Apply KR market-specific overrides (eval loop + disabled strategies)
     # from strategies.yaml. Also stored on app.state so hot-reload can re-apply.
-    _apply_kr_eval_overrides(kr_evaluation_loop, registry._config_loader)
+    _apply_kr_eval_overrides(kr_evaluation_loop, registry.config_loader)
     app.state.apply_kr_eval_overrides = lambda: _apply_kr_eval_overrides(
-        kr_evaluation_loop, registry._config_loader
+        kr_evaluation_loop, registry.config_loader
     )
 
     app.state.kr_evaluation_loop = kr_evaluation_loop

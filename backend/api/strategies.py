@@ -1,9 +1,13 @@
 """Strategy API endpoints."""
 
+import logging
+
 from fastapi import APIRouter, Depends, Request
 
 from api.dependencies import get_registry
 from strategies.registry import StrategyRegistry
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/strategies", tags=["strategies"])
 
@@ -45,7 +49,7 @@ async def reload_config(
     registry.reload_config()
 
     # STOCK-61: Also reload hard_sl_pct on evaluation loops
-    hard_sl_pct = registry._config_loader.get_hard_sl_pct()
+    hard_sl_pct = registry.config_loader.get_hard_sl_pct()
     if hasattr(request.app.state, "evaluation_loop"):
         request.app.state.evaluation_loop.reload_hard_sl_pct(hard_sl_pct)
     if hasattr(request.app.state, "kr_evaluation_loop"):
@@ -55,5 +59,10 @@ async def reload_config(
     # min_confidence, and min_active_ratio stay in sync with the reloaded YAML.
     if hasattr(request.app.state, "apply_kr_eval_overrides"):
         request.app.state.apply_kr_eval_overrides()
+        logger.warning(
+            "KR eval-loop config reloaded; KR risk params (kelly_fraction, "
+            "dynamic_sl_tp, etc.) require a restart to take effect — they are "
+            "NOT updated by hot-reload."
+        )
 
     return {"status": "ok", "strategies": registry.get_names()}
