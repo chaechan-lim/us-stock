@@ -1060,10 +1060,11 @@ class FullPipelineBacktest:
         Two scenarios:
         1. Spillover: high-confidence candidates that couldn't be bought
            because max_positions was reached in regular session.
-        2. Dip buys: symbols where next open < current close (gap down),
+        2. Dip buys: symbols where today's open < yesterday's close (gap down),
            offering a better entry than regular session close price.
 
-        Uses: conservative sizing, higher slippage, fill probability.
+        Uses current bar's open price (observable pre-market data, no look-ahead).
+        Conservative sizing, higher slippage, fill probability.
         """
         cfg = self._config
         ext_slippage = cfg.slippage_pct * cfg.extended_hours_slippage_multiplier
@@ -1102,18 +1103,19 @@ class FullPipelineBacktest:
                 continue
 
             data = stock_data.get(symbol)
-            if not data or date_idx + 1 >= len(data.df):
+            if not data or date_idx < 1 or date_idx >= len(data.df):
                 continue
 
-            # Use next bar's open as extended hours entry price
-            next_row = data.df.iloc[date_idx + 1]
-            open_price = float(next_row["open"]) if "open" in next_row.index else None
+            # Use current bar's open as extended hours entry price
+            # (pre-market of today's session — observable, no look-ahead)
+            current_row = data.df.iloc[date_idx]
+            open_price = float(current_row["open"]) if "open" in current_row.index else None
             if not open_price or open_price <= 0:
                 continue
 
-            # Only buy if next open offers a discount or we're at capacity
-            current_close = float(data.df.iloc[date_idx]["close"])
-            is_discount = open_price < current_close * 0.995  # >0.5% gap down
+            # Discount check: today's open vs yesterday's close (gap-down)
+            prev_close = float(data.df.iloc[date_idx - 1]["close"])
+            is_discount = open_price < prev_close * 0.995  # >0.5% gap down
             is_spillover = active_positions >= cfg.max_positions
 
             if not is_discount and not is_spillover:

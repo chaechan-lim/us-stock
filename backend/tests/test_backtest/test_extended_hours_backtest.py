@@ -272,11 +272,11 @@ class TestExtendedHoursBuys:
         return bt
 
     def _make_stock_data(self, symbol, n=3, base_price=100, next_open_discount=0.02):
-        """Create mock stock data where next open has a gap down (discount)."""
+        """Create mock stock data where day 1 open has a gap down vs day 0 close."""
         closes = [base_price] * n
-        # Next day opens lower than current close (gap-down = discount)
+        # Day 1 opens lower than day 0 close (gap-down = discount)
         opens = [base_price] * n
-        opens[1] = base_price * (1 - next_open_discount)  # 2% discount on day 2
+        opens[1] = base_price * (1 - next_open_discount)  # 2% discount on day 1
 
         df = pd.DataFrame({
             "open": opens,
@@ -297,12 +297,12 @@ class TestExtendedHoursBuys:
         signal.strategy_name = "momentum"
         signal.confidence = 0.80
 
-        # Next day opens at 98 vs current close 100 (2% discount > 0.5% threshold)
+        # Day 1 opens at 98 vs day 0 close 100 (2% discount > 0.5% threshold)
         stock_data = {"AAPL": self._make_stock_data("AAPL", next_open_discount=0.02)}
         candidates = [(0.80, "AAPL", signal)]
 
         bt._execute_extended_hours_buys(
-            candidates, stock_data, 0, "2024-01-01", "uptrend",
+            candidates, stock_data, 1, "2024-01-02", "uptrend",
         )
 
         assert "AAPL" in bt._positions
@@ -332,7 +332,7 @@ class TestExtendedHoursBuys:
         candidates = [(0.80, "AAPL", signal)]
 
         bt._execute_extended_hours_buys(
-            candidates, stock_data, 0, "2024-01-01", "uptrend",
+            candidates, stock_data, 1, "2024-01-02", "uptrend",
         )
 
         assert "AAPL" in bt._positions
@@ -350,7 +350,7 @@ class TestExtendedHoursBuys:
         candidates = [(0.50, "AAPL", signal)]
 
         bt._execute_extended_hours_buys(
-            candidates, stock_data, 0, "2024-01-01", "uptrend",
+            candidates, stock_data, 1, "2024-01-02", "uptrend",
         )
 
         assert "AAPL" not in bt._positions
@@ -373,7 +373,7 @@ class TestExtendedHoursBuys:
         candidates = [(0.90, "AAPL", signal)]
 
         bt._execute_extended_hours_buys(
-            candidates, stock_data, 0, "2024-01-01", "uptrend",
+            candidates, stock_data, 1, "2024-01-02", "uptrend",
         )
 
         # Position should still be original, not replaced
@@ -392,7 +392,7 @@ class TestExtendedHoursBuys:
         candidates = [(0.80, "AAPL", signal)]
 
         bt._execute_extended_hours_buys(
-            candidates, stock_data, 0, "2024-01-01", "uptrend",
+            candidates, stock_data, 1, "2024-01-02", "uptrend",
         )
 
         # Should NOT buy — no discount AND not at max positions
@@ -447,7 +447,7 @@ class TestExtendedHoursBuys:
         candidates = [(0.90, "AAPL", signal)]
 
         bt._execute_extended_hours_buys(
-            candidates, stock_data, 0, "2024-01-01", "uptrend",
+            candidates, stock_data, 1, "2024-01-02", "uptrend",
         )
 
         assert "AAPL" not in bt._positions  # fill probability = 0, always miss
