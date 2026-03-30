@@ -71,11 +71,11 @@ def _apply_kr_eval_overrides(
     """
     kr_eval_cfg = config_loader.get_market_evaluation_loop_config("KR")
     if kr_eval_cfg:
-        if "sell_cooldown_days" in kr_eval_cfg:
+        if "sell_cooldown_days" in kr_eval_cfg and kr_eval_cfg["sell_cooldown_days"] is not None:
             kr_loop._sell_cooldown_secs = int(kr_eval_cfg["sell_cooldown_days"] * 86400)
-        if "whipsaw_max_losses" in kr_eval_cfg:
+        if "whipsaw_max_losses" in kr_eval_cfg and kr_eval_cfg["whipsaw_max_losses"] is not None:
             kr_loop._max_loss_sells = int(kr_eval_cfg["whipsaw_max_losses"])
-        if "min_hold_days" in kr_eval_cfg:
+        if "min_hold_days" in kr_eval_cfg and kr_eval_cfg["min_hold_days"] is not None:
             min_hold_secs = int(kr_eval_cfg["min_hold_days"] * 86400)
             kr_loop._min_hold_secs = min_hold_secs
             logger.info(
@@ -84,7 +84,8 @@ def _apply_kr_eval_overrides(
                 kr_eval_cfg["min_hold_days"],
             )
         if "min_confidence" in kr_eval_cfg:
-            kr_loop.set_min_confidence(float(kr_eval_cfg["min_confidence"]))
+            v = kr_eval_cfg["min_confidence"]
+            kr_loop.set_min_confidence(float(v) if v is not None else None)
         if "min_active_ratio" in kr_eval_cfg:
             v = kr_eval_cfg["min_active_ratio"]
             kr_loop.set_min_active_ratio(float(v) if v is not None else None)

@@ -14,24 +14,24 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pandas as pd
 
-from exchange.base import ExchangeAdapter
-from data.market_data_service import MarketDataService
+from analytics.factor_model import FactorScores, MultiFactorModel
+from analytics.signal_quality import SignalQualityTracker
+from core.enums import SignalType
 from data.indicator_service import IndicatorService
-from strategies.base import PositionContext, Signal
-from strategies.combiner import SignalCombiner
-from strategies.registry import StrategyRegistry
+from data.market_data_service import MarketDataService
+from engine.adaptive_weights import AdaptiveWeightManager
 from engine.order_manager import OrderManager
 from engine.risk_manager import RiskManager
 from engine.stock_classifier import StockClassifier
-from engine.adaptive_weights import AdaptiveWeightManager
-from analytics.factor_model import MultiFactorModel, FactorScores
-from analytics.signal_quality import SignalQualityTracker
+from exchange.base import ExchangeAdapter
 from services.exchange_resolver import ExchangeResolver
-from core.enums import SignalType
+from strategies.base import BaseStrategy, PositionContext, Signal
+from strategies.combiner import SignalCombiner
+from strategies.registry import StrategyRegistry
 
 if TYPE_CHECKING:
     from agents.risk_assessment import RiskAssessmentAgent
@@ -171,7 +171,7 @@ class EvaluationLoop:
         self._min_active_ratio = value
         logger.info("Market %s: min_active_ratio = %s", self._market, value)
 
-    def _get_active_strategies(self) -> list:
+    def _get_active_strategies(self) -> list[BaseStrategy]:
         """Return enabled strategies minus the market-specific disabled list.
 
         STOCK-65: Centralises the disabled-strategy filtering so both
@@ -461,7 +461,7 @@ class EvaluationLoop:
             # Combine signals with per-stock weights
             # STOCK-65: per-market overrides take unconditional precedence;
             # fall back to global defaults (0.15 for held, None otherwise).
-            combine_kwargs: dict = {
+            combine_kwargs: dict[str, Any] = {
                 "min_active_ratio": (
                     self._min_active_ratio
                     if self._min_active_ratio is not None

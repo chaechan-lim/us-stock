@@ -21,6 +21,7 @@ from strategies.config_loader import StrategyConfigLoader
 # RiskParams: new fields
 # ---------------------------------------------------------------------------
 
+
 class TestRiskParamsNewFields:
     def test_default_kelly_fraction(self):
         params = RiskParams()
@@ -51,26 +52,82 @@ class TestRiskParamsNewFields:
 # RiskManager: KellyPositionSizer receives new params
 # ---------------------------------------------------------------------------
 
+
 class TestRiskManagerKellyParams:
-    def test_kelly_fraction_propagated_to_sizer(self):
+    """Behavioral tests: verify RiskParams propagate to calculate_kelly_position_size output."""
+
+    def test_kelly_fraction_affects_position_size(self):
+        """Higher kelly_fraction produces a larger allocation when there is positive edge."""
+        params_low = RiskParams(kelly_fraction=0.25, max_position_pct=0.20)
+        params_high = RiskParams(kelly_fraction=0.50, max_position_pct=0.20)
+        rm_low = RiskManager(params=params_low)
+        rm_high = RiskManager(params=params_high)
+
+        kwargs = dict(
+            symbol="005930",
+            price=100.0,
+            portfolio_value=100_000.0,
+            cash_available=100_000.0,
+            current_positions=0,
+            win_rate=0.60,
+            avg_win=0.12,
+            avg_loss=0.06,
+            signal_confidence=0.80,
+        )
+        result_low = rm_low.calculate_kelly_position_size(**kwargs)
+        result_high = rm_high.calculate_kelly_position_size(**kwargs)
+
+        assert result_low.allowed
+        assert result_high.allowed
+        assert result_high.allocation_usd > result_low.allocation_usd
+
+    def test_min_position_pct_sets_allocation_floor(self):
+        """min_position_pct clamps the Kelly allocation upward when edge is marginal."""
+        params = RiskParams(kelly_fraction=0.40, min_position_pct=0.12, max_position_pct=0.20)
+        rm = RiskManager(params=params)
+
+        # Marginal edge + low confidence → raw Kelly would be below 0.12 floor
+        result = rm.calculate_kelly_position_size(
+            symbol="005930",
+            price=100.0,
+            portfolio_value=100_000.0,
+            cash_available=100_000.0,
+            current_positions=0,
+            win_rate=0.55,
+            avg_win=0.08,
+            avg_loss=0.07,
+            signal_confidence=0.35,
+        )
+
+        assert result.allowed
+        assert result.allocation_usd >= 100_000.0 * 0.12
+
+    def test_max_position_pct_caps_allocation(self):
+        """max_position_pct is the hard cap on Kelly allocation."""
         params = RiskParams(kelly_fraction=0.50, max_position_pct=0.20)
         rm = RiskManager(params=params)
-        assert rm._kelly._kelly_frac == 0.50
 
-    def test_min_position_pct_propagated_to_sizer(self):
-        params = RiskParams(min_position_pct=0.12)
-        rm = RiskManager(params=params)
-        assert rm._kelly._min_pct == 0.12
+        # Strong edge would exceed 0.20 without the cap
+        result = rm.calculate_kelly_position_size(
+            symbol="005930",
+            price=100.0,
+            portfolio_value=100_000.0,
+            cash_available=100_000.0,
+            current_positions=0,
+            win_rate=0.70,
+            avg_win=0.20,
+            avg_loss=0.05,
+            signal_confidence=0.90,
+        )
 
-    def test_max_position_pct_still_propagated(self):
-        params = RiskParams(max_position_pct=0.20)
-        rm = RiskManager(params=params)
-        assert rm._kelly._max_pct == 0.20
+        assert result.allowed
+        assert result.allocation_usd <= 100_000.0 * 0.20
 
 
 # ---------------------------------------------------------------------------
 # RiskManager.calculate_dynamic_sl_tp: static mode
 # ---------------------------------------------------------------------------
+
 
 class TestDynamicSlTpStaticMode:
     def test_static_mode_returns_defaults(self):
@@ -117,6 +174,7 @@ class TestDynamicSlTpStaticMode:
 # ---------------------------------------------------------------------------
 # KR risk params match spec values (STOCK-65)
 # ---------------------------------------------------------------------------
+
 
 class TestKRRiskParamsSpec:
     """Verify the exact KR optimized risk params can be expressed in RiskParams."""
@@ -182,6 +240,7 @@ class TestKRRiskParamsSpec:
 # ---------------------------------------------------------------------------
 # StrategyConfigLoader: market-specific methods
 # ---------------------------------------------------------------------------
+
 
 class TestStrategyConfigLoaderMarketMethods:
     def test_get_market_config_kr(self):
@@ -264,6 +323,7 @@ class TestStrategyConfigLoaderMarketMethods:
 # EvaluationLoop: disabled strategies filtering
 # ---------------------------------------------------------------------------
 
+
 class TestEvaluationLoopDisabledStrategies:
     def _make_evaluation_loop(self) -> EvaluationLoop:
         """Create a minimal EvaluationLoop for testing."""
@@ -318,10 +378,18 @@ class TestEvaluationLoopDisabledStrategies:
         """Verify all 12 KR-disabled strategies can be set."""
         loop = self._make_evaluation_loop()
         kr_disabled = [
-            "trend_following", "donchian_breakout", "macd_histogram",
-            "rsi_divergence", "bollinger_squeeze", "volume_profile",
-            "regime_switch", "sector_rotation", "cis_momentum",
-            "larry_williams", "bnf_deviation", "volume_surge",
+            "trend_following",
+            "donchian_breakout",
+            "macd_histogram",
+            "rsi_divergence",
+            "bollinger_squeeze",
+            "volume_profile",
+            "regime_switch",
+            "sector_rotation",
+            "cis_momentum",
+            "larry_williams",
+            "bnf_deviation",
+            "volume_surge",
         ]
         loop.set_disabled_strategies(kr_disabled)
         assert loop._disabled_strategies == frozenset(kr_disabled)
@@ -406,10 +474,41 @@ class TestEvaluationLoopDisabledStrategies:
         # The real evaluate_symbol code path must have forwarded min_confidence
         assert captured_kwargs.get("min_confidence") == pytest.approx(0.30)
 
+    @pytest.mark.asyncio
+    async def test_min_active_ratio_override_forwarded_to_combiner_combine(self):
+        """Verify min_active_ratio override is forwarded through evaluate_symbol (is_held=True)."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        import pandas as pd
+
+        loop = self._make_evaluation_loop()
+        loop.set_min_active_ratio(0.0)
+        loop._registry.get_enabled.return_value = []
+
+        captured_kwargs: dict = {}
+        original_combine = loop._combiner.combine
+
+        def spy_combine(signals, weights, **kwargs):
+            captured_kwargs.update(kwargs)
+            return original_combine(signals, weights, **kwargs)
+
+        loop._combiner.combine = spy_combine  # type: ignore[method-assign]
+
+        df = pd.DataFrame({"close": [100.0, 101.0]}, index=pd.RangeIndex(2))
+        loop._market_data.get_ohlcv = AsyncMock(return_value=df)
+        loop._indicator_svc.add_all_indicators = MagicMock(return_value=df)
+
+        with patch.object(loop, "_maybe_classify"):
+            await loop.evaluate_symbol("005930", is_held=True)
+
+        # min_active_ratio override must take precedence over the held-position 0.15 default
+        assert captured_kwargs.get("min_active_ratio") == pytest.approx(0.0)
+
 
 # ---------------------------------------------------------------------------
 # EvaluationLoop: strategy filtering integration
 # ---------------------------------------------------------------------------
+
 
 class TestEvaluationLoopStrategyFiltering:
     """Test that disabled strategies are actually filtered from evaluation."""
@@ -418,6 +517,7 @@ class TestEvaluationLoopStrategyFiltering:
         from unittest.mock import MagicMock
 
         from strategies.base import BaseStrategy
+
         strat = MagicMock(spec=BaseStrategy)
         strat.name = name
         return strat
@@ -468,17 +568,35 @@ class TestEvaluationLoopStrategyFiltering:
 
     def test_kr_disabled_leaves_only_supertrend_and_dual_momentum(self):
         all_strategy_names = [
-            "trend_following", "dual_momentum", "donchian_breakout", "supertrend",
-            "macd_histogram", "rsi_divergence", "bollinger_squeeze", "volume_profile",
-            "regime_switch", "sector_rotation", "cis_momentum", "larry_williams",
-            "bnf_deviation", "volume_surge",
+            "trend_following",
+            "dual_momentum",
+            "donchian_breakout",
+            "supertrend",
+            "macd_histogram",
+            "rsi_divergence",
+            "bollinger_squeeze",
+            "volume_profile",
+            "regime_switch",
+            "sector_rotation",
+            "cis_momentum",
+            "larry_williams",
+            "bnf_deviation",
+            "volume_surge",
         ]
         loop, strategies = self._make_loop_with_strategies(all_strategy_names)
         kr_disabled = [
-            "trend_following", "donchian_breakout", "macd_histogram",
-            "rsi_divergence", "bollinger_squeeze", "volume_profile",
-            "regime_switch", "sector_rotation", "cis_momentum",
-            "larry_williams", "bnf_deviation", "volume_surge",
+            "trend_following",
+            "donchian_breakout",
+            "macd_histogram",
+            "rsi_divergence",
+            "bollinger_squeeze",
+            "volume_profile",
+            "regime_switch",
+            "sector_rotation",
+            "cis_momentum",
+            "larry_williams",
+            "bnf_deviation",
+            "volume_surge",
         ]
         loop.set_disabled_strategies(kr_disabled)
         active = loop._get_active_strategies()
@@ -489,6 +607,7 @@ class TestEvaluationLoopStrategyFiltering:
 # ---------------------------------------------------------------------------
 # YAML config validation: KR section correctness
 # ---------------------------------------------------------------------------
+
 
 class TestYAMLKRSection:
     """Verify strategies.yaml has the correct KR market section structure."""
@@ -559,6 +678,7 @@ class TestYAMLKRSection:
 # ---------------------------------------------------------------------------
 # _apply_kr_eval_overrides: YAML key → EvaluationLoop attribute mapping
 # ---------------------------------------------------------------------------
+
 
 class TestApplyKrEvalOverrides:
     """Unit-tests for _apply_kr_eval_overrides in main.py.
@@ -635,7 +755,8 @@ class TestApplyKrEvalOverrides:
         loader = MagicMock()
         loader.get_market_evaluation_loop_config.return_value = {}
         loader.get_market_disabled_strategies.return_value = [
-            "trend_following", "macd_histogram",
+            "trend_following",
+            "macd_histogram",
         ]
         _apply_kr_eval_overrides(loop, loader)
         assert "trend_following" in loop._disabled_strategies
@@ -669,3 +790,128 @@ class TestApplyKrEvalOverrides:
         loader.get_market_disabled_strategies.return_value = []
         _apply_kr_eval_overrides(loop, loader)
         assert loop._min_active_ratio is None
+
+    def test_sell_cooldown_days_null_is_safe(self):
+        """YAML null for sell_cooldown_days must not raise TypeError."""
+        from unittest.mock import MagicMock
+
+        from main import _apply_kr_eval_overrides
+
+        loop = self._make_loop()
+        original = loop._sell_cooldown_secs
+        loader = MagicMock()
+        loader.get_market_evaluation_loop_config.return_value = {"sell_cooldown_days": None}
+        loader.get_market_disabled_strategies.return_value = []
+        _apply_kr_eval_overrides(loop, loader)  # must not raise
+        assert loop._sell_cooldown_secs == original  # unchanged
+
+    def test_whipsaw_max_losses_null_is_safe(self):
+        """YAML null for whipsaw_max_losses must not raise TypeError."""
+        from unittest.mock import MagicMock
+
+        from main import _apply_kr_eval_overrides
+
+        loop = self._make_loop()
+        original = loop._max_loss_sells
+        loader = MagicMock()
+        loader.get_market_evaluation_loop_config.return_value = {"whipsaw_max_losses": None}
+        loader.get_market_disabled_strategies.return_value = []
+        _apply_kr_eval_overrides(loop, loader)  # must not raise
+        assert loop._max_loss_sells == original  # unchanged
+
+    def test_min_hold_days_null_is_safe(self):
+        """YAML null for min_hold_days must not raise TypeError."""
+        from unittest.mock import MagicMock
+
+        from main import _apply_kr_eval_overrides
+
+        loop = self._make_loop()
+        original = loop._min_hold_secs
+        loader = MagicMock()
+        loader.get_market_evaluation_loop_config.return_value = {"min_hold_days": None}
+        loader.get_market_disabled_strategies.return_value = []
+        _apply_kr_eval_overrides(loop, loader)  # must not raise
+        assert loop._min_hold_secs == original  # unchanged
+
+
+# ---------------------------------------------------------------------------
+# Hot-reload integration: lambda closure wiring
+# ---------------------------------------------------------------------------
+
+
+class TestHotReloadAppliesKrOverrides:
+    """Verify the app.state.apply_kr_eval_overrides lambda correctly re-applies
+    overrides when called after config changes (simulates POST /reload behavior).
+    """
+
+    def _make_loop(self) -> EvaluationLoop:
+        from unittest.mock import MagicMock
+
+        from strategies.combiner import SignalCombiner
+        from strategies.registry import StrategyRegistry
+
+        return EvaluationLoop(
+            adapter=MagicMock(),
+            market_data=MagicMock(),
+            indicator_svc=MagicMock(),
+            registry=MagicMock(spec=StrategyRegistry),
+            combiner=SignalCombiner(),
+            order_manager=MagicMock(),
+            risk_manager=RiskManager(),
+            market="KR",
+        )
+
+    def test_lambda_applies_initial_overrides(self):
+        """Calling the lambda applies config to the loop (simulates startup)."""
+        from unittest.mock import MagicMock
+
+        from main import _apply_kr_eval_overrides
+
+        loop = self._make_loop()
+        config_loader = MagicMock()
+        config_loader.get_market_evaluation_loop_config.return_value = {
+            "min_confidence": 0.30,
+            "sell_cooldown_days": 1,
+        }
+        config_loader.get_market_disabled_strategies.return_value = ["trend_following"]
+
+        def apply_kr_overrides():
+            _apply_kr_eval_overrides(loop, config_loader)
+
+        apply_kr_overrides()
+
+        assert loop._min_confidence == pytest.approx(0.30)
+        assert loop._sell_cooldown_secs == 86400
+        assert "trend_following" in loop._disabled_strategies
+
+    def test_lambda_re_applies_updated_config_on_reload(self):
+        """After config changes, calling the lambda again propagates new values."""
+        from unittest.mock import MagicMock
+
+        from main import _apply_kr_eval_overrides
+
+        loop = self._make_loop()
+        config_loader = MagicMock()
+        config_loader.get_market_evaluation_loop_config.return_value = {
+            "min_confidence": 0.30,
+            "sell_cooldown_days": 1,
+        }
+        config_loader.get_market_disabled_strategies.return_value = ["trend_following"]
+
+        def apply_kr_overrides():
+            _apply_kr_eval_overrides(loop, config_loader)
+
+        apply_kr_overrides()
+
+        # Simulate YAML update, then hot-reload
+        config_loader.get_market_evaluation_loop_config.return_value = {
+            "min_confidence": 0.40,
+            "sell_cooldown_days": 2,
+        }
+        config_loader.get_market_disabled_strategies.return_value = ["macd_histogram"]
+
+        apply_kr_overrides()
+
+        assert loop._min_confidence == pytest.approx(0.40)
+        assert loop._sell_cooldown_secs == 2 * 86400
+        assert "macd_histogram" in loop._disabled_strategies
