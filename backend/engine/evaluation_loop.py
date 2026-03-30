@@ -14,7 +14,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import TYPE_CHECKING
+from typing import Any, TYPE_CHECKING
 
 import pandas as pd
 
@@ -119,6 +119,18 @@ class EvaluationLoop:
         from collections import deque
 
         self._recent_signals: deque[dict] = deque(maxlen=200)
+        # Market-specific strategy filtering (STOCK-66)
+        self._disabled_strategies: frozenset[str] = frozenset()
+        # Market-specific combiner overrides (STOCK-66)
+        self._min_confidence: float | None = None  # None = use combiner default
+        self._min_active_ratio: float | None = None  # None = use combiner default
+
+    def _get_active_strategies(self) -> list:
+        """Get enabled strategies, excluding market-specific disabled ones."""
+        strategies = self._registry.get_enabled()
+        if self._disabled_strategies:
+            strategies = [s for s in strategies if s.name not in self._disabled_strategies]
+        return strategies
 
     @property
     def running(self) -> bool:
@@ -344,8 +356,8 @@ class EvaluationLoop:
             # Add indicators
             df = self._indicator_svc.add_all_indicators(df)
 
-            # Run all enabled strategies
-            strategies = self._registry.get_enabled()
+            # Run all enabled strategies (filtered by market-specific disabled list)
+            strategies = self._get_active_strategies()
             signals: list[Signal] = []
             for strategy in strategies:
                 try:
@@ -397,11 +409,15 @@ class EvaluationLoop:
                     signals = evaluated
 
             # Combine signals with per-stock weights
-            combined = self._combiner.combine(
-                signals,
-                weights,
-                min_active_ratio=0.15 if is_held else None,
-            )
+            # Build combine kwargs with market-specific overrides (STOCK-66)
+            combine_kwargs: dict[str, Any] = {}
+            if is_held:
+                combine_kwargs["min_active_ratio"] = 0.15
+            elif self._min_active_ratio is not None:
+                combine_kwargs["min_active_ratio"] = self._min_active_ratio
+            if self._min_confidence is not None and not is_held:
+                combine_kwargs["min_confidence"] = self._min_confidence
+            combined = self._combiner.combine(signals, weights, **combine_kwargs)
 
             # Log weight selection
             category = self._adaptive.get_category(symbol)
@@ -512,7 +528,7 @@ class EvaluationLoop:
                 self._maybe_classify(symbol, df)
                 df = self._indicator_svc.add_all_indicators(df)
 
-                strategies = self._registry.get_enabled()
+                strategies = self._get_active_strategies()
                 signals = []
                 for strategy in strategies:
                     try:
@@ -595,7 +611,12 @@ class EvaluationLoop:
                         held_sell_bias=_hsb,
                     )
                 else:
-                    combined = self._combiner.combine(signals, weights)
+                    _ckw: dict[str, Any] = {}
+                    if self._min_confidence is not None:
+                        _ckw["min_confidence"] = self._min_confidence
+                    if self._min_active_ratio is not None:
+                        _ckw["min_active_ratio"] = self._min_active_ratio
+                    combined = self._combiner.combine(signals, weights, **_ckw)
 
                 # Sell on indifference: if no strategy has a strong opinion
                 # (HOLD) and the held position is losing beyond threshold,
