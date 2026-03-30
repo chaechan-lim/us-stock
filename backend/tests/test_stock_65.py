@@ -229,7 +229,7 @@ class TestStrategyConfigLoaderMarketMethods:
         eval_cfg = loader.get_market_evaluation_loop_config("KR")
         assert isinstance(eval_cfg, dict)
         assert eval_cfg.get("min_confidence") == pytest.approx(0.30)
-        assert eval_cfg.get("min_active_ratio") == pytest.approx(0.0)
+        assert eval_cfg.get("min_active_ratio") is None  # null in YAML = no override
         assert eval_cfg.get("sell_cooldown_days") == 1
         assert eval_cfg.get("whipsaw_max_losses") == 2
         assert eval_cfg.get("min_hold_days") == 1
@@ -367,14 +367,21 @@ class TestEvaluationLoopDisabledStrategies:
         loop = self._make_evaluation_loop()
         with pytest.raises(ValueError, match="min_active_ratio must be in"):
             loop.set_min_active_ratio(1.5)
+        with pytest.raises(ValueError, match="min_active_ratio must be in"):
+            loop.set_min_active_ratio(-0.1)
 
-    def test_min_confidence_forwarded_to_combiner_combine(self):
-        """Verify min_confidence is actually passed to SignalCombiner.combine()."""
+    @pytest.mark.asyncio
+    async def test_min_confidence_forwarded_to_combiner_combine(self):
+        """Verify min_confidence is forwarded through the real evaluate_symbol path."""
+        from unittest.mock import AsyncMock, patch
+
+        import pandas as pd
+
         loop = self._make_evaluation_loop()
         loop.set_min_confidence(0.30)
+        loop._registry.get_enabled.return_value = []  # no strategies → HOLD signal
 
         captured_kwargs: dict = {}
-
         original_combine = loop._combiner.combine
 
         def spy_combine(signals, weights, **kwargs):
@@ -383,18 +390,14 @@ class TestEvaluationLoopDisabledStrategies:
 
         loop._combiner.combine = spy_combine  # type: ignore[method-assign]
 
-        # Reproduce the combine_kwargs building logic from evaluation_loop.py
-        combine_kwargs: dict = {
-            "min_active_ratio": (
-                loop._min_active_ratio
-                if loop._min_active_ratio is not None
-                else None
-            ),
-        }
-        if loop._min_confidence is not None:
-            combine_kwargs["min_confidence"] = loop._min_confidence
-        loop._combiner.combine([], {}, **combine_kwargs)
+        # Minimal non-empty DataFrame so evaluate_symbol doesn't short-circuit
+        df = pd.DataFrame({"close": [100.0, 101.0]}, index=pd.RangeIndex(2))
+        loop._market_data.get_ohlcv = AsyncMock(return_value=df)
 
+        with patch.object(loop, "_maybe_classify"):
+            await loop.evaluate_symbol("005930")
+
+        # The real evaluate_symbol code path must have forwarded min_confidence
         assert captured_kwargs.get("min_confidence") == pytest.approx(0.30)
 
 
@@ -540,7 +543,8 @@ class TestYAMLKRSection:
         loader = StrategyConfigLoader()
         ev = loader._config["markets"]["KR"]["evaluation_loop"]
         assert ev["min_confidence"] == pytest.approx(0.30)
-        assert ev["min_active_ratio"] == pytest.approx(0.0)
+        # null in YAML → None in Python; means 'no override, use per-call defaults'
+        assert ev["min_active_ratio"] is None
         assert ev["sell_cooldown_days"] == 1
         assert ev["whipsaw_max_losses"] == 2
         assert ev["min_hold_days"] == 1

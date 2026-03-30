@@ -452,7 +452,7 @@ markets:
       dynamic_sl_tp: false
     evaluation_loop:
       min_confidence: 0.30
-      min_active_ratio: 0.0
+      min_active_ratio: null   # null = no override; use per-call defaults (0.15 for held)
       sell_cooldown_days: 1
       whipsaw_max_losses: 2
       min_hold_days: 1

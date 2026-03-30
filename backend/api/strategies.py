@@ -51,4 +51,9 @@ async def reload_config(
     if hasattr(request.app.state, "kr_evaluation_loop"):
         request.app.state.kr_evaluation_loop.reload_hard_sl_pct(hard_sl_pct)
 
+    # STOCK-65: Re-apply KR market-specific eval overrides so disabled_strategies,
+    # min_confidence, and min_active_ratio stay in sync with the reloaded YAML.
+    if hasattr(request.app.state, "apply_kr_eval_overrides"):
+        request.app.state.apply_kr_eval_overrides()
+
     return {"status": "ok", "strategies": registry.get_names()}

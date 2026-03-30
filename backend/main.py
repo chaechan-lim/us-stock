@@ -55,6 +55,39 @@ def reset_all_daily_risk(us_rm: RiskManager, kr_rm: RiskManager) -> None:
     kr_rm.reset_daily()
 
 
+def _apply_kr_eval_overrides(
+    kr_loop: "EvaluationLoop",
+    config_loader: "StrategyConfigLoader",
+) -> None:
+    """Apply KR market-specific evaluation-loop overrides from strategies.yaml.
+
+    STOCK-65: Called at startup AND after every hot-reload so that runtime
+    config changes to markets.KR.evaluation_loop take effect immediately.
+    """
+    kr_eval_cfg = config_loader.get_market_evaluation_loop_config("KR")
+    if kr_eval_cfg:
+        if "sell_cooldown_days" in kr_eval_cfg:
+            kr_loop._sell_cooldown_secs = int(kr_eval_cfg["sell_cooldown_days"] * 86400)
+        if "whipsaw_max_losses" in kr_eval_cfg:
+            kr_loop._max_loss_sells = int(kr_eval_cfg["whipsaw_max_losses"])
+        if "min_hold_days" in kr_eval_cfg:
+            min_hold_secs = int(kr_eval_cfg["min_hold_days"] * 86400)
+            kr_loop._min_hold_secs = min_hold_secs
+            logger.info(
+                "KR EvalLoop: min_hold_secs=%d (%g days, default was 14400)",
+                min_hold_secs,
+                kr_eval_cfg["min_hold_days"],
+            )
+        if "min_confidence" in kr_eval_cfg:
+            kr_loop.set_min_confidence(float(kr_eval_cfg["min_confidence"]))
+        if "min_active_ratio" in kr_eval_cfg:
+            v = kr_eval_cfg["min_active_ratio"]
+            kr_loop.set_min_active_ratio(float(v) if v is not None else None)
+
+    kr_disabled = config_loader.get_market_disabled_strategies("KR")
+    kr_loop.set_disabled_strategies(kr_disabled)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application startup/shutdown lifecycle."""
@@ -1505,26 +1538,12 @@ async def lifespan(app: FastAPI):
     kr_evaluation_loop.set_cache(cache)
     kr_position_tracker.register_on_sell(kr_evaluation_loop.register_sell_cooldown)
 
-    # STOCK-65: Apply KR market-specific evaluation loop overrides from strategies.yaml
-    kr_eval_cfg = registry._config_loader.get_market_evaluation_loop_config("KR")
-    if kr_eval_cfg:
-        if "sell_cooldown_days" in kr_eval_cfg:
-            kr_evaluation_loop._sell_cooldown_secs = int(
-                kr_eval_cfg["sell_cooldown_days"] * 86400
-            )
-        if "whipsaw_max_losses" in kr_eval_cfg:
-            kr_evaluation_loop._max_loss_sells = int(kr_eval_cfg["whipsaw_max_losses"])
-        if "min_hold_days" in kr_eval_cfg:
-            kr_evaluation_loop._min_hold_secs = int(kr_eval_cfg["min_hold_days"] * 86400)
-        if "min_confidence" in kr_eval_cfg:
-            kr_evaluation_loop.set_min_confidence(float(kr_eval_cfg["min_confidence"]))
-        if "min_active_ratio" in kr_eval_cfg:
-            kr_evaluation_loop.set_min_active_ratio(float(kr_eval_cfg["min_active_ratio"]))
-
-    # STOCK-65: Apply KR market-specific disabled strategies from strategies.yaml
-    kr_disabled = registry._config_loader.get_market_disabled_strategies("KR")
-    if kr_disabled:
-        kr_evaluation_loop.set_disabled_strategies(kr_disabled)
+    # STOCK-65: Apply KR market-specific overrides (eval loop + disabled strategies)
+    # from strategies.yaml. Also stored on app.state so hot-reload can re-apply.
+    _apply_kr_eval_overrides(kr_evaluation_loop, registry._config_loader)
+    app.state.apply_kr_eval_overrides = lambda: _apply_kr_eval_overrides(
+        kr_evaluation_loop, registry._config_loader
+    )
 
     app.state.kr_evaluation_loop = kr_evaluation_loop
 
