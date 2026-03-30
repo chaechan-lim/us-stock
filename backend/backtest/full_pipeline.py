@@ -472,7 +472,7 @@ class FullPipelineBacktest:
                 if date_idx >= len(sdata.df):
                     continue
 
-                df_window = sdata.df.iloc[:date_idx + 1]
+                df_window = sdata.df.iloc[:date_idx]  # Exclude current bar (no look-ahead)
                 if len(df_window) < 50:
                     continue
 
@@ -845,7 +845,7 @@ class FullPipelineBacktest:
         for symbol, data in stock_data.items():
             if date_idx >= len(data.df):
                 continue
-            df_window = data.df.iloc[:date_idx + 1]
+            df_window = data.df.iloc[:date_idx]  # Exclude current bar
             if len(df_window) < 50:
                 continue
             try:

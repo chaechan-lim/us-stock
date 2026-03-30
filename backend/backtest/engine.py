@@ -127,12 +127,17 @@ class BacktestEngine:
         df: pd.DataFrame,
         symbol: str,
     ) -> dict[int, Signal]:
-        """Generate signals by running strategy on each bar."""
+        """Generate signals by running strategy on each bar.
+
+        Uses data up to (but not including) bar i to generate the signal,
+        which is then executed at bar i's close. This matches live trading
+        where strategies analyze yesterday's completed bar and trade today.
+        """
         signals = {}
         min_bars = strategy.min_candles_required
 
-        for i in range(min_bars, len(df)):
-            window = df.iloc[:i + 1]
+        for i in range(min_bars + 1, len(df)):
+            window = df.iloc[:i]  # Exclude current bar (no look-ahead)
             try:
                 signal = await strategy.analyze(window, symbol)
                 if signal.signal_type != SignalType.HOLD:
