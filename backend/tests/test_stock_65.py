@@ -279,11 +279,11 @@ class TestStrategyConfigLoaderMarketMethods:
         loader = StrategyConfigLoader()
         risk_cfg = loader.get_market_risk_config("KR")
         assert isinstance(risk_cfg, dict)
-        assert risk_cfg.get("kelly_fraction") == pytest.approx(0.50)
-        assert risk_cfg.get("max_position_pct") == pytest.approx(0.20)
-        assert risk_cfg.get("min_position_pct") == pytest.approx(0.12)
+        assert risk_cfg.get("kelly_fraction") == pytest.approx(1.00)
+        assert risk_cfg.get("max_position_pct") == pytest.approx(0.30)
+        assert risk_cfg.get("min_position_pct") == pytest.approx(0.15)
         assert risk_cfg.get("max_positions") == 8
-        assert risk_cfg.get("default_stop_loss_pct") == pytest.approx(0.10)
+        assert risk_cfg.get("default_stop_loss_pct") == pytest.approx(0.15)
         assert risk_cfg.get("default_take_profit_pct") == pytest.approx(0.15)
         assert risk_cfg.get("dynamic_sl_tp") is False
 
@@ -291,7 +291,7 @@ class TestStrategyConfigLoaderMarketMethods:
         loader = StrategyConfigLoader()
         eval_cfg = loader.get_market_evaluation_loop_config("KR")
         assert isinstance(eval_cfg, dict)
-        assert eval_cfg.get("min_confidence") == pytest.approx(0.30)
+        assert eval_cfg.get("min_confidence") == pytest.approx(0.20)
         assert eval_cfg.get("min_active_ratio") is None  # null in YAML = no override
         assert eval_cfg.get("sell_cooldown_days") == 1
         assert eval_cfg.get("whipsaw_max_losses") == 2
@@ -689,18 +689,18 @@ class TestYAMLKRSection:
     def test_yaml_kr_risk_values(self):
         loader = StrategyConfigLoader()
         risk = loader._config["markets"]["KR"]["risk"]
-        assert risk["kelly_fraction"] == pytest.approx(0.50)
-        assert risk["max_position_pct"] == pytest.approx(0.20)
-        assert risk["min_position_pct"] == pytest.approx(0.12)
+        assert risk["kelly_fraction"] == pytest.approx(1.00)
+        assert risk["max_position_pct"] == pytest.approx(0.30)
+        assert risk["min_position_pct"] == pytest.approx(0.15)
         assert risk["max_positions"] == 8
-        assert risk["default_stop_loss_pct"] == pytest.approx(0.10)
+        assert risk["default_stop_loss_pct"] == pytest.approx(0.15)
         assert risk["default_take_profit_pct"] == pytest.approx(0.15)
         assert risk["dynamic_sl_tp"] is False
 
     def test_yaml_kr_eval_loop_values(self):
         loader = StrategyConfigLoader()
         ev = loader._config["markets"]["KR"]["evaluation_loop"]
-        assert ev["min_confidence"] == pytest.approx(0.30)
+        assert ev["min_confidence"] == pytest.approx(0.20)
         # null in YAML → None in Python; means 'no override, use per-call defaults'
         assert ev["min_active_ratio"] is None
         assert ev["sell_cooldown_days"] == 1
