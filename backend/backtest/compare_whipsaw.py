@@ -14,6 +14,7 @@ Usage:
 
 import asyncio
 import logging
+import os
 import sys
 from collections import defaultdict
 from datetime import datetime, timedelta
@@ -26,7 +27,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-DB_URL = "postgresql://usstock:usstock@localhost:5432/us_stock_trading"
+DB_URL = os.environ.get(
+    "DB_URL", "postgresql://localhost:5432/us_stock_trading"
+)
 
 
 async def load_trades(days: int = 30) -> list[dict]:
