@@ -757,17 +757,21 @@ class TestPositionTrackerSession:
         assert sell_kwargs["session"] == "after_hours"
         assert sell_kwargs["order_type"] == "limit"
 
-    async def test_check_all_regular_session_uses_market_order(
+    async def test_check_all_regular_session_uses_limit_order(
         self, pt_adapter, pt_risk, pt_order_mgr,
     ):
-        """Regular session SL sell uses market order."""
+        """STOCK-77: Regular session SL sell uses limit order (KIS APBK1269 fix).
+
+        KIS overseas API only supports limit orders (ORD_DVSN="00"). Market orders
+        return APBK1269. order_type must always be 'limit', including regular session.
+        """
         pt_adapter.fetch_positions = AsyncMock(return_value=[
             Position(symbol="005930", exchange="KRX", quantity=10,
                      avg_price=72000.0, current_price=64000.0),
         ])
         pt_adapter.create_sell_order = AsyncMock(return_value=OrderResult(
             order_id="SL002", symbol="005930", side="SELL",
-            order_type="market", quantity=10, status="filled",
+            order_type="limit", quantity=10, status="filled",
             filled_price=64000.0,
         ))
 
@@ -778,7 +782,7 @@ class TestPositionTrackerSession:
 
         sell_kwargs = pt_adapter.create_sell_order.call_args[1]
         assert sell_kwargs["session"] == "regular"
-        assert sell_kwargs["order_type"] == "market"
+        assert sell_kwargs["order_type"] == "limit"
 
     async def test_check_all_pre_market_session(
         self, pt_adapter, pt_risk, pt_order_mgr,

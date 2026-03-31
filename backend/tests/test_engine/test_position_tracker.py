@@ -2417,3 +2417,140 @@ async def test_check_all_position_gone_then_handle_sell_fill_fires_cooldown(
     # STOCK-60 fix: callback IS now fired, cooldown will be registered
     assert len(callback_calls) == 1
     assert callback_calls[0] == "HPSP"
+
+
+# ── STOCK-77: order_type inversion bug fixes ─────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_execute_sell_uses_limit_order_during_regular_session(adapter, risk, order_mgr):
+    """STOCK-77: _execute_sell always uses order_type='limit' (KIS APBK1269 fix).
+
+    Before the fix, regular session produced order_type='market', which caused
+    KIS overseas API to return APBK1269. The fix hardcodes order_type='limit'.
+    """
+    from exchange.base import OrderResult
+
+    adapter.fetch_positions = AsyncMock(
+        return_value=[
+            Position(
+                symbol="AAPL",
+                exchange="NASD",
+                quantity=10,
+                avg_price=150.0,
+                current_price=135.0,  # -10% < -8% SL → stop_loss triggered
+            ),
+        ]
+    )
+    adapter.create_sell_order = AsyncMock(
+        return_value=OrderResult(
+            order_id="sell_sl1",
+            symbol="AAPL",
+            side="SELL",
+            order_type="limit",
+            quantity=10,
+            status="filled",
+            filled_price=135.0,
+        )
+    )
+
+    tracker = PositionTracker(adapter, risk, order_mgr)
+    tracker.track("AAPL", 150.0, 10)
+
+    triggered = await tracker.check_all()
+    assert len(triggered) == 1
+    assert triggered[0]["reason"] == "stop_loss"
+
+    # Verify create_sell_order was called with order_type="limit", not "market"
+    call_kwargs = adapter.create_sell_order.call_args.kwargs
+    assert call_kwargs.get("order_type") == "limit"
+
+
+@pytest.mark.asyncio
+async def test_execute_sell_uses_limit_order_during_extended_session(adapter, risk, order_mgr):
+    """STOCK-77: _execute_sell uses order_type='limit' in extended hours too."""
+    from exchange.base import OrderResult
+
+    adapter.fetch_positions = AsyncMock(
+        return_value=[
+            Position(
+                symbol="AAPL",
+                exchange="NASD",
+                quantity=10,
+                avg_price=150.0,
+                current_price=135.0,  # -10% < -8% SL → stop_loss triggered
+            ),
+        ]
+    )
+    adapter.create_sell_order = AsyncMock(
+        return_value=OrderResult(
+            order_id="sell_sl2",
+            symbol="AAPL",
+            side="SELL",
+            order_type="limit",
+            quantity=10,
+            status="filled",
+            filled_price=135.0,
+        )
+    )
+
+    tracker = PositionTracker(adapter, risk, order_mgr)
+    tracker.track("AAPL", 150.0, 10)
+
+    # Simulate extended-hours check by passing session="pre_market"
+    triggered = await tracker.check_all(session="pre_market")
+    assert len(triggered) == 1
+    assert triggered[0]["reason"] == "stop_loss"
+
+    call_kwargs = adapter.create_sell_order.call_args.kwargs
+    assert call_kwargs.get("order_type") == "limit"
+
+
+@pytest.mark.asyncio
+async def test_execute_partial_sell_uses_limit_order_during_regular_session(
+    adapter, risk_with_profit_taking
+):
+    """STOCK-77: _execute_partial_sell always uses order_type='limit' (KIS APBK1269 fix).
+
+    Before the fix, regular session produced order_type='market' for profit-taking sells,
+    causing KIS overseas API APBK1269 error. The fix hardcodes order_type='limit'.
+    """
+    from exchange.base import OrderResult
+
+    risk = risk_with_profit_taking
+    order_mgr_pt = OrderManager(adapter=adapter, risk_manager=risk)
+
+    adapter.fetch_positions = AsyncMock(
+        return_value=[
+            Position(
+                symbol="NVDA",
+                exchange="NASD",
+                quantity=20,
+                avg_price=100.0,
+                current_price=112.0,  # +12% → profit-taking threshold 10%
+            ),
+        ]
+    )
+    adapter.create_sell_order = AsyncMock(
+        return_value=OrderResult(
+            order_id="sell_pt1",
+            symbol="NVDA",
+            side="SELL",
+            order_type="limit",
+            quantity=10,
+            status="filled",
+            filled_price=112.0,
+            filled_quantity=10,
+        )
+    )
+
+    tracker = PositionTracker(adapter, risk, order_mgr_pt)
+    tracker.track("NVDA", 100.0, 20)
+
+    triggered = await tracker.check_all()
+    assert len(triggered) == 1
+    assert triggered[0]["reason"] == "profit_taking"
+
+    # Verify create_sell_order was called with order_type="limit", not "market"
+    call_kwargs = adapter.create_sell_order.call_args.kwargs
+    assert call_kwargs.get("order_type") == "limit"
