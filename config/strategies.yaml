@@ -443,15 +443,15 @@ markets:
       - bnf_deviation
       - volume_surge
     risk:
-      kelly_fraction: 0.50
-      max_position_pct: 0.20
-      min_position_pct: 0.12
+      kelly_fraction: 1.00       # STOCK-77: grid search optimal (was 0.50)
+      max_position_pct: 0.30     # STOCK-77: 30% per position (was 0.20)
+      min_position_pct: 0.15     # STOCK-77: 15% min (was 0.12)
       max_positions: 8
-      default_stop_loss_pct: 0.10
+      default_stop_loss_pct: 0.15  # STOCK-77: 15% SL (was 0.10)
       default_take_profit_pct: 0.15
       dynamic_sl_tp: false
     evaluation_loop:
-      min_confidence: 0.30
+      min_confidence: 0.20       # STOCK-77: lowered (was 0.30)
       min_active_ratio: null   # null = no override; use per-call defaults (0.15 for held)
       sell_cooldown_days: 1
       whipsaw_max_losses: 2
