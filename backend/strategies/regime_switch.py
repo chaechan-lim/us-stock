@@ -8,8 +8,8 @@ Uses SMA-200 cross on SPY + VIX thresholds for confirmation.
 
 import pandas as pd
 
-from strategies.base import BaseStrategy, Signal
 from core.enums import SignalType
+from strategies.base import BaseStrategy, Signal
 
 
 class RegimeSwitchStrategy(BaseStrategy):

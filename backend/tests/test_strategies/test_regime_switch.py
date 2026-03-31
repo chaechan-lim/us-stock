@@ -1,11 +1,11 @@
 """Tests for Regime Switch Strategy."""
 
-import pytest
-import pandas as pd
 import numpy as np
+import pandas as pd
+import pytest
 
-from strategies.regime_switch import RegimeSwitchStrategy
 from core.enums import SignalType
+from strategies.regime_switch import RegimeSwitchStrategy
 
 
 def _make_df(n=250, trend="up"):
