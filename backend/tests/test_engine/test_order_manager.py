@@ -576,7 +576,7 @@ class TestStaleOrderCancel:
         assert len(cancelled) == 1
         assert cancelled[0]["symbol"] == "005930"
         assert cancelled[0]["side"] == "BUY"
-        mock_adapter.cancel_order.assert_called_once_with("ORD001", "005930")
+        mock_adapter.cancel_order.assert_called_once_with("ORD001", "005930", exchange="NASD")
 
     async def test_fresh_order_not_cancelled(self, mock_adapter, risk_manager):
         """Orders within TTL are NOT cancelled."""

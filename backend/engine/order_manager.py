@@ -424,7 +424,11 @@ class OrderManager:
     async def cancel(self, order_id: str, symbol: str) -> bool:
         """Cancel an active order."""
         try:
-            success = await self._adapter.cancel_order(order_id, symbol)
+            exchange = "NASD"
+            managed = self._active_orders.get(order_id)
+            if managed:
+                exchange = managed.exchange
+            success = await self._adapter.cancel_order(order_id, symbol, exchange=exchange)
             if success and order_id in self._active_orders:
                 self._active_orders[order_id].status = "cancelled"
             return success
@@ -616,12 +620,25 @@ class OrderManager:
                     }
                 )
             else:
-                logger.warning(
-                    "Failed to cancel stale order %s (%s %s)",
-                    oid,
-                    order.side,
-                    order.symbol,
-                )
+                # STOCK-78: Force-remove if order is very old (>3x TTL)
+                # to prevent permanent dedup blocking
+                if age_min > ttl_minutes * 3:
+                    order.status = "cancelled"
+                    logger.warning(
+                        "Force-cancelled stuck order %s (%s %s, age=%.0fmin): "
+                        "cancel API failed but removing from active to unblock",
+                        oid,
+                        order.side,
+                        order.symbol,
+                        age_min,
+                    )
+                else:
+                    logger.warning(
+                        "Failed to cancel stale order %s (%s %s)",
+                        oid,
+                        order.side,
+                        order.symbol,
+                    )
 
         return cancelled
 

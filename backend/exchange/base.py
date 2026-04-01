@@ -136,7 +136,7 @@ class ExchangeAdapter(ABC):
         ...
 
     @abstractmethod
-    async def cancel_order(self, order_id: str, symbol: str) -> bool:
+    async def cancel_order(self, order_id: str, symbol: str, **kwargs) -> bool:
         ...
 
     @abstractmethod

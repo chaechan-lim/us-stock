@@ -487,12 +487,12 @@ class KISAdapter(ExchangeAdapter):
             symbol, "sell", quantity, price, order_type, exchange, self._tr["SELL_US"]
         )
 
-    async def cancel_order(self, order_id: str, symbol: str) -> bool:
+    async def cancel_order(self, order_id: str, symbol: str, exchange: str = "NASD") -> bool:
         await self._auth.ensure_valid_token()
         body = {
             "CANO": self._config.account_no,
             "ACNT_PRDT_CD": self._config.account_product,
-            "OVRS_EXCG_CD": "NASD",
+            "OVRS_EXCG_CD": exchange,
             "PDNO": symbol,
             "ORGN_ODNO": order_id,
             "RVSE_CNCL_DVSN_CD": "02",  # 02 = cancel
