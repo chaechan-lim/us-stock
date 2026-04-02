@@ -427,6 +427,34 @@ strategies:
 # Market-specific overrides
 # Each market key can override: disabled_strategies, risk, evaluation_loop
 markets:
+  US:
+    # STOCK-79: dual_momentum + volume_surge — PROVISIONAL (see note below)
+    #
+    # US combo activation floor (see CLAUDE.md): Sharpe > 0, MDD < 15%, PF > 1.0
+    #
+    # Prior baseline (sector_rotation + volume_profile + volume_surge):
+    #   Ret=-10.2%, Sharpe=-0.99, MDD=-14.6%, PF=0.84
+    # This combo (dual_momentum + volume_surge), backtest 5y:
+    #   Ret=+1.5%,  Sharpe=-0.67, MDD=-8.6%,  PF=1.03
+    #
+    # ⚠ PROVISIONAL: Sharpe=-0.67 is negative and below the Sharpe > 0 floor.
+    # MDD and PF clear the floor; Sharpe does not. Improvement over baseline on
+    # all four dimensions is confirmed, but Sharpe > 0 has not been achieved.
+    # A follow-up ticket must optimise (e.g. add regime_switch or tune look-back
+    # windows) until Sharpe > 0 is met before this config is considered stable.
+    disabled_strategies:
+      - trend_following
+      - donchian_breakout
+      - supertrend
+      - macd_histogram
+      - rsi_divergence
+      - bollinger_squeeze
+      - volume_profile
+      - regime_switch
+      - sector_rotation
+      - cis_momentum
+      - larry_williams
+      - bnf_deviation
   KR:
     # STOCK-65: Grid-search optimized — only supertrend + dual_momentum for KR
     disabled_strategies:

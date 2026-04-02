@@ -107,7 +107,7 @@ class TestDisabledStrategies:
         assert "supertrend" in loop._disabled_strategies
 
     def test_us_optimal_only_3_strategies(self):
-        """US grid search optimal: only sector_rotation + volume_profile + volume_surge."""
+        """STOCK-66 US grid search optimal: only sector_rotation + volume_profile + volume_surge."""
         _all = [
             "trend_following", "donchian_breakout", "supertrend", "macd_histogram",
             "dual_momentum", "rsi_divergence", "bollinger_squeeze", "volume_profile",
