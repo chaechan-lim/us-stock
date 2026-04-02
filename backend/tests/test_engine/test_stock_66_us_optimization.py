@@ -121,32 +121,6 @@ class TestDisabledStrategies:
         active_names = {s.name for s in active}
         assert active_names == _us_enabled
 
-    def test_us_stock79_dual_momentum_and_volume_surge(self):
-        """STOCK-79: dual_momentum activated, sector_rotation/volume_profile disabled.
-
-        Backtest (5y): dual_momentum + volume_surge → Ret=+1.5%, Sharpe=-0.67,
-        MDD=-8.6%, PF=1.03 (vs Top3 baseline Ret=-10.2%, Sharpe=-0.99).
-        """
-        _all = [
-            "trend_following", "donchian_breakout", "supertrend", "macd_histogram",
-            "dual_momentum", "rsi_divergence", "bollinger_squeeze", "volume_profile",
-            "regime_switch", "sector_rotation", "cis_momentum", "larry_williams",
-            "bnf_deviation", "volume_surge",
-        ]
-        _us_enabled = {"dual_momentum", "volume_surge"}
-        disabled = frozenset(s for s in _all if s not in _us_enabled)
-        loop = _make_loop(disabled=list(disabled))
-        active = loop._get_active_strategies()
-        active_names = {s.name for s in active}
-        assert active_names == _us_enabled
-        # dual_momentum must be active
-        assert "dual_momentum" in active_names
-        # sector_rotation and volume_profile must be disabled
-        assert "sector_rotation" not in active_names
-        assert "volume_profile" not in active_names
-        # volume_surge remains active
-        assert "volume_surge" in active_names
-
 
 class TestCombinerOverrides:
     def test_min_confidence_default_none(self):

@@ -27,6 +27,7 @@ Architecture inherited from ~/coin project (crypto trading bot). **Live trading*
 - Strategy weights defined per market state in profiles section of strategies.yaml
 - Start new strategies at weight 0.05, increase gradually after paper validation
 - US/KR combo selection (which strategies are enabled per market): threshold is measurable improvement over prior enabled combo on all four dimensions (Ret, Sharpe, MDD, PF) — not the absolute new-strategy gate above. Document baseline vs new combo metrics in strategies.yaml markets section.
+- US combo activation floor (relaxed from new-strategy gate): Sharpe > 0 (not negative), MDD < 15%, PF > 1.0. Sharpe > 1.0 and CAGR > 12% remain the long-run targets. A combo failing the floor must be marked PROVISIONAL in strategies.yaml and requires a follow-up optimisation ticket.
 
 ### Testing Requirements
 - Unit tests: pytest + pytest-asyncio, coverage target 90%+

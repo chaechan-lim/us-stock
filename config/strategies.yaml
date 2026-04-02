@@ -428,14 +428,20 @@ strategies:
 # Each market key can override: disabled_strategies, risk, evaluation_loop
 markets:
   US:
-    # STOCK-79: Grid-search optimized — dual_momentum + volume_surge for US
+    # STOCK-79: dual_momentum + volume_surge — PROVISIONAL (see note below)
     #
-    # Threshold note: CAGR>12% / Sharpe>1.0 gates apply to NEW individual strategy
-    # introduction (CLAUDE.md Strategy Rules). For US combo selection, the applicable
-    # bar is measurable improvement over the prior enabled combo. Prior baseline
-    # (sector_rotation + volume_profile + volume_surge): Ret=-10.2%, Sharpe=-0.99,
-    # MDD=-14.6%, PF=0.84. This combo clears that bar on all four dimensions:
-    # Backtest (5y): Ret=+1.5%, Sharpe=-0.67, MDD=-8.6%, PF=1.03
+    # US combo activation floor (see CLAUDE.md): Sharpe > 0, MDD < 15%, PF > 1.0
+    #
+    # Prior baseline (sector_rotation + volume_profile + volume_surge):
+    #   Ret=-10.2%, Sharpe=-0.99, MDD=-14.6%, PF=0.84
+    # This combo (dual_momentum + volume_surge), backtest 5y:
+    #   Ret=+1.5%,  Sharpe=-0.67, MDD=-8.6%,  PF=1.03
+    #
+    # ⚠ PROVISIONAL: Sharpe=-0.67 is negative and below the Sharpe > 0 floor.
+    # MDD and PF clear the floor; Sharpe does not. Improvement over baseline on
+    # all four dimensions is confirmed, but Sharpe > 0 has not been achieved.
+    # A follow-up ticket must optimise (e.g. add regime_switch or tune look-back
+    # windows) until Sharpe > 0 is met before this config is considered stable.
     disabled_strategies:
       - trend_following
       - donchian_breakout
