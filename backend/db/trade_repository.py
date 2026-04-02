@@ -38,6 +38,7 @@ class TradeRepository:
         market: str = "US",
         session: str = "regular",
         is_paper: bool = False,
+        account_id: str = "ACC001",
     ) -> Order:
         # UPSERT: if kis_order_id already exists, update instead of inserting
         # Prevents duplicate rows when both order placement and reconciliation
@@ -79,6 +80,7 @@ class TradeRepository:
                 return existing
 
         order = Order(
+            account_id=account_id,
             symbol=symbol,
             exchange=exchange,
             side=side,
@@ -131,20 +133,29 @@ class TradeRepository:
         offset: int = 0,
         symbol: str | None = None,
         exclude_paper: bool = False,
+        account_id: str | None = None,
     ) -> list[Order]:
         stmt = select(Order).order_by(desc(Order.created_at))
         if symbol:
             stmt = stmt.where(Order.symbol == symbol)
         if exclude_paper:
             stmt = stmt.where(Order.is_paper == False)  # noqa: E712
+        if account_id is not None:
+            stmt = stmt.where(Order.account_id == account_id)
         stmt = stmt.offset(offset).limit(limit)
         result = await self._session.execute(stmt)
         return list(result.scalars().all())
 
-    async def get_open_orders(self, exclude_paper: bool = False) -> list[Order]:
+    async def get_open_orders(
+        self,
+        exclude_paper: bool = False,
+        account_id: str | None = None,
+    ) -> list[Order]:
         stmt = select(Order).where(Order.status.in_(["pending", "open", "submitted", "not_found"]))
         if exclude_paper:
             stmt = stmt.where(Order.is_paper == False)  # noqa: E712
+        if account_id is not None:
+            stmt = stmt.where(Order.account_id == account_id)
         result = await self._session.execute(stmt)
         return list(result.scalars().all())
 
@@ -160,6 +171,7 @@ class TradeRepository:
         self,
         hours: int = 24,
         exclude_paper: bool = False,
+        account_id: str | None = None,
     ) -> list[Order]:
         """Get filled trades from the last N hours.
 
@@ -187,6 +199,8 @@ class TradeRepository:
         )
         if exclude_paper:
             stmt = stmt.where(Order.is_paper == False)  # noqa: E712
+        if account_id is not None:
+            stmt = stmt.where(Order.account_id == account_id)
         result = await self._session.execute(stmt)
         return list(result.scalars().all())
 
@@ -285,7 +299,7 @@ class TradeRepository:
     ) -> list[Watchlist]:
         stmt = select(Watchlist).order_by(Watchlist.added_at)
         if active_only:
-            stmt = stmt.where(Watchlist.is_active == True)
+            stmt = stmt.where(Watchlist.is_active == True)  # noqa: E712
         if market:
             stmt = stmt.where(Watchlist.market == market)
         result = await self._session.execute(stmt)

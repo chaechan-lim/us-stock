@@ -47,6 +47,7 @@ _INITIAL_REVISION: str = "cfbdf0cd6e1f"
 #   ("<new_rev>", "<sentinel_table>", "<column_added_by_migration>"),  # STOCK-N
 _MIGRATION_SENTINELS: list[tuple[str, str, str]] = [
     # (revision_hash, sentinel_table, sentinel_column)
+    ("e3a8f2c1d4b5", "orders", "account_id"),  # STOCK-83
     ("607feca4f8b7", "portfolio_snapshots", "usd_krw_rate"),  # STOCK-58
 ]
 
@@ -206,12 +207,24 @@ _EXPECTED_COLUMNS: Sequence[tuple[str, str, str, str | None, bool]] = [
     ("orders", "buy_strategy", "VARCHAR(50)", None, False),
     ("orders", "pnl_pct", "FLOAT", None, False),
     ("portfolio_snapshots", "cash_flow", "FLOAT", "0.0", False),
+    # STOCK-83: account_id for multi-account support (default ACC001 for existing data)
+    ("orders", "account_id", "VARCHAR(20)", "'ACC001'", True),
+    ("positions", "account_id", "VARCHAR(20)", "'ACC001'", True),
+    ("portfolio_snapshots", "account_id", "VARCHAR(20)", "'ACC001'", True),
+    ("strategy_logs", "account_id", "VARCHAR(20)", "'ACC001'", True),
 ]
 
 # Indexes that may be missing from existing deployments.
-# Format: (table_name, index_name, column_name)
+# Format: (table_name, index_name, columns)
+# ``columns`` is a comma-separated string of one or more column names.
+# All listed columns must exist before the index is created.
 _EXPECTED_INDEXES: Sequence[tuple[str, str, str]] = [
     ("orders", "idx_orders_is_paper", "is_paper"),
+    # STOCK-83: composite indexes for efficient per-account queries
+    ("orders", "idx_orders_account_market_symbol", "account_id, market, symbol"),
+    ("positions", "idx_positions_account_market_symbol", "account_id, market, symbol"),
+    ("portfolio_snapshots", "idx_snapshots_account_market", "account_id, market"),
+    ("strategy_logs", "idx_strategy_logs_account_symbol", "account_id, symbol"),
 ]
 
 
@@ -281,14 +294,17 @@ async def ensure_indexes(engine: AsyncEngine) -> list[str]:
                 if not insp.has_table(table):
                     continue
 
-                # Check if the column exists (index on missing column would fail)
+                # ``column`` may be a comma-separated list for composite indexes.
+                # All referenced columns must exist before the index can be created.
+                col_list = [c.strip() for c in column.split(",")]
                 existing_cols = {c["name"] for c in insp.get_columns(table)}
-                if column not in existing_cols:
+                missing = [c for c in col_list if c not in existing_cols]
+                if missing:
                     logger.debug(
-                        "Skipping index %s: column %s.%s does not exist yet",
+                        "Skipping index %s: column(s) %s on %s do not exist yet",
                         index_name,
+                        missing,
                         table,
-                        column,
                     )
                     continue
 

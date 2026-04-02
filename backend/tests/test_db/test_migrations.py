@@ -136,10 +136,12 @@ async def test_adds_all_missing_columns(old_engine):
     """ensure_columns adds all missing columns in one call."""
     added = await ensure_columns(old_engine)
 
-    assert len(added) == 3
+    # old_engine only has orders table; positions/portfolio_snapshots/strategy_logs skipped
+    assert len(added) == 4
     assert "orders.is_paper" in added
     assert "orders.buy_strategy" in added
     assert "orders.pnl_pct" in added
+    assert "orders.account_id" in added
 
 
 @pytest.mark.asyncio
@@ -154,7 +156,7 @@ async def test_idempotent_no_change_when_columns_present(full_engine):
 async def test_idempotent_second_run(old_engine):
     """Running ensure_columns twice does not fail or re-add columns."""
     first = await ensure_columns(old_engine)
-    assert len(first) == 3
+    assert len(first) == 4  # is_paper, buy_strategy, pnl_pct, account_id
 
     second = await ensure_columns(old_engine)
     assert second == []
@@ -372,7 +374,9 @@ async def test_full_migration_sequence(old_engine):
     assert "orders.is_paper" in added_cols
     assert "orders.buy_strategy" in added_cols
     assert "orders.pnl_pct" in added_cols
+    assert "orders.account_id" in added_cols  # STOCK-83
     assert "idx_orders_is_paper" in created_idxs
+    assert "idx_orders_account_market_symbol" in created_idxs  # STOCK-83
 
     # Verify everything is in place
     async with old_engine.connect() as conn:
@@ -386,7 +390,9 @@ async def test_full_migration_sequence(old_engine):
     assert "is_paper" in cols
     assert "buy_strategy" in cols
     assert "pnl_pct" in cols
+    assert "account_id" in cols  # STOCK-83
     assert "idx_orders_is_paper" in indexes
+    assert "idx_orders_account_market_symbol" in indexes  # STOCK-83
 
     # Second run is a complete no-op
     assert await ensure_columns(old_engine) == []
@@ -547,11 +553,10 @@ async def legacy_engine_without_stock58():
 
 @pytest_asyncio.fixture
 async def legacy_engine_with_stock58():
-    """Engine with tables AND stock-58 columns — simulates fresh DB via create_all.
+    """Engine with tables AND stock-58 columns but WITHOUT stock-83 account_id.
 
-    When create_all builds tables from current ORM models, all columns are
-    present.  We should stamp at the latest sentinel revision and then run
-    upgrade (which will be a no-op since schema is already current).
+    Simulates a deployment that had STOCK-58 applied but not yet STOCK-83.
+    The migration sentinel walk should land on the STOCK-58 revision.
     """
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as conn:
@@ -564,6 +569,42 @@ async def legacy_engine_with_stock58():
                 "strategy_name TEXT, kis_order_id TEXT, pnl REAL, "
                 "created_at DATETIME, filled_at DATETIME, "
                 "filled_quantity REAL DEFAULT 0, filled_price REAL)"
+            )
+        )
+        await conn.execute(
+            text(
+                "CREATE TABLE portfolio_snapshots ("
+                "id INTEGER PRIMARY KEY, total_value_usd REAL NOT NULL, "
+                "cash_usd REAL NOT NULL, invested_usd REAL NOT NULL, "
+                "realized_pnl REAL, unrealized_pnl REAL, daily_pnl REAL, "
+                "drawdown_pct REAL, recorded_at DATETIME, "
+                "usd_krw_rate REAL)"  # STOCK-58 column present
+            )
+        )
+    yield engine
+    await engine.dispose()
+
+
+@pytest_asyncio.fixture
+async def legacy_engine_with_stock83():
+    """Engine with all current sentinel columns including STOCK-83 account_id.
+
+    Simulates a fresh DB bootstrapped via create_all with all current ORM models
+    (or a DB that had all migrations up to STOCK-83 applied).  We should stamp
+    at the newest sentinel revision (STOCK-83) and then run upgrade (no-op).
+    """
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "CREATE TABLE orders ("
+                "id INTEGER PRIMARY KEY, symbol TEXT NOT NULL, side TEXT, "
+                "order_type TEXT, quantity REAL, price REAL, status TEXT, "
+                "exchange TEXT DEFAULT 'NASD', market TEXT DEFAULT 'US', "
+                "strategy_name TEXT, kis_order_id TEXT, pnl REAL, "
+                "created_at DATETIME, filled_at DATETIME, "
+                "filled_quantity REAL DEFAULT 0, filled_price REAL, "
+                "account_id TEXT NOT NULL DEFAULT 'ACC001')"  # STOCK-83 column present
             )
         )
         await conn.execute(
@@ -669,18 +710,43 @@ async def test_run_alembic_upgrade_legacy_without_stock58_stamps_initial(
 
 @pytest.mark.asyncio
 async def test_run_alembic_upgrade_legacy_with_all_sentinels_stamps_at_latest_revision(
+    legacy_engine_with_stock83, alembic_dir
+):
+    """Legacy DB with all current sentinel columns → stamp at newest sentinel, then upgrade.
+
+    Uses ``legacy_engine_with_stock83`` which has the STOCK-83 ``account_id``
+    column (the newest sentinel).  The walk should match the first entry and
+    stamp at ``e3a8f2c1d4b5``.
+    """
+    success_proc = _make_proc(0)
+
+    with patch("db.migrations._run_alembic_cmd", return_value=success_proc) as mock_cmd:
+        await run_alembic_upgrade(legacy_engine_with_stock83, alembic_dir=alembic_dir)
+
+    calls = [c.args[0] for c in mock_cmd.call_args_list]
+    # Should stamp at the newest sentinel's revision (not the dynamic "head" string),
+    # so that the stamp target is deterministic regardless of when alembic resolves it.
+    assert calls[0] == ["stamp", _MIGRATION_SENTINELS[0][0]]
+    assert calls[1] == ["upgrade", "head"]
+
+
+@pytest.mark.asyncio
+async def test_run_alembic_upgrade_legacy_with_stock58_only_stamps_at_stock58(
     legacy_engine_with_stock58, alembic_dir
 ):
-    """Legacy DB with all sentinel columns → stamp at newest sentinel, then upgrade."""
+    """Legacy DB with STOCK-58 columns but not STOCK-83 → stamps at STOCK-58 revision.
+
+    The sentinel walk finds ``account_id`` missing (STOCK-83 not yet applied) and
+    falls through to the STOCK-58 sentinel (``usd_krw_rate`` present).
+    """
     success_proc = _make_proc(0)
 
     with patch("db.migrations._run_alembic_cmd", return_value=success_proc) as mock_cmd:
         await run_alembic_upgrade(legacy_engine_with_stock58, alembic_dir=alembic_dir)
 
     calls = [c.args[0] for c in mock_cmd.call_args_list]
-    # Should stamp at the newest sentinel's revision (not the dynamic "head" string),
-    # so that the stamp target is deterministic regardless of when alembic resolves it.
-    assert calls[0] == ["stamp", _MIGRATION_SENTINELS[0][0]]
+    stock58_revision = _MIGRATION_SENTINELS[1][0]  # second entry = STOCK-58
+    assert calls[0] == ["stamp", stock58_revision]
     assert calls[1] == ["upgrade", "head"]
 
 
@@ -877,3 +943,223 @@ async def test_pg_advisory_lock_released_on_failure(alembic_dir):
     # Lock must be released even though upgrade raised
     unlock_sqls = [s for s in executed_sqls if "pg_advisory_unlock" in s]
     assert len(unlock_sqls) == 1, f"expected 1 unlock SQL, got: {unlock_sqls}"
+
+
+# ── STOCK-83: account_id migration tests ─────────────────────────────
+
+
+@pytest_asyncio.fixture
+async def multi_table_engine():
+    """Engine with orders, positions, portfolio_snapshots, strategy_logs — no account_id.
+
+    Simulates a legacy deployment that predates STOCK-83.
+    """
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "CREATE TABLE orders ("
+                "id INTEGER PRIMARY KEY, symbol TEXT NOT NULL, side TEXT, "
+                "order_type TEXT, quantity REAL, price REAL, status TEXT DEFAULT 'pending', "
+                "exchange TEXT DEFAULT 'NASD', market TEXT DEFAULT 'US', "
+                "strategy_name TEXT, kis_order_id TEXT, pnl REAL, "
+                "created_at DATETIME, filled_at DATETIME, "
+                "filled_quantity REAL DEFAULT 0, filled_price REAL, "
+                "is_paper INTEGER NOT NULL DEFAULT 0, buy_strategy TEXT, pnl_pct REAL, "
+                "session TEXT DEFAULT 'regular')"
+            )
+        )
+        await conn.execute(
+            text(
+                "CREATE TABLE positions ("
+                "id INTEGER PRIMARY KEY, symbol TEXT NOT NULL, "
+                "market TEXT DEFAULT 'US', exchange TEXT DEFAULT 'NASD', "
+                "quantity REAL NOT NULL, avg_price REAL NOT NULL, "
+                "current_price REAL, unrealized_pnl REAL, "
+                "stop_loss REAL, take_profit REAL, trailing_stop REAL, "
+                "strategy_name TEXT, highest_price REAL, "
+                "partial_profit_taken INTEGER NOT NULL DEFAULT 0, "
+                "opened_at DATETIME, updated_at DATETIME)"
+            )
+        )
+        await conn.execute(
+            text(
+                "CREATE TABLE portfolio_snapshots ("
+                "id INTEGER PRIMARY KEY, market TEXT DEFAULT 'US', "
+                "total_value_usd REAL NOT NULL, cash_usd REAL NOT NULL, "
+                "invested_usd REAL NOT NULL, realized_pnl REAL, "
+                "unrealized_pnl REAL, daily_pnl REAL, drawdown_pct REAL, "
+                "cash_flow REAL DEFAULT 0.0, usd_krw_rate REAL, recorded_at DATETIME)"
+            )
+        )
+        await conn.execute(
+            text(
+                "CREATE TABLE strategy_logs ("
+                "id INTEGER PRIMARY KEY, strategy_name TEXT NOT NULL, "
+                "symbol TEXT NOT NULL, signal_type TEXT NOT NULL, "
+                "confidence REAL NOT NULL, indicators TEXT, "
+                "market_state TEXT, created_at DATETIME)"
+            )
+        )
+    yield engine
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_adds_account_id_to_all_tables(multi_table_engine):
+    """ensure_columns adds account_id to all four trading tables."""
+    added = await ensure_columns(multi_table_engine)
+
+    assert "orders.account_id" in added
+    assert "positions.account_id" in added
+    assert "portfolio_snapshots.account_id" in added
+    assert "strategy_logs.account_id" in added
+
+
+@pytest.mark.asyncio
+async def test_account_id_default_acc001_for_existing_rows(multi_table_engine):
+    """Existing rows get account_id = 'ACC001' after migration."""
+    # Insert rows BEFORE migration
+    async with multi_table_engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO orders (symbol, side, order_type, quantity, price, status) "
+                "VALUES ('AAPL', 'BUY', 'market', 10, 150.0, 'filled')"
+            )
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO positions (symbol, market, quantity, avg_price) "
+                "VALUES ('TSLA', 'US', 5, 200.0)"
+            )
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO portfolio_snapshots "
+                "(market, total_value_usd, cash_usd, invested_usd) "
+                "VALUES ('US', 10000.0, 5000.0, 5000.0)"
+            )
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO strategy_logs "
+                "(strategy_name, symbol, signal_type, confidence) "
+                "VALUES ('momentum', 'MSFT', 'BUY', 0.8)"
+            )
+        )
+
+    await ensure_columns(multi_table_engine)
+
+    async with multi_table_engine.connect() as conn:
+        r1 = await conn.execute(text("SELECT account_id FROM orders WHERE symbol='AAPL'"))
+        r2 = await conn.execute(text("SELECT account_id FROM positions WHERE symbol='TSLA'"))
+        r3 = await conn.execute(
+            text("SELECT account_id FROM portfolio_snapshots WHERE market='US'")
+        )
+        r4 = await conn.execute(text("SELECT account_id FROM strategy_logs WHERE symbol='MSFT'"))
+
+    assert r1.fetchone()[0] == "ACC001"
+    assert r2.fetchone()[0] == "ACC001"
+    assert r3.fetchone()[0] == "ACC001"
+    assert r4.fetchone()[0] == "ACC001"
+
+
+@pytest.mark.asyncio
+async def test_composite_indexes_created_after_account_id_added(multi_table_engine):
+    """ensure_indexes creates composite indexes once account_id columns are present."""
+    await ensure_columns(multi_table_engine)
+    created = await ensure_indexes(multi_table_engine)
+
+    assert "idx_orders_account_market_symbol" in created
+    assert "idx_positions_account_market_symbol" in created
+    assert "idx_snapshots_account_market" in created
+    assert "idx_strategy_logs_account_symbol" in created
+
+
+@pytest.mark.asyncio
+async def test_composite_indexes_skipped_when_account_id_missing(multi_table_engine):
+    """ensure_indexes skips composite indexes when account_id column is absent."""
+    # Don't run ensure_columns — account_id doesn't exist yet
+    created = await ensure_indexes(multi_table_engine)
+
+    assert "idx_orders_account_market_symbol" not in created
+    assert "idx_positions_account_market_symbol" not in created
+    assert "idx_snapshots_account_market" not in created
+    assert "idx_strategy_logs_account_symbol" not in created
+
+
+@pytest.mark.asyncio
+async def test_composite_indexes_idempotent(multi_table_engine):
+    """Running ensure_indexes twice after account_id migration is a no-op on second run."""
+    await ensure_columns(multi_table_engine)
+    first = await ensure_indexes(multi_table_engine)
+    assert "idx_orders_account_market_symbol" in first
+
+    second = await ensure_indexes(multi_table_engine)
+    assert second == []
+
+
+@pytest.mark.asyncio
+async def test_account_id_filter_in_trade_history(multi_table_engine):
+    """After migration, get_trade_history filters by account_id correctly."""
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from db.trade_repository import TradeRepository
+
+    await ensure_columns(multi_table_engine)
+
+    async with multi_table_engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO orders "
+                "(symbol, side, order_type, quantity, price, status, "
+                "exchange, market, account_id) VALUES "
+                "('AAPL', 'BUY', 'market', 10, 150.0, 'filled', 'NASD', 'US', 'ACC001'), "
+                "('TSLA', 'BUY', 'market', 5, 200.0, 'filled', 'NASD', 'US', 'ACC002')"
+            )
+        )
+
+    factory = async_sessionmaker(multi_table_engine, expire_on_commit=False)
+    async with factory() as session:
+        repo = TradeRepository(session)
+
+        acc1_trades = await repo.get_trade_history(account_id="ACC001")
+        acc2_trades = await repo.get_trade_history(account_id="ACC002")
+        all_trades = await repo.get_trade_history()  # no filter
+
+    assert len(acc1_trades) == 1
+    assert acc1_trades[0].symbol == "AAPL"
+    assert len(acc2_trades) == 1
+    assert acc2_trades[0].symbol == "TSLA"
+    assert len(all_trades) == 2
+
+
+@pytest.mark.asyncio
+async def test_run_alembic_upgrade_stock83_stamps_at_latest_sentinel(
+    alembic_dir: Path,
+):
+    """Legacy DB with account_id present → stamps at STOCK-83 sentinel revision."""
+    from db.migrations import _MIGRATION_SENTINELS
+
+    # Create engine with orders.account_id (STOCK-83 already applied)
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "CREATE TABLE orders ("
+                "id INTEGER PRIMARY KEY, symbol TEXT NOT NULL, "
+                "account_id TEXT NOT NULL DEFAULT 'ACC001', "
+                "market TEXT DEFAULT 'US')"
+            )
+        )
+    try:
+        success_proc = _make_proc(0)
+        with patch("db.migrations._run_alembic_cmd", return_value=success_proc) as mock_cmd:
+            await run_alembic_upgrade(engine, alembic_dir=alembic_dir)
+
+        calls = [c.args[0] for c in mock_cmd.call_args_list]
+        # STOCK-83 is the newest sentinel; should stamp at its revision
+        assert calls[0] == ["stamp", _MIGRATION_SENTINELS[0][0]]
+        assert calls[1] == ["upgrade", "head"]
+    finally:
+        await engine.dispose()

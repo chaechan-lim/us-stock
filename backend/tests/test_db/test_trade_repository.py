@@ -2,7 +2,7 @@
 
 import pytest
 import pytest_asyncio
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from core.models import Base
 from db.trade_repository import TradeRepository
@@ -144,8 +144,6 @@ async def test_watchlist_remove_nonexistent(repo):
 @pytest.mark.asyncio
 async def test_get_recent_trades(repo):
     """get_recent_trades returns only filled orders within time window."""
-    from datetime import datetime
-
     # Filled order — should appear
     order = await repo.save_order(
         symbol="AAPL",
@@ -903,8 +901,6 @@ async def test_save_order_upsert_allows_not_found_when_no_pnl(repo):
 @pytest.mark.asyncio
 async def test_get_recent_trades_includes_not_found_with_pnl(repo):
     """STOCK-37: get_recent_trades returns not_found orders with PnL."""
-    from datetime import datetime
-
     # Create a filled order
     filled = await repo.save_order(
         symbol="AAPL",
@@ -920,7 +916,7 @@ async def test_get_recent_trades_includes_not_found_with_pnl(repo):
     await repo.update_order_status(filled.id, "filled", filled_price=180.0)
 
     # Create a not_found order with PnL (STOCK-37 scenario)
-    not_found = await repo.save_order(
+    await repo.save_order(
         symbol="AMPX",
         side="sell",
         order_type="market",
@@ -985,6 +981,7 @@ async def test_save_order_upsert_not_found_with_negative_pnl(repo):
     assert order2.id == order1.id
     assert order2.status == "filled"
     assert order2.pnl == -51.62
+
 
 # --- STOCK-38: recover_not_found_orders ---
 
@@ -1174,3 +1171,207 @@ async def test_recover_not_found_commits_orders_without_kis_order_id(repo, sessi
     assert order.filled_at == order.created_at
     assert order.filled_price == 155.0
     assert order.filled_quantity == 10
+
+
+# --- STOCK-83: account_id multi-account support ---
+
+
+@pytest.mark.asyncio
+async def test_save_order_with_explicit_account_id(repo):
+    """save_order persists the given account_id on the order row."""
+    order = await repo.save_order(
+        symbol="AAPL",
+        side="buy",
+        order_type="market",
+        quantity=10,
+        price=150.0,
+        account_id="ACC002",
+    )
+    assert order.account_id == "ACC002"
+
+
+@pytest.mark.asyncio
+async def test_save_order_default_account_id(repo):
+    """save_order defaults account_id to 'ACC001' (backward compat)."""
+    order = await repo.save_order(
+        symbol="AAPL",
+        side="buy",
+        order_type="market",
+        quantity=10,
+        price=150.0,
+    )
+    assert order.account_id == "ACC001"
+
+
+@pytest.mark.asyncio
+async def test_get_trade_history_filter_by_account_id(repo):
+    """get_trade_history(account_id=...) returns only that account's orders."""
+    await repo.save_order(
+        symbol="AAPL",
+        side="buy",
+        order_type="market",
+        quantity=10,
+        price=150.0,
+        account_id="ACC001",
+    )
+    await repo.save_order(
+        symbol="TSLA",
+        side="buy",
+        order_type="market",
+        quantity=5,
+        price=200.0,
+        account_id="ACC002",
+    )
+    await repo.save_order(
+        symbol="MSFT",
+        side="buy",
+        order_type="market",
+        quantity=3,
+        price=400.0,
+        account_id="ACC001",
+    )
+
+    acc1 = await repo.get_trade_history(account_id="ACC001")
+    assert len(acc1) == 2
+    assert all(o.account_id == "ACC001" for o in acc1)
+
+    acc2 = await repo.get_trade_history(account_id="ACC002")
+    assert len(acc2) == 1
+    assert acc2[0].symbol == "TSLA"
+
+    all_orders = await repo.get_trade_history()
+    assert len(all_orders) == 3
+
+
+@pytest.mark.asyncio
+async def test_get_open_orders_filter_by_account_id(repo):
+    """get_open_orders(account_id=...) filters to a specific account."""
+    await repo.save_order(
+        symbol="AAPL",
+        side="buy",
+        order_type="limit",
+        quantity=10,
+        price=150.0,
+        status="pending",
+        account_id="ACC001",
+    )
+    await repo.save_order(
+        symbol="TSLA",
+        side="buy",
+        order_type="limit",
+        quantity=5,
+        price=200.0,
+        status="pending",
+        account_id="ACC002",
+    )
+
+    acc1_open = await repo.get_open_orders(account_id="ACC001")
+    assert len(acc1_open) == 1
+    assert acc1_open[0].symbol == "AAPL"
+
+    acc2_open = await repo.get_open_orders(account_id="ACC002")
+    assert len(acc2_open) == 1
+    assert acc2_open[0].symbol == "TSLA"
+
+    all_open = await repo.get_open_orders()
+    assert len(all_open) == 2
+
+
+@pytest.mark.asyncio
+async def test_get_recent_trades_filter_by_account_id(repo):
+    """get_recent_trades(account_id=...) filters to a specific account."""
+    # Create filled orders for two accounts
+    order1 = await repo.save_order(
+        symbol="AAPL",
+        side="buy",
+        order_type="market",
+        quantity=10,
+        price=150.0,
+        status="pending",
+        account_id="ACC001",
+    )
+    await repo.update_order_status(order1.id, "filled", filled_price=150.0)
+
+    order2 = await repo.save_order(
+        symbol="TSLA",
+        side="buy",
+        order_type="market",
+        quantity=5,
+        price=200.0,
+        status="pending",
+        account_id="ACC002",
+    )
+    await repo.update_order_status(order2.id, "filled", filled_price=200.0)
+
+    acc1_recent = await repo.get_recent_trades(hours=24, account_id="ACC001")
+    assert len(acc1_recent) == 1
+    assert acc1_recent[0].symbol == "AAPL"
+
+    acc2_recent = await repo.get_recent_trades(hours=24, account_id="ACC002")
+    assert len(acc2_recent) == 1
+    assert acc2_recent[0].symbol == "TSLA"
+
+    all_recent = await repo.get_recent_trades(hours=24)
+    assert len(all_recent) == 2
+
+
+@pytest.mark.asyncio
+async def test_account_id_combined_with_symbol_filter(repo):
+    """account_id filter composes correctly with symbol filter."""
+    await repo.save_order(
+        symbol="AAPL",
+        side="buy",
+        order_type="market",
+        quantity=10,
+        price=150.0,
+        account_id="ACC001",
+    )
+    await repo.save_order(
+        symbol="AAPL",
+        side="buy",
+        order_type="market",
+        quantity=5,
+        price=155.0,
+        account_id="ACC002",
+    )
+
+    result = await repo.get_trade_history(symbol="AAPL", account_id="ACC001")
+    assert len(result) == 1
+    assert result[0].account_id == "ACC001"
+
+
+@pytest.mark.asyncio
+async def test_account_id_combined_with_exclude_paper(repo):
+    """account_id filter composes correctly with exclude_paper filter."""
+    await repo.save_order(
+        symbol="AAPL",
+        side="buy",
+        order_type="market",
+        quantity=10,
+        price=150.0,
+        account_id="ACC001",
+        is_paper=True,
+    )
+    await repo.save_order(
+        symbol="MSFT",
+        side="buy",
+        order_type="market",
+        quantity=5,
+        price=400.0,
+        account_id="ACC001",
+        is_paper=False,
+    )
+    await repo.save_order(
+        symbol="TSLA",
+        side="buy",
+        order_type="market",
+        quantity=3,
+        price=200.0,
+        account_id="ACC002",
+        is_paper=False,
+    )
+
+    # Only live orders for ACC001
+    result = await repo.get_trade_history(account_id="ACC001", exclude_paper=True)
+    assert len(result) == 1
+    assert result[0].symbol == "MSFT"
