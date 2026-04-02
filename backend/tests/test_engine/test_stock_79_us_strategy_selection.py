@@ -1,0 +1,195 @@
+"""Tests for STOCK-79: US strategy selection — dual_momentum activated,
+sector_rotation / volume_profile disabled.
+
+Verifies:
+1. US disabled_strategies are loaded from config/strategies.yaml (not hardcoded)
+2. dual_momentum and volume_surge are the only enabled strategies for US
+3. sector_rotation and volume_profile are disabled
+4. EvaluationLoop reflects the config-driven disabled set
+"""
+
+from unittest.mock import AsyncMock, MagicMock
+
+import numpy as np
+import pandas as pd
+import pytest
+
+from core.enums import SignalType
+from engine.evaluation_loop import EvaluationLoop
+from engine.risk_manager import RiskManager
+from strategies.base import Signal
+from strategies.combiner import SignalCombiner
+from strategies.config_loader import StrategyConfigLoader
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+_ALL_STRATEGIES = [
+    "trend_following", "donchian_breakout", "supertrend", "macd_histogram",
+    "dual_momentum", "rsi_divergence", "bollinger_squeeze", "volume_profile",
+    "regime_switch", "sector_rotation", "cis_momentum", "larry_williams",
+    "bnf_deviation", "volume_surge",
+]
+
+_US_ENABLED = {"dual_momentum", "volume_surge"}
+
+
+def _make_df(n: int = 50) -> pd.DataFrame:
+    np.random.seed(42)
+    close = 100 * np.cumprod(1 + np.random.normal(0.001, 0.01, n))
+    return pd.DataFrame({
+        "open": close * 0.999,
+        "high": close * 1.01,
+        "low": close * 0.99,
+        "close": close,
+        "volume": np.random.randint(100_000, 500_000, n).astype(float),
+    })
+
+
+def _make_loop(disabled: list[str] | None = None) -> EvaluationLoop:
+    adapter = AsyncMock()
+    adapter.fetch_balance = AsyncMock(
+        return_value=MagicMock(total=100_000, available=80_000, currency="USD")
+    )
+    adapter.fetch_positions = AsyncMock(return_value=[])
+
+    market_data = AsyncMock()
+    market_data.get_ohlcv = AsyncMock(return_value=_make_df())
+    market_data.get_balance = AsyncMock(
+        return_value=MagicMock(total=100_000, available=80_000, currency="USD")
+    )
+    market_data.get_positions = AsyncMock(return_value=[])
+
+    strategies = []
+    for name in _ALL_STRATEGIES:
+        s = AsyncMock()
+        s.name = name
+        s.analyze = AsyncMock(return_value=Signal(
+            signal_type=SignalType.HOLD,
+            confidence=0.0,
+            strategy_name=name,
+            reason="test",
+        ))
+        strategies.append(s)
+
+    registry = MagicMock()
+    registry.get_enabled.return_value = strategies
+    registry.get_profile_weights.return_value = {s.name: 1.0 for s in strategies}
+
+    indicator_svc = MagicMock()
+    indicator_svc.add_all_indicators = MagicMock(return_value=_make_df())
+
+    loop = EvaluationLoop(
+        adapter=adapter,
+        market_data=market_data,
+        indicator_svc=indicator_svc,
+        registry=registry,
+        combiner=SignalCombiner(),
+        order_manager=MagicMock(),
+        risk_manager=RiskManager(),
+        market="US",
+    )
+    if disabled is not None:
+        loop.set_disabled_strategies(disabled)
+    return loop
+
+
+# ---------------------------------------------------------------------------
+# Config-loader tests
+# ---------------------------------------------------------------------------
+
+class TestUSConfigLoader:
+    def test_us_disabled_strategies_loaded_from_yaml(self):
+        """US disabled_strategies come from config, not hardcoded in main.py."""
+        loader = StrategyConfigLoader()
+        disabled = loader.get_market_disabled_strategies("US")
+        assert isinstance(disabled, list)
+        assert len(disabled) > 0
+
+    def test_dual_momentum_not_disabled(self):
+        loader = StrategyConfigLoader()
+        disabled = loader.get_market_disabled_strategies("US")
+        assert "dual_momentum" not in disabled
+
+    def test_volume_surge_not_disabled(self):
+        loader = StrategyConfigLoader()
+        disabled = loader.get_market_disabled_strategies("US")
+        assert "volume_surge" not in disabled
+
+    def test_sector_rotation_disabled(self):
+        loader = StrategyConfigLoader()
+        disabled = loader.get_market_disabled_strategies("US")
+        assert "sector_rotation" in disabled
+
+    def test_volume_profile_disabled(self):
+        loader = StrategyConfigLoader()
+        disabled = loader.get_market_disabled_strategies("US")
+        assert "volume_profile" in disabled
+
+    def test_us_enabled_set_is_dual_momentum_and_volume_surge(self):
+        """Exactly dual_momentum + volume_surge survive the disabled filter."""
+        loader = StrategyConfigLoader()
+        disabled = set(loader.get_market_disabled_strategies("US"))
+        enabled = {s for s in _ALL_STRATEGIES if s not in disabled}
+        assert enabled == _US_ENABLED
+
+    def test_us_no_risk_overrides(self):
+        """US risk params are not overridden in config — use code defaults."""
+        loader = StrategyConfigLoader()
+        assert loader.get_market_risk_config("US") == {}
+
+    def test_us_no_eval_loop_overrides(self):
+        """US evaluation_loop params are not overridden in config."""
+        loader = StrategyConfigLoader()
+        assert loader.get_market_evaluation_loop_config("US") == {}
+
+
+# ---------------------------------------------------------------------------
+# EvaluationLoop integration
+# ---------------------------------------------------------------------------
+
+class TestUSEvaluationLoop:
+    def test_config_driven_disabled_produces_correct_active_set(self):
+        """Applying config disabled list gives exactly {dual_momentum, volume_surge}."""
+        loader = StrategyConfigLoader()
+        disabled = loader.get_market_disabled_strategies("US")
+        loop = _make_loop(disabled=disabled)
+        active_names = {s.name for s in loop._get_active_strategies()}
+        assert active_names == _US_ENABLED
+
+    def test_dual_momentum_is_active(self):
+        loader = StrategyConfigLoader()
+        loop = _make_loop(disabled=loader.get_market_disabled_strategies("US"))
+        active_names = {s.name for s in loop._get_active_strategies()}
+        assert "dual_momentum" in active_names
+
+    def test_sector_rotation_is_inactive(self):
+        loader = StrategyConfigLoader()
+        loop = _make_loop(disabled=loader.get_market_disabled_strategies("US"))
+        active_names = {s.name for s in loop._get_active_strategies()}
+        assert "sector_rotation" not in active_names
+
+    def test_volume_profile_is_inactive(self):
+        loader = StrategyConfigLoader()
+        loop = _make_loop(disabled=loader.get_market_disabled_strategies("US"))
+        active_names = {s.name for s in loop._get_active_strategies()}
+        assert "volume_profile" not in active_names
+
+    @pytest.mark.asyncio
+    async def test_evaluate_symbol_calls_only_active_strategies(self):
+        """evaluate_symbol should only run dual_momentum and volume_surge."""
+        loader = StrategyConfigLoader()
+        loop = _make_loop(
+            disabled=loader.get_market_disabled_strategies("US"),
+        )
+        loop._min_confidence = 0.30
+        loop._min_active_ratio = 0.0
+
+        await loop.evaluate_symbol("AAPL")
+
+        for s in loop._registry.get_enabled.return_value:
+            if s.name in _US_ENABLED:
+                s.analyze.assert_called_once()
+            else:
+                s.analyze.assert_not_called()

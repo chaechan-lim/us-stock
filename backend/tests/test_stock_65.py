@@ -297,10 +297,19 @@ class TestStrategyConfigLoaderMarketMethods:
         assert eval_cfg.get("whipsaw_max_losses") == 2
         assert eval_cfg.get("min_hold_days") == 1
 
-    def test_get_market_config_us_returns_empty(self):
+    def test_get_market_config_us(self):
         loader = StrategyConfigLoader()
-        # US market doesn't have overrides in the config — typed wrappers return empty
-        assert loader.get_market_disabled_strategies("US") == []
+        # STOCK-79: US market has disabled_strategies in config (markets.US)
+        us_disabled = loader.get_market_disabled_strategies("US")
+        assert isinstance(us_disabled, list)
+        assert len(us_disabled) > 0
+        # dual_momentum and volume_surge must NOT be in disabled list (they are enabled)
+        assert "dual_momentum" not in us_disabled
+        assert "volume_surge" not in us_disabled
+        # sector_rotation and volume_profile must be disabled
+        assert "sector_rotation" in us_disabled
+        assert "volume_profile" in us_disabled
+        # US has no risk or evaluation_loop overrides (those remain config defaults)
         assert loader.get_market_risk_config("US") == {}
         assert loader.get_market_evaluation_loop_config("US") == {}
 

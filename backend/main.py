@@ -477,19 +477,10 @@ async def lifespan(app: FastAPI):
     evaluation_loop._hard_sl_pct = registry.config_loader.get_hard_sl_pct()
     evaluation_loop.set_cache(cache)
     position_tracker.register_on_sell(evaluation_loop.register_sell_cooldown)
-    # STOCK-79: US market-specific strategy selection
-    # Backtest (5y): dual_momentum + volume_surge → Ret=+1.5%, Sharpe=-0.67, MDD=-8.6%, PF=1.03
-    # (vs Top3 baseline sector_rotation+volume_profile+volume_surge: Ret=-10.2%, Sharpe=-0.99)
-    _all_strategies = [
-        "trend_following", "donchian_breakout", "supertrend", "macd_histogram",
-        "dual_momentum", "rsi_divergence", "bollinger_squeeze", "volume_profile",
-        "regime_switch", "sector_rotation", "cis_momentum", "larry_williams",
-        "bnf_deviation", "volume_surge",
-    ]
-    _us_enabled = {"dual_momentum", "volume_surge"}
-    evaluation_loop.set_disabled_strategies(
-        [s for s in _all_strategies if s not in _us_enabled]
-    )
+    # STOCK-79: US disabled strategies loaded from config/strategies.yaml (markets.US)
+    # See config for backtest results and threshold rationale.
+    us_disabled = registry.config_loader.get_market_disabled_strategies("US")
+    evaluation_loop.set_disabled_strategies(us_disabled)
     evaluation_loop.set_min_confidence(0.30)
     evaluation_loop.set_min_active_ratio(0.0)
     app.state.evaluation_loop = evaluation_loop
