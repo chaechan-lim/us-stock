@@ -24,6 +24,7 @@ omit = [
     "main.py",
     "mcp_server.py",
     "config.py",
+    "config/*",
     "scripts/*",
     "backtest/*",
     "api/*",

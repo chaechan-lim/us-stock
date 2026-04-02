@@ -9,14 +9,14 @@ Wraps 한국투자증권 Open API endpoints for:
 
 import json
 import logging
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Union
 
 import aiohttp
 from aiohttp import ContentTypeError
 
 from config import KISConfig
-from dataclasses import dataclass
-
+from config.accounts import AccountConfig
 from exchange.base import (
     Balance,
     Candle,
@@ -26,18 +26,20 @@ from exchange.base import (
     Position,
     Ticker,
 )
+from exchange.kis_auth import KISAuth
 
 
 @dataclass
 class RankedStock:
     """A stock from KIS ranking/screening API."""
+
     symbol: str
     name: str = ""
     price: float = 0.0
     change_pct: float = 0.0
     volume: float = 0.0
     source: str = ""
-from exchange.kis_auth import KISAuth
+
 
 logger = logging.getLogger(__name__)
 
@@ -75,7 +77,7 @@ TR_ID_PAPER = {
     "BUY_US": "VTTT1002U",
     "SELL_US": "VTTT1006U",
     "CANCEL_US": "VTTT1004U",
-    "BUY_DAYTIME": "VTTS6036U",   # Paper daytime (may not be supported)
+    "BUY_DAYTIME": "VTTS6036U",  # Paper daytime (may not be supported)
     "SELL_DAYTIME": "VTTS6037U",
     "CANCEL_DAYTIME": "VTTS6038U",
     "BALANCE": "VTTS3012R",
@@ -95,9 +97,15 @@ _EXCD_MARKET = {"NASD": "NAS", "NYSE": "NYS", "AMEX": "AMS"}
 class KISAdapter(ExchangeAdapter):
     """KIS REST API adapter."""
 
-    def __init__(self, config: KISConfig, auth: KISAuth):
+    def __init__(
+        self,
+        config: Union[KISConfig, AccountConfig],
+        auth: KISAuth,
+        account_id: str = "ACC001",
+    ):
         self._config = config
         self._auth = auth
+        self._account_id = account_id
         self._session: aiohttp.ClientSession | None = None
         self._is_paper = "vts" in config.base_url
         self._tr = TR_ID_PAPER if self._is_paper else TR_ID_LIVE
@@ -109,9 +117,7 @@ class KISAdapter(ExchangeAdapter):
     async def initialize(self) -> None:
         self._session = aiohttp.ClientSession()
         await self._auth.initialize()
-        logger.info(
-            "KIS adapter initialized (mode=%s)", "paper" if self._is_paper else "live"
-        )
+        logger.info("KIS adapter initialized (mode=%s)", "paper" if self._is_paper else "live")
 
     async def close(self) -> None:
         if self._session:
@@ -224,8 +230,8 @@ class KISAdapter(ExchangeAdapter):
             "CANO": self._config.account_no,
             "ACNT_PRDT_CD": self._config.account_product,
             "WCRC_FRCR_DVSN_CD": "01",  # 외화
-            "NATN_CD": "840",            # USA
-            "TR_MKET_CD": "00",          # 전체
+            "NATN_CD": "840",  # USA
+            "TR_MKET_CD": "00",  # 전체
             "INQR_DVSN_CD": "00",
         }
         pb_data = await self._get(
@@ -312,7 +318,8 @@ class KISAdapter(ExchangeAdapter):
                 logger.info(
                     "US available ($%.2f) exceeds total ($%.2f), "
                     "capping to prevent negative exposure",
-                    available, total,
+                    available,
+                    total,
                 )
                 available = total - position_value
                 if available < 0:
@@ -320,7 +327,11 @@ class KISAdapter(ExchangeAdapter):
             locked = total - available
             logger.info(
                 "US balance: total=₩%s ($%.2f), deposits=₩%s, available=$%.2f (rate=%.1f)",
-                f"{tot_asst_krw:,.0f}", total, f"{tot_dncl_krw:,.0f}", available, exrt,
+                f"{tot_asst_krw:,.0f}",
+                total,
+                f"{tot_dncl_krw:,.0f}",
+                available,
+                exrt,
             )
         else:
             total = available + position_value
@@ -357,8 +368,12 @@ class KISAdapter(ExchangeAdapter):
 
             # Try various KRW balance fields
             krw_balance = 0.0
-            for field in ("tot_evlu_pfls_amt", "frcr_buy_amt_smtl1",
-                          "ovrs_rlzt_pfls_amt", "tot_ord_psbl_amt"):
+            for field in (
+                "tot_evlu_pfls_amt",
+                "frcr_buy_amt_smtl1",
+                "ovrs_rlzt_pfls_amt",
+                "tot_ord_psbl_amt",
+            ):
                 val = output2.get(field, "")
                 if val and float(val) > 0:
                     krw_balance = float(val)
@@ -379,7 +394,9 @@ class KISAdapter(ExchangeAdapter):
                 usd_equiv = krw_balance / rate * 0.99  # 1% buffer for FX spread
                 logger.info(
                     "Estimated USD buying power from KRW: ₩%.0f / %.1f = $%.2f",
-                    krw_balance, rate, usd_equiv,
+                    krw_balance,
+                    rate,
+                    usd_equiv,
                 )
                 return usd_equiv
         except Exception as e:
@@ -464,7 +481,11 @@ class KISAdapter(ExchangeAdapter):
     ) -> OrderResult:
         if session in ("pre_market", "after_hours"):
             return await self._place_daytime_order(
-                symbol, "buy", quantity, price, exchange,
+                symbol,
+                "buy",
+                quantity,
+                price,
+                exchange,
             )
         return await self._place_order(
             symbol, "buy", quantity, price, order_type, exchange, self._tr["BUY_US"]
@@ -481,7 +502,11 @@ class KISAdapter(ExchangeAdapter):
     ) -> OrderResult:
         if session in ("pre_market", "after_hours"):
             return await self._place_daytime_order(
-                symbol, "sell", quantity, price, exchange,
+                symbol,
+                "sell",
+                quantity,
+                price,
+                exchange,
             )
         return await self._place_order(
             symbol, "sell", quantity, price, order_type, exchange, self._tr["SELL_US"]
@@ -531,8 +556,9 @@ class KISAdapter(ExchangeAdapter):
     async def fetch_executed_orders(self) -> list[OrderResult]:
         """Fetch today's executed (filled) orders — 해외주식 체결내역."""
         await self._auth.ensure_valid_token()
-        from datetime import datetime, timezone
+        from datetime import datetime
         from zoneinfo import ZoneInfo
+
         # Use US Eastern time for query date
         now_et = datetime.now(ZoneInfo("America/New_York"))
         today = now_et.strftime("%Y%m%d")
@@ -612,15 +638,17 @@ class KISAdapter(ExchangeAdapter):
     # -- Scanner / Ranking --
 
     async def fetch_volume_surge(
-        self, exchange: str = "NAS", limit: int = 20,
+        self,
+        exchange: str = "NAS",
+        limit: int = 20,
     ) -> list[RankedStock]:
         """Fetch stocks with surging volume."""
         await self._auth.ensure_valid_token()
         params = {
             "AUTH": "",
             "EXCD": exchange,
-            "MINX": "5",        # 10 min window
-            "VOL_RANG": "1",    # >= 100 shares
+            "MINX": "5",  # 10 min window
+            "VOL_RANG": "1",  # >= 100 shares
             "KEYB": "",
         }
         data = await self._get(
@@ -631,7 +659,10 @@ class KISAdapter(ExchangeAdapter):
         return self._parse_ranked(data, "volume_surge", limit)
 
     async def fetch_updown_rate(
-        self, exchange: str = "NAS", direction: str = "up", limit: int = 20,
+        self,
+        exchange: str = "NAS",
+        direction: str = "up",
+        limit: int = 20,
     ) -> list[RankedStock]:
         """Fetch stocks by price change rate (gainers or losers)."""
         await self._auth.ensure_valid_token()
@@ -639,7 +670,7 @@ class KISAdapter(ExchangeAdapter):
             "AUTH": "",
             "EXCD": exchange,
             "GUBN": "1" if direction == "up" else "0",
-            "VOL_RANG": "1",    # >= 100 shares
+            "VOL_RANG": "1",  # >= 100 shares
             "KEYB": "",
         }
         data = await self._get(
@@ -650,17 +681,20 @@ class KISAdapter(ExchangeAdapter):
         return self._parse_ranked(data, f"updown_{direction}", limit)
 
     async def fetch_new_highlow(
-        self, exchange: str = "NAS", high: bool = True, limit: int = 20,
+        self,
+        exchange: str = "NAS",
+        high: bool = True,
+        limit: int = 20,
     ) -> list[RankedStock]:
         """Fetch stocks hitting new highs or new lows."""
         await self._auth.ensure_valid_token()
         params = {
             "AUTH": "",
             "EXCD": exchange,
-            "MINX": "9",        # 120 min window
-            "VOL_RANG": "1",    # >= 100 shares
+            "MINX": "9",  # 120 min window
+            "VOL_RANG": "1",  # >= 100 shares
             "GUBN": "1" if high else "0",
-            "GUBN2": "1",       # sustained (not momentary)
+            "GUBN2": "1",  # sustained (not momentary)
             "KEYB": "",
         }
         data = await self._get(
@@ -671,7 +705,10 @@ class KISAdapter(ExchangeAdapter):
         return self._parse_ranked(data, "new_high" if high else "new_low", limit)
 
     def _parse_ranked(
-        self, data: dict[str, Any], source: str, limit: int,
+        self,
+        data: dict[str, Any],
+        source: str,
+        limit: int,
     ) -> list[RankedStock]:
         """Parse KIS ranking API response into RankedStock list."""
         results: list[RankedStock] = []
@@ -680,14 +717,16 @@ class KISAdapter(ExchangeAdapter):
                 symbol = item.get("symb", item.get("stck_shrn_iscd", "")).strip()
                 if not symbol:
                     continue
-                results.append(RankedStock(
-                    symbol=symbol,
-                    name=item.get("name", item.get("hts_kor_isnm", "")),
-                    price=float(item.get("last", item.get("stck_prpr", 0)) or 0),
-                    change_pct=float(item.get("rate", item.get("prdy_ctrt", 0)) or 0),
-                    volume=float(item.get("tvol", item.get("acml_vol", 0)) or 0),
-                    source=source,
-                ))
+                results.append(
+                    RankedStock(
+                        symbol=symbol,
+                        name=item.get("name", item.get("hts_kor_isnm", "")),
+                        price=float(item.get("last", item.get("stck_prpr", 0)) or 0),
+                        change_pct=float(item.get("rate", item.get("prdy_ctrt", 0)) or 0),
+                        volume=float(item.get("tvol", item.get("acml_vol", 0)) or 0),
+                        source=source,
+                    )
+                )
         return results
 
     # -- Private helpers --
@@ -714,8 +753,11 @@ class KISAdapter(ExchangeAdapter):
         if price is None or price <= 0:
             logger.warning("Daytime order requires limit price, got %s", price)
             return OrderResult(
-                order_id="", symbol=symbol, side=side,
-                order_type="limit", quantity=quantity,
+                order_id="",
+                symbol=symbol,
+                side=side,
+                order_type="limit",
+                quantity=quantity,
                 status="failed",
             )
 
@@ -749,12 +791,18 @@ class KISAdapter(ExchangeAdapter):
         if success:
             logger.info(
                 "Daytime %s order placed: %s %d @ $%.2f (exchange=%s)",
-                side, symbol, quantity, price, daytime_exchange,
+                side,
+                symbol,
+                quantity,
+                price,
+                daytime_exchange,
             )
         else:
             logger.warning(
                 "Daytime %s order failed: %s — %s",
-                side, symbol, data.get("msg1", "unknown"),
+                side,
+                symbol,
+                data.get("msg1", "unknown"),
             )
 
         return OrderResult(
@@ -784,8 +832,11 @@ class KISAdapter(ExchangeAdapter):
         if ord_dvsn == "00" and (price is None or price <= 0):
             logger.warning("Limit order requires price > 0, got %s", price)
             return OrderResult(
-                order_id="", symbol=symbol, side=side,
-                order_type="limit", quantity=quantity,
+                order_id="",
+                symbol=symbol,
+                side=side,
+                order_type="limit",
+                quantity=quantity,
                 status="failed",
             )
         # KIS US market orders (ord_dvsn="01") require OVRS_ORD_UNPR to be "0"
@@ -830,10 +881,14 @@ class KISAdapter(ExchangeAdapter):
         )
 
     async def _get(
-        self, path: str, tr_id: str, params: dict[str, str],
+        self,
+        path: str,
+        tr_id: str,
+        params: dict[str, str],
         max_retries: int = 3,
     ) -> dict[str, Any]:
         import asyncio
+
         url = f"{self._config.base_url}{path}"
         data = {}
         for attempt in range(max_retries):
@@ -844,7 +899,9 @@ class KISAdapter(ExchangeAdapter):
                         data = await resp.json()
                     except Exception:
                         data = {"rt_cd": "-1", "msg1": f"HTTP {resp.status}"}
-                    logger.warning("KIS HTTP %d for GET %s: %s", resp.status, path, data.get("msg1", ""))
+                    logger.warning(
+                        "KIS HTTP %d for GET %s: %s", resp.status, path, data.get("msg1", "")
+                    )
                     msg_cd = data.get("msg_cd", "")
                     if msg_cd == "EGW00201" and attempt < max_retries - 1:
                         await asyncio.sleep(1.0 * (attempt + 1))
@@ -869,10 +926,15 @@ class KISAdapter(ExchangeAdapter):
         return data
 
     async def _post(
-        self, path: str, tr_id: str, body: dict, hashkey: str = "",
+        self,
+        path: str,
+        tr_id: str,
+        body: dict,
+        hashkey: str = "",
         max_retries: int = 3,
     ) -> dict[str, Any]:
         import asyncio
+
         url = f"{self._config.base_url}{path}"
         data = {}
         for attempt in range(max_retries):
@@ -883,7 +945,9 @@ class KISAdapter(ExchangeAdapter):
                         data = await resp.json()
                     except Exception:
                         data = {"rt_cd": "-1", "msg1": f"HTTP {resp.status}"}
-                    logger.warning("KIS HTTP %d for POST %s: %s", resp.status, path, data.get("msg1", ""))
+                    logger.warning(
+                        "KIS HTTP %d for POST %s: %s", resp.status, path, data.get("msg1", "")
+                    )
                     msg_cd = data.get("msg_cd", "")
                     if msg_cd == "EGW00201" and attempt < max_retries - 1:
                         await asyncio.sleep(1.0 * (attempt + 1))
