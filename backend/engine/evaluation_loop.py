@@ -63,6 +63,7 @@ class EvaluationLoop:
         position_tracker=None,
         market: str = "US",
         event_calendar=None,
+        account_id: str = "ACC001",
     ):
         self._adapter = adapter
         self._market_data = market_data
@@ -83,6 +84,7 @@ class EvaluationLoop:
         self._exchange_resolver = exchange_resolver or ExchangeResolver()
         self._position_tracker = position_tracker
         self._market = market
+        self._account_id = account_id
         self._event_calendar = event_calendar
         self._other_market_data: MarketDataService | None = None
         self._exchange_rate: float = 1450.0  # USD/KRW default

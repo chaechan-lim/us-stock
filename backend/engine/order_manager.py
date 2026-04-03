@@ -61,6 +61,7 @@ class OrderManager:
         market_data=None,
         market: str = "US",
         is_paper: bool = False,
+        account_id: str = "ACC001",
     ):
         self._adapter = adapter
         self._risk = risk_manager
@@ -68,6 +69,7 @@ class OrderManager:
         self._market_data = market_data
         self._market = market
         self._is_paper = is_paper
+        self._account_id = account_id
         self._active_orders: dict[str, ManagedOrder] = {}
         # STOCK-26: Counter for position check failures (API errors causing
         # buy rejections). Allows operations to monitor and distinguish
@@ -263,6 +265,7 @@ class OrderManager:
                 "exchange": exchange,
                 "session": session,
                 "is_paper": self._is_paper,
+                "account_id": self._account_id,
             }
             if _trade_recorder:
                 _trade_recorder(trade_data, skip_db_persist=bool(_db_recorder))
@@ -402,6 +405,7 @@ class OrderManager:
                 "exchange": exchange,
                 "session": session,
                 "is_paper": self._is_paper,
+                "account_id": self._account_id,
             }
             if _trade_recorder:
                 _trade_recorder(trade_data, skip_db_persist=bool(_db_recorder))
