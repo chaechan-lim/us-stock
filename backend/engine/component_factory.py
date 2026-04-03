@@ -157,7 +157,7 @@ class EngineComponentFactory:
         if cache_key in self._cache:
             if risk_params is not None:
                 cached = self._cache[cache_key]
-                if risk_params is not cached.risk_manager._params:
+                if risk_params != cached.risk_manager.params:
                     logger.warning(
                         "EngineComponentFactory.create() called with risk_params for "
                         "already-cached account=%s market=%s — cached params are "
@@ -205,7 +205,13 @@ class EngineComponentFactory:
 
         # Validate market against account configuration
         account = self._registry.get_account(account_id)
-        if account is not None and market not in account.markets:
+        if account is None:
+            logger.warning(
+                "EngineComponentFactory: no AccountConfig for account_id=%r "
+                "(adapter exists). Defaulting to paper mode; market validation skipped.",
+                account_id,
+            )
+        elif market not in account.markets:
             raise ValueError(
                 f"EngineComponentFactory: account {account_id!r} does not support "
                 f"market={market!r}. Supported markets: {account.markets}"

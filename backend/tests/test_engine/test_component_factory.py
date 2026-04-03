@@ -23,7 +23,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
 from config.accounts import MARKET_KR, MARKET_US, AccountConfig
-from core.models import Base, PositionRecord
+from core.models import Base, Order, PositionRecord
 from data.indicator_service import IndicatorService
 from engine.component_factory import EngineComponentFactory, EngineComponents
 from engine.evaluation_loop import EvaluationLoop
@@ -677,3 +677,217 @@ def test_risk_manager_default_account_id() -> None:
     """RiskManager defaults to ACC001 without account_id param."""
     rm = RiskManager()
     assert rm._account_id == "ACC001"
+
+
+# ---------------------------------------------------------------------------
+# Order query isolation (account_id in Order WHERE clauses)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_restore_from_exchange_order_lookup_scoped_by_account(
+    factory_multi: EngineComponentFactory,
+    db_factory,
+) -> None:
+    """restore_from_exchange() only looks at Order records matching account_id."""
+    factory_multi._session_factory = db_factory
+    factory_multi._cache.clear()
+
+    acc1 = factory_multi.create("ACC001", "US")
+    acc2 = factory_multi.create("ACC002", "US")
+
+    # Insert Order records for both accounts, same symbol
+    async with db_factory() as session:
+        session.add(Order(
+            account_id="ACC001", symbol="AAPL", side="BUY", order_type="market",
+            quantity=10, price=150.0, status="filled", strategy_name="trend",
+            is_paper=False, market="US",
+        ))
+        session.add(Order(
+            account_id="ACC002", symbol="AAPL", side="BUY", order_type="market",
+            quantity=5, price=160.0, status="filled", strategy_name="momentum",
+            is_paper=False, market="US",
+        ))
+        await session.commit()
+
+    # Simulate adapter returning AAPL position for both accounts
+    mock_pos = MagicMock()
+    mock_pos.symbol = "AAPL"
+    mock_pos.quantity = 10
+    mock_pos.avg_price = 150.0
+    mock_pos.current_price = 155.0
+    mock_pos.pnl = 50.0
+    mock_pos.pnl_pct = 3.33
+
+    # Mock fetch_positions on the underlying adapter (MarketDataService wraps it)
+    acc1.adapter.fetch_positions = AsyncMock(return_value=[mock_pos])
+    acc2.adapter.fetch_positions = AsyncMock(return_value=[mock_pos])
+
+    await acc1.position_tracker.restore_from_exchange()
+    await acc2.position_tracker.restore_from_exchange()
+
+    # acc1 should pick up "trend" strategy from ACC001's Order
+    acc1_aapl = acc1.position_tracker._tracked.get("AAPL")
+    assert acc1_aapl is not None
+    assert acc1_aapl.strategy == "trend"
+
+    # acc2 should pick up "momentum" strategy from ACC002's Order
+    acc2_aapl = acc2.position_tracker._tracked.get("AAPL")
+    assert acc2_aapl is not None
+    assert acc2_aapl.strategy == "momentum"
+
+
+@pytest.mark.asyncio
+async def test_resolve_unknown_strategies_scoped_by_account(
+    factory_multi: EngineComponentFactory,
+    db_factory,
+) -> None:
+    """_resolve_unknown_strategies() only uses Order records for its account_id."""
+    factory_multi._session_factory = db_factory
+    factory_multi._cache.clear()
+
+    acc1 = factory_multi.create("ACC001", "US")
+    acc2 = factory_multi.create("ACC002", "US")
+
+    # Insert Order for ACC002 only
+    async with db_factory() as session:
+        session.add(Order(
+            account_id="ACC002", symbol="TSLA", side="BUY", order_type="market",
+            quantity=3, price=200.0, status="filled", strategy_name="mean_rev",
+            is_paper=False, market="US",
+        ))
+        await session.commit()
+
+    # acc1 tracks TSLA with unknown strategy
+    acc1.position_tracker.track("TSLA", entry_price=200.0, quantity=3, strategy="unknown")
+
+    # Resolve — acc1 should NOT pick up ACC002's Order strategy
+    await acc1.position_tracker._resolve_unknown_strategies(db_factory, ["TSLA"])
+    assert acc1.position_tracker._tracked["TSLA"].strategy == "unknown"
+
+    # acc2 tracks TSLA with unknown strategy
+    acc2.position_tracker.track("TSLA", entry_price=200.0, quantity=3, strategy="unknown")
+    await acc2.position_tracker._resolve_unknown_strategies(db_factory, ["TSLA"])
+    assert acc2.position_tracker._tracked["TSLA"].strategy == "mean_rev"
+
+
+@pytest.mark.asyncio
+async def test_get_first_buy_timestamp_scoped_by_account(
+    factory_multi: EngineComponentFactory,
+    db_factory,
+) -> None:
+    """_lookup_first_buy_time() only returns timestamps from own account."""
+    from datetime import datetime
+
+    factory_multi._session_factory = db_factory
+    factory_multi._cache.clear()
+
+    acc1 = factory_multi.create("ACC001", "US")
+    acc2 = factory_multi.create("ACC002", "US")
+
+    early = datetime(2025, 1, 1, 10, 0, 0)
+    late = datetime(2025, 6, 1, 10, 0, 0)
+
+    async with db_factory() as session:
+        session.add(Order(
+            account_id="ACC001", symbol="GOOG", side="BUY", order_type="market",
+            quantity=2, price=100.0, status="filled", is_paper=False,
+            market="US", created_at=early,
+        ))
+        session.add(Order(
+            account_id="ACC002", symbol="GOOG", side="BUY", order_type="market",
+            quantity=1, price=110.0, status="filled", is_paper=False,
+            market="US", created_at=late,
+        ))
+        await session.commit()
+
+    async with db_factory() as session:
+        ts1 = await acc1.position_tracker._lookup_first_buy_time(session, "GOOG")
+    async with db_factory() as session:
+        ts2 = await acc2.position_tracker._lookup_first_buy_time(session, "GOOG")
+
+    assert ts1 == early
+    assert ts2 == late
+
+
+# ---------------------------------------------------------------------------
+# Cache warning for risk_params on cached calls
+# ---------------------------------------------------------------------------
+
+
+def test_create_warns_on_different_risk_params_for_cached_bundle(
+    factory_single: EngineComponentFactory,
+    caplog,
+) -> None:
+    """create() logs a warning when risk_params differs from cached bundle."""
+    import logging
+
+    # First call creates and caches
+    factory_single.create("ACC001", "US")
+
+    # Second call with different risk_params should warn
+    different_params = RiskParams(max_position_pct=0.05)
+    with caplog.at_level(logging.WARNING):
+        result = factory_single.create("ACC001", "US", risk_params=different_params)
+
+    assert "already-cached" in caplog.text
+    assert "risk_params" in caplog.text
+    # Still returns cached instance
+    assert result is factory_single.get_cached("ACC001", "US")
+
+
+def test_create_no_warning_when_same_risk_params(
+    factory_single: EngineComponentFactory,
+    caplog,
+) -> None:
+    """create() does not warn when risk_params matches cached bundle."""
+    import logging
+
+    # First call with specific params
+    params = RiskParams(max_position_pct=0.15)
+    factory_single.create("ACC001", "US", risk_params=params)
+
+    # Second call with same params object — no warning
+    with caplog.at_level(logging.WARNING):
+        factory_single.create("ACC001", "US", risk_params=params)
+
+    assert "already-cached" not in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# Missing AccountConfig warning
+# ---------------------------------------------------------------------------
+
+
+def test_build_warns_when_account_config_missing(
+    factory_single: EngineComponentFactory,
+    caplog,
+) -> None:
+    """_build() warns when adapter exists but AccountConfig is None."""
+    import logging
+
+    # Patch get_account to return None (adapter exists but no config)
+    factory_single._registry.get_account = MagicMock(return_value=None)
+
+    with caplog.at_level(logging.WARNING):
+        components = factory_single.create("ACC001", "US")
+
+    assert "no AccountConfig" in caplog.text
+    assert "paper mode" in caplog.text
+    assert components.account_id == "ACC001"
+
+
+# ---------------------------------------------------------------------------
+# Shared RateLimiter per account
+# ---------------------------------------------------------------------------
+
+
+def test_rate_limiter_shared_across_markets(
+    factory_single: EngineComponentFactory,
+) -> None:
+    """Same account's US and KR components share one RateLimiter."""
+    us = factory_single.create("ACC001", "US")
+    kr = factory_single.create("ACC001", "KR")
+
+    # Both MarketDataService instances should have the same RateLimiter
+    assert us.market_data._rate_limiter is kr.market_data._rate_limiter

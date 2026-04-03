@@ -843,6 +843,7 @@ class PositionTracker:
                         stmt = (
                             select(Order)
                             .where(
+                                Order.account_id == self._account_id,
                                 Order.symbol == pos.symbol,
                                 Order.side == "BUY",
                                 Order.status.in_(["filled", "submitted"]),
@@ -863,6 +864,7 @@ class PositionTracker:
                         stmt = (
                             select(Order)
                             .where(
+                                Order.account_id == self._account_id,
                                 Order.symbol == pos.symbol,
                                 Order.side == "BUY",
                                 Order.status.in_(["filled", "submitted"]),
@@ -882,6 +884,7 @@ class PositionTracker:
                         stmt = (
                             select(Order)
                             .where(
+                                Order.account_id == self._account_id,
                                 Order.symbol == pos.symbol,
                                 Order.side == "SELL",
                                 Order.buy_strategy.isnot(None),
@@ -1239,6 +1242,7 @@ class PositionTracker:
                     stmt = (
                         select(Order)
                         .where(
+                            Order.account_id == self._account_id,
                             Order.symbol == symbol,
                             Order.side == "BUY",
                             Order.status.in_(["filled", "submitted"]),
@@ -1257,6 +1261,7 @@ class PositionTracker:
                         stmt = (
                             select(Order)
                             .where(
+                                Order.account_id == self._account_id,
                                 Order.symbol == symbol,
                                 Order.side == "BUY",
                                 Order.status.in_(["filled", "submitted"]),
@@ -1274,6 +1279,7 @@ class PositionTracker:
                         stmt = (
                             select(Order)
                             .where(
+                                Order.account_id == self._account_id,
                                 Order.symbol == symbol,
                                 Order.side == "SELL",
                                 Order.buy_strategy.isnot(None),
@@ -1374,6 +1380,7 @@ class PositionTracker:
         stmt = (
             select(Order.created_at)
             .where(
+                Order.account_id == self._account_id,
                 Order.symbol == symbol,
                 Order.side == "BUY",
                 Order.status.in_(["filled", "submitted"]),

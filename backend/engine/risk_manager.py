@@ -452,9 +452,8 @@ class RiskManager:
                     quantity = int(allocation / price)
                     if quantity > 0:
                         logger.info(
-                            "[%s] Kelly sizing %s: kelly=%.3f, conf_boost=%.2f, "
+                            "Kelly sizing %s: kelly=%.3f, conf_boost=%.2f, "
                             "factor_boost=%.2f, alloc=%.1f%%",
-                            self._account_id,
                             symbol,
                             kelly_result.kelly_fraction,
                             kelly_result.confidence_boost,
