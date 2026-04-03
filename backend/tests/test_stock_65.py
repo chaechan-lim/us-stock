@@ -1033,3 +1033,80 @@ class TestHotReloadAppliesKrOverrides:
         assert loop._min_confidence == pytest.approx(0.40)
         assert loop._sell_cooldown_secs == 2 * 86400
         assert "macd_histogram" in loop._disabled_strategies
+
+
+# ---------------------------------------------------------------------------
+# STOCK-81: _apply_kr_eval_overrides — WARNING when disabled list is empty
+# ---------------------------------------------------------------------------
+
+
+class TestApplyKrEvalOverridesDisabledWarning:
+    """STOCK-81: _apply_kr_eval_overrides must emit a WARNING when the KR
+    disabled_strategies list is empty so an accidental YAML misconfiguration
+    (all strategies active) is surfaced at startup rather than silently
+    passing as an INFO log.
+
+    Uses patch.object on the module-level logger rather than caplog to avoid
+    the setup_logging() / caplog handler-clearing interaction.
+    """
+
+    def _make_loop(self):  # noqa: ANN202
+        from unittest.mock import AsyncMock, MagicMock
+
+        from engine.risk_manager import RiskManager
+        from strategies.combiner import SignalCombiner
+
+        adapter = AsyncMock()
+        adapter.fetch_balance = AsyncMock(
+            return_value=MagicMock(total=100_000, available=80_000, currency="KRW")
+        )
+        adapter.fetch_positions = AsyncMock(return_value=[])
+        loop = EvaluationLoop(
+            adapter=adapter,
+            market_data=AsyncMock(),
+            indicator_svc=MagicMock(),
+            registry=MagicMock(),
+            combiner=SignalCombiner(),
+            order_manager=MagicMock(),
+            risk_manager=RiskManager(),
+            market="KR",
+        )
+        return loop
+
+    def test_empty_kr_disabled_list_emits_warning(self) -> None:
+        """Empty KR disabled list → logger.warning called."""
+        from unittest.mock import MagicMock, patch
+
+        import main as main_module
+        from main import _apply_kr_eval_overrides
+
+        loop = self._make_loop()
+        loader = MagicMock()
+        loader.get_market_evaluation_loop_config.return_value = {}
+        loader.get_market_disabled_strategies.return_value = []
+
+        with patch.object(main_module.logger, "warning") as mock_warn:
+            _apply_kr_eval_overrides(loop, loader)
+
+        mock_warn.assert_called_once()
+        call_args = mock_warn.call_args[0]
+        assert "KR" in call_args[0] or any("KR" in str(a) for a in call_args), (
+            f"WARNING should reference 'KR'. Call args: {call_args}"
+        )
+
+    def test_non_empty_kr_disabled_list_no_warning(self) -> None:
+        """Non-empty KR disabled list → logger.warning NOT called."""
+        from unittest.mock import MagicMock, patch
+
+        import main as main_module
+        from main import _apply_kr_eval_overrides
+
+        loop = self._make_loop()
+        loader = MagicMock()
+        loader.get_market_evaluation_loop_config.return_value = {}
+        loader.get_market_disabled_strategies.return_value = ["trend_following"]
+
+        with patch.object(main_module.logger, "warning") as mock_warn:
+            _apply_kr_eval_overrides(loop, loader)
+
+        mock_warn.assert_not_called()

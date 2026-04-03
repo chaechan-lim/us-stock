@@ -6,14 +6,22 @@ Verifies:
 2. dual_momentum and volume_surge are the only enabled strategies for US
 3. sector_rotation and volume_profile are disabled
 4. EvaluationLoop reflects the config-driven disabled set
+
+Also covers STOCK-81 self-review follow-up:
+5. _warn_if_disabled_empty emits WARNING when disabled list is empty (US path)
 """
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import numpy as np
 import pandas as pd
 import pytest
 
+# NOTE: main is imported at module level so that setup_logging() runs during
+# test collection, before pytest installs per-test caplog handlers.  This
+# prevents the root.handlers.clear() call in setup_logging() from removing
+# caplog's handler mid-test when _warn_if_disabled_empty tests run.
+import main as _main_module  # noqa: I001 — must stay below third-party block
 from core.enums import SignalType
 from engine.evaluation_loop import EvaluationLoop
 from engine.risk_manager import RiskManager
@@ -193,3 +201,72 @@ class TestUSEvaluationLoop:
                 s.analyze.assert_called_once()
             else:
                 s.analyze.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# STOCK-81: _warn_if_disabled_empty — defensive WARNING for misconfiguration
+# ---------------------------------------------------------------------------
+
+class TestWarnIfDisabledEmpty:
+    """Unit-tests for _warn_if_disabled_empty in main.py.
+
+    Verifies that a WARNING is emitted when disabled_strategies is empty so
+    that a YAML misconfiguration (e.g. merge conflict that drops the list)
+    becomes visible in startup logs rather than silently activating all
+    strategies.
+
+    Uses patch.object on the module-level logger rather than caplog to avoid
+    the setup_logging() / caplog handler-clearing interaction.
+    """
+
+    def test_empty_list_emits_warning(self) -> None:
+        """Empty disabled list → logger.warning called for that market."""
+        with patch.object(_main_module.logger, "warning") as mock_warn:
+            _main_module._warn_if_disabled_empty("US", [])
+
+        mock_warn.assert_called_once()
+        call_args = mock_warn.call_args[0]  # positional args tuple
+        assert "US" in call_args[0] or any("US" in str(a) for a in call_args), (
+            f"WARNING message should reference 'US'. Call args: {call_args}"
+        )
+
+    def test_non_empty_list_no_warning(self) -> None:
+        """Non-empty disabled list → logger.warning NOT called."""
+        with patch.object(_main_module.logger, "warning") as mock_warn:
+            _main_module._warn_if_disabled_empty("US", ["sector_rotation", "volume_profile"])
+
+        mock_warn.assert_not_called()
+
+    def test_warning_mentions_strategy_count(self) -> None:
+        """WARNING message references all-strategies-active risk (14 strategies)."""
+        with patch.object(_main_module.logger, "warning") as mock_warn:
+            _main_module._warn_if_disabled_empty("US", [])
+
+        mock_warn.assert_called_once()
+        # The full formatted message (with % substitution) should mention 14
+        call_args = mock_warn.call_args[0]
+        full_msg = call_args[0] % tuple(call_args[1:]) if len(call_args) > 1 else call_args[0]
+        assert "14" in full_msg, (
+            f"WARNING should mention 14 strategies. Full message: {full_msg}"
+        )
+
+    def test_kr_market_empty_list_emits_warning(self) -> None:
+        """Same warning fires for KR market when disabled list is empty."""
+        with patch.object(_main_module.logger, "warning") as mock_warn:
+            _main_module._warn_if_disabled_empty("KR", [])
+
+        mock_warn.assert_called_once()
+        call_args = mock_warn.call_args[0]
+        assert "KR" in call_args[0] or any("KR" in str(a) for a in call_args), (
+            f"WARNING message should reference 'KR'. Call args: {call_args}"
+        )
+
+    def test_actual_us_config_does_not_trigger_warning(self) -> None:
+        """The real strategies.yaml US config has a non-empty list → no WARNING."""
+        loader = StrategyConfigLoader()
+        us_disabled = loader.get_market_disabled_strategies("US")
+
+        with patch.object(_main_module.logger, "warning") as mock_warn:
+            _main_module._warn_if_disabled_empty("US", us_disabled)
+
+        mock_warn.assert_not_called()

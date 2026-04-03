@@ -55,6 +55,27 @@ def reset_all_daily_risk(us_rm: RiskManager, kr_rm: RiskManager) -> None:
     kr_rm.reset_daily()
 
 
+def _warn_if_disabled_empty(market: str, disabled: list[str]) -> None:
+    """Emit a WARNING when disabled_strategies is unexpectedly empty.
+
+    An empty list means all 14 strategies will be active for that market.
+    This is almost certainly a misconfiguration (e.g. YAML merge conflict that
+    silently drops the list), so we surface it as a WARNING rather than letting
+    it propagate silently as an INFO-level startup log.
+
+    Extracted so the behaviour is directly unit-testable without standing up the
+    full lifespan context.
+    """
+    if not disabled:
+        logger.warning(
+            "markets.%s.disabled_strategies is empty or missing in strategies.yaml"
+            " — all 14 strategies are active for %s. Verify this is intentional"
+            " before live trading.",
+            market,
+            market,
+        )
+
+
 def _apply_kr_eval_overrides(
     kr_loop: "EvaluationLoop",
     config_loader: "StrategyConfigLoader",
@@ -95,6 +116,7 @@ def _apply_kr_eval_overrides(
     kr_loop.set_min_active_ratio(float(v) if v is not None else None)
 
     kr_disabled = config_loader.get_market_disabled_strategies("KR")
+    _warn_if_disabled_empty("KR", kr_disabled)
     kr_loop.set_disabled_strategies(kr_disabled)
 
 
@@ -477,9 +499,13 @@ async def lifespan(app: FastAPI):
     evaluation_loop._hard_sl_pct = registry.config_loader.get_hard_sl_pct()
     evaluation_loop.set_cache(cache)
     position_tracker.register_on_sell(evaluation_loop.register_sell_cooldown)
-    # STOCK-79: US disabled strategies loaded from config/strategies.yaml (markets.US)
+    # STOCK-79: US disabled strategies loaded from config/strategies.yaml (markets.US).
     # See config for backtest results and threshold rationale.
+    # NOTE: disabled_strategies is applied once at startup only — it is NOT
+    # re-applied during config hot-reload.  A restart is required for changes
+    # to markets.US.disabled_strategies to take effect.
     us_disabled = registry.config_loader.get_market_disabled_strategies("US")
+    _warn_if_disabled_empty("US", us_disabled)
     evaluation_loop.set_disabled_strategies(us_disabled)
     evaluation_loop.set_min_confidence(0.30)
     evaluation_loop.set_min_active_ratio(0.0)
