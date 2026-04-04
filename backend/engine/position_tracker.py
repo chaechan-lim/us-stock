@@ -62,6 +62,7 @@ class PositionTracker:
         session_factory: "async_sessionmaker[AsyncSession] | None" = None,
         market: str = "US",
         exchange_resolver: ExchangeResolver | None = None,
+        account_id: str = "ACC001",
     ):
         self._adapter = adapter
         self._market_data = market_data
@@ -72,6 +73,7 @@ class PositionTracker:
         self._session_factory = session_factory
         self._market = market
         self._exchange_resolver = exchange_resolver
+        self._account_id = account_id
         self._tracked: dict[str, TrackedPosition] = {}
         # Callbacks invoked after a sell is executed (STOCK-43).
         # Signature: callback(symbol: str, sell_timestamp: float) -> None
@@ -841,6 +843,7 @@ class PositionTracker:
                         stmt = (
                             select(Order)
                             .where(
+                                Order.account_id == self._account_id,
                                 Order.symbol == pos.symbol,
                                 Order.side == "BUY",
                                 Order.status.in_(["filled", "submitted"]),
@@ -861,6 +864,7 @@ class PositionTracker:
                         stmt = (
                             select(Order)
                             .where(
+                                Order.account_id == self._account_id,
                                 Order.symbol == pos.symbol,
                                 Order.side == "BUY",
                                 Order.status.in_(["filled", "submitted"]),
@@ -880,6 +884,7 @@ class PositionTracker:
                         stmt = (
                             select(Order)
                             .where(
+                                Order.account_id == self._account_id,
                                 Order.symbol == pos.symbol,
                                 Order.side == "SELL",
                                 Order.buy_strategy.isnot(None),
@@ -1041,13 +1046,14 @@ class PositionTracker:
         self,
         session_factory: "async_sessionmaker[AsyncSession]",
     ) -> list:
-        """Load all position records for this market from DB."""
+        """Load all position records for this account+market from DB."""
         from sqlalchemy import select
 
         from core.models import PositionRecord
 
         async with session_factory() as session:
             stmt = select(PositionRecord).where(
+                PositionRecord.account_id == self._account_id,
                 PositionRecord.market == self._market,
             )
             result = await session.execute(stmt)
@@ -1151,8 +1157,9 @@ class PositionTracker:
             async with sf() as session:
                 tracked_symbols = set(self._tracked.keys())
 
-                # Remove DB rows for positions no longer tracked in this market
+                # Remove DB rows for positions no longer tracked in this account+market
                 stmt = select(PositionRecord).where(
+                    PositionRecord.account_id == self._account_id,
                     PositionRecord.market == self._market,
                 )
                 result = await session.execute(stmt)
@@ -1235,6 +1242,7 @@ class PositionTracker:
                     stmt = (
                         select(Order)
                         .where(
+                            Order.account_id == self._account_id,
                             Order.symbol == symbol,
                             Order.side == "BUY",
                             Order.status.in_(["filled", "submitted"]),
@@ -1253,6 +1261,7 @@ class PositionTracker:
                         stmt = (
                             select(Order)
                             .where(
+                                Order.account_id == self._account_id,
                                 Order.symbol == symbol,
                                 Order.side == "BUY",
                                 Order.status.in_(["filled", "submitted"]),
@@ -1270,6 +1279,7 @@ class PositionTracker:
                         stmt = (
                             select(Order)
                             .where(
+                                Order.account_id == self._account_id,
                                 Order.symbol == symbol,
                                 Order.side == "SELL",
                                 Order.buy_strategy.isnot(None),
@@ -1343,6 +1353,7 @@ class PositionTracker:
 
             async with self._session_factory() as session:
                 stmt = delete(PositionRecord).where(
+                    PositionRecord.account_id == self._account_id,
                     PositionRecord.market == self._market,
                     PositionRecord.symbol == symbol,
                 )
@@ -1369,6 +1380,7 @@ class PositionTracker:
         stmt = (
             select(Order.created_at)
             .where(
+                Order.account_id == self._account_id,
                 Order.symbol == symbol,
                 Order.side == "BUY",
                 Order.status.in_(["filled", "submitted"]),
@@ -1399,6 +1411,7 @@ class PositionTracker:
         from core.models import PositionRecord
 
         stmt = select(PositionRecord).where(
+            PositionRecord.account_id == self._account_id,
             PositionRecord.market == self._market,
             PositionRecord.symbol == symbol,
         )
@@ -1430,6 +1443,7 @@ class PositionTracker:
             opened_at = first_buy_time if first_buy_time else datetime.utcnow()
 
             record = PositionRecord(
+                account_id=self._account_id,
                 market=self._market,
                 symbol=symbol,
                 exchange=self._resolve_exchange(symbol),
@@ -1452,7 +1466,7 @@ class PositionTracker:
         self,
         session_factory: "async_sessionmaker[AsyncSession]",
     ) -> None:
-        """Remove all positions for this market from DB."""
+        """Remove all positions for this account+market from DB."""
         try:
             from sqlalchemy import delete
 
@@ -1460,6 +1474,7 @@ class PositionTracker:
 
             async with session_factory() as session:
                 stmt = delete(PositionRecord).where(
+                    PositionRecord.account_id == self._account_id,
                     PositionRecord.market == self._market,
                 )
                 await session.execute(stmt)

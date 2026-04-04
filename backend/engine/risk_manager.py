@@ -75,8 +75,9 @@ REGIME_EXPOSURE_PCT: dict[str, float] = {
 class RiskManager:
     """Enforce risk rules before order placement."""
 
-    def __init__(self, params: RiskParams | None = None):
+    def __init__(self, params: RiskParams | None = None, account_id: str = "ACC001"):
         self._params = params or RiskParams()
+        self._account_id = account_id
         self._daily_pnl: float = 0.0
         self._market_regimes: dict[str, str] = {}  # {"US": "bull", "KR": "sideways"}
         self._eval_regime: str = "uptrend"  # Current regime for adaptive sizing

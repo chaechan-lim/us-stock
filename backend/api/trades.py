@@ -223,6 +223,7 @@ async def _do_persist_trade(trade: dict) -> None:
             market=trade.get("market", "US"),
             session=trade.get("session", "regular"),
             is_paper=trade.get("is_paper", False),
+            account_id=trade.get("account_id", "ACC001"),
         )
 
 
