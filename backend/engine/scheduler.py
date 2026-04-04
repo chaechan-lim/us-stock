@@ -196,14 +196,26 @@ class TradingScheduler:
 
         Returns the number of tasks removed.
 
+        Raises:
+            ValueError: If *prefix* is empty — an empty prefix matches every
+                task name and would silently wipe the entire task list, which
+                is almost certainly a caller bug.
+
         Safe to call while the scheduler is running (same snapshot guarantee as
         :meth:`remove_task`).
         """
+        if not prefix:
+            raise ValueError(
+                "remove_tasks_by_prefix: prefix must not be empty — "
+                "an empty prefix matches all task names and would remove every task"
+            )
         original_count = len(self._tasks)
         self._tasks = [t for t in self._tasks if not t.name.startswith(prefix)]
         removed = original_count - len(self._tasks)
         if removed:
             logger.info("Removed %d tasks with prefix %r", removed, prefix)
+        else:
+            logger.warning("remove_tasks_by_prefix: no tasks matched prefix %r", prefix)
         return removed
 
     async def start(self) -> None:

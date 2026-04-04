@@ -254,15 +254,36 @@ def test_remove_tasks_by_prefix_removes_matching():
     assert "health_check" in remaining
 
 
-def test_remove_tasks_by_prefix_returns_zero_on_no_match():
-    """remove_tasks_by_prefix() returns 0 when nothing matches."""
+def test_remove_tasks_by_prefix_returns_zero_on_no_match(caplog):
+    """remove_tasks_by_prefix() returns 0 and logs a warning when nothing matches."""
+    import logging
+
     scheduler = TradingScheduler()
     scheduler.add_task("health_check", AsyncMock(), interval_sec=120)
 
-    removed = scheduler.remove_tasks_by_prefix("ACC999:")
+    with caplog.at_level(logging.WARNING):
+        removed = scheduler.remove_tasks_by_prefix("ACC999:")
 
     assert removed == 0
     assert scheduler.task_names == ["health_check"]
+    assert "ACC999:" in caplog.text
+
+
+def test_remove_tasks_by_prefix_raises_on_empty_prefix():
+    """remove_tasks_by_prefix() raises ValueError for an empty prefix.
+
+    An empty prefix matches every task name and would silently wipe the
+    entire task list — a serious operational risk on a live trading system.
+    """
+    scheduler = TradingScheduler()
+    scheduler.add_task("health_check", AsyncMock(), interval_sec=120)
+    scheduler.add_task("evaluation_loop", AsyncMock(), interval_sec=300)
+
+    with pytest.raises(ValueError, match="empty"):
+        scheduler.remove_tasks_by_prefix("")
+
+    # The task list must be completely intact after the failed call
+    assert scheduler.task_count == 2
 
 
 def test_task_count_property():
