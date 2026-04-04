@@ -19,7 +19,7 @@ US market hours in KST:
 
 import asyncio
 import logging
-from datetime import datetime, time, timedelta
+from datetime import datetime, time
 from enum import Enum
 from zoneinfo import ZoneInfo
 
@@ -146,7 +146,12 @@ class TradingScheduler:
         failure_threshold: int = 5,
         market: str = "US",
     ) -> None:
-        """Register a periodic task."""
+        """Register a periodic task.
+
+        Safe to call while the scheduler is running — the :meth:`start` loop
+        snapshots the task list on each tick so newly added tasks are picked up
+        on the next tick without disrupting the current iteration.
+        """
         recovery = None
         if self._recovery:
             recovery = self._recovery.wrap_task(
@@ -163,6 +168,44 @@ class TradingScheduler:
             name, interval_sec, phase_str, market_str,
         )
 
+    def remove_task(self, name: str) -> bool:
+        """Remove a registered task by name.
+
+        Returns *True* if the task was found and removed, *False* if no task
+        with that name exists.
+
+        Safe to call while the scheduler is running — the :meth:`start` loop
+        snapshots the task list on each tick, so an in-progress tick is not
+        affected by the removal; the task simply disappears from the next tick.
+        """
+        original_count = len(self._tasks)
+        self._tasks = [t for t in self._tasks if t.name != name]
+        removed = len(self._tasks) < original_count
+        if removed:
+            logger.info("Task removed: %s", name)
+        else:
+            logger.warning("remove_task: task %r not found", name)
+        return removed
+
+    def remove_tasks_by_prefix(self, prefix: str) -> int:
+        """Remove all tasks whose name starts with *prefix*.
+
+        Useful for bulk-removing the complete task set of a specific account
+        when the account is deregistered.  For example, passing
+        ``"ACC001:US:"`` removes all US-market tasks for account ACC001.
+
+        Returns the number of tasks removed.
+
+        Safe to call while the scheduler is running (same snapshot guarantee as
+        :meth:`remove_task`).
+        """
+        original_count = len(self._tasks)
+        self._tasks = [t for t in self._tasks if not t.name.startswith(prefix)]
+        removed = original_count - len(self._tasks)
+        if removed:
+            logger.info("Removed %d tasks with prefix %r", removed, prefix)
+        return removed
+
     async def start(self) -> None:
         """Start the scheduler loop."""
         self._running = True
@@ -172,7 +215,11 @@ class TradingScheduler:
             now = datetime.now(ET)
             phase = get_market_phase(now)
 
-            for task in self._tasks:
+            # Snapshot the task list at the start of each tick so that
+            # concurrent calls to add_task() / remove_task() from other
+            # coroutines (which can run at any ``await`` point) do not
+            # mutate the collection while we iterate it.
+            for task in list(self._tasks):
                 if task.should_run(now):
                     if task.recovery:
                         success = await task.recovery.execute()
@@ -198,6 +245,11 @@ class TradingScheduler:
         return self._running
 
     @property
+    def task_count(self) -> int:
+        """Current number of registered tasks."""
+        return len(self._tasks)
+
+    @property
     def task_names(self) -> list[str]:
         return [t.name for t in self._tasks]
 
@@ -210,9 +262,7 @@ class TradingScheduler:
 
         tasks = []
         for t in self._tasks:
-            # Check if task is eligible: respect market-specific time context
-            is_active = t.should_run(now)
-            # For display: also show whether the task is in the right phase
+            # For display: show whether the task is in the right phase
             # (even if interval hasn't elapsed yet)
             if t.phases is not None:
                 current_phase = kr_phase if t.market == "KR" else us_phase
