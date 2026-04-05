@@ -88,14 +88,14 @@ export const removeFromWatchlist = (symbol: string, market = 'US') =>
   api.delete<WatchlistResponse>(`/watchlist/${symbol}`, { params: { market } }).then(r => r.data)
 
 // Trades
-export const fetchTrades = (opts: { limit?: number; market?: string; offset?: number; account_id?: string | null } = {}) => {
-  const { limit = 50, market, offset = 0, account_id } = opts
+export const fetchTrades = (opts: { limit?: number; market?: string; offset?: number; accountId?: string | null } = {}) => {
+  const { limit = 50, market, offset = 0, accountId } = opts
   return api.get<Trade[]>('/trades/', {
     params: {
       limit,
       offset,
       ...(market && { market }),
-      ...(account_id ? { account_id } : {}),
+      ...(accountId ? { account_id: accountId } : {}),
     },
   }).then(r => r.data)
 }

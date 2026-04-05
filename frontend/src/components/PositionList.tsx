@@ -1,7 +1,7 @@
 import { useMemo } from 'react'
 import { usePositions, useEngineStatus } from '../hooks/useApi'
 import { formatCurrency } from '../utils/format'
-import { useAccount } from '../contexts/AccountContext'
+import { useAccount, hexToRgba } from '../contexts/AccountContext'
 
 export default function PositionList() {
   const { selectedAccountId, selectedAccount, accountColor } = useAccount()
@@ -37,7 +37,7 @@ export default function PositionList() {
             <span
               className="text-xs px-2 py-0.5 rounded-full font-medium"
               style={{
-                backgroundColor: accountColor(selectedAccount.account_id) + '33',
+                backgroundColor: hexToRgba(accountColor(selectedAccount.account_id), 0.2),
                 color: accountColor(selectedAccount.account_id),
               }}
             >

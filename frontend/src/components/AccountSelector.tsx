@@ -96,9 +96,7 @@ export default function AccountSelector() {
             )}
           </button>
 
-          {accounts.length > 0 && (
-            <div className="border-t border-gray-700 my-1" />
-          )}
+          <div className="border-t border-gray-700 my-1" />
 
           {/* Per-account options */}
           {accounts.map((account) => {

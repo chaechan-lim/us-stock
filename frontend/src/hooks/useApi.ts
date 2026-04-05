@@ -90,10 +90,10 @@ export function useRemoveFromWatchlist(market = 'US') {
   })
 }
 
-export function useTrades(limit = 50, market?: string, offset = 0) {
+export function useTrades(limit = 50, market?: string, offset = 0, accountId?: string | null) {
   return useQuery({
-    queryKey: ['trades', limit, market, offset],
-    queryFn: () => api.fetchTrades({ limit, market, offset }),
+    queryKey: ['trades', limit, market, offset, accountId ?? 'all'],
+    queryFn: () => api.fetchTrades({ limit, market, offset, accountId }),
     refetchInterval: 15_000,
   })
 }

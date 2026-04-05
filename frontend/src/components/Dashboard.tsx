@@ -5,7 +5,7 @@ import { usePriceStream } from '../hooks/usePriceStream'
 import { fetchMacroIndicators, fetchMarketState, fetchTradeSummaryPeriods } from '../api/client'
 import type { PeriodReturn } from '../api/client'
 import { formatCurrency } from '../utils/format'
-import { useAccount } from '../contexts/AccountContext'
+import { useAccount, hexToRgba } from '../contexts/AccountContext'
 
 function PnLText({ value, currency }: { value: number; currency: string }) {
   const color = value >= 0 ? 'text-green-400' : 'text-red-400'
@@ -136,7 +136,7 @@ export default function Dashboard() {
                 <span
                   className="text-xs px-2 py-0.5 rounded-full font-medium"
                   style={{
-                    backgroundColor: accountColor(selectedAccount.account_id) + '33',
+                    backgroundColor: hexToRgba(accountColor(selectedAccount.account_id), 0.2),
                     color: accountColor(selectedAccount.account_id),
                   }}
                 >

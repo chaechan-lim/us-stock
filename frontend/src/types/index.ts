@@ -1,7 +1,7 @@
 export interface AccountInfo {
   account_id: string
   name: string
-  markets: string[]
+  markets: ('US' | 'KR')[]
   is_paper: boolean
 }
 

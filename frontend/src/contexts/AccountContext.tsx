@@ -1,7 +1,7 @@
-import { createContext, useContext, useState, type ReactNode } from 'react'
+import { createContext, useContext, useState, useEffect, type ReactNode } from 'react'
 import type { AccountInfo } from '../types'
 
-/** Predefined color palette for up to 8 accounts. */
+/** Predefined color palette for up to 8 accounts (all 6-char hex strings). */
 export const ACCOUNT_COLORS = [
   '#3b82f6', // blue-500
   '#8b5cf6', // violet-500
@@ -15,6 +15,17 @@ export const ACCOUNT_COLORS = [
 
 export function getAccountColor(index: number): string {
   return ACCOUNT_COLORS[index % ACCOUNT_COLORS.length]
+}
+
+/**
+ * Convert a 6-char hex color and 0–1 alpha to a CSS rgba() string.
+ * Safer than hex-string concatenation which breaks for non-hex formats.
+ */
+export function hexToRgba(hex: string, alpha: number): string {
+  const r = parseInt(hex.slice(1, 3), 16)
+  const g = parseInt(hex.slice(3, 5), 16)
+  const b = parseInt(hex.slice(5, 7), 16)
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`
 }
 
 interface AccountContextType {
@@ -44,6 +55,14 @@ interface AccountProviderProps {
 
 export function AccountProvider({ children, accounts }: AccountProviderProps) {
   const [selectedAccountId, setSelectedAccountId] = useState<string | null>(null)
+
+  // Reset to "all-accounts" view if the selected account disappears from the
+  // refreshed list (e.g. account deleted while the session is running).
+  useEffect(() => {
+    if (selectedAccountId !== null && !accounts.some(a => a.account_id === selectedAccountId)) {
+      setSelectedAccountId(null)
+    }
+  }, [accounts, selectedAccountId])
 
   const selectedAccount = accounts.find(a => a.account_id === selectedAccountId)
 

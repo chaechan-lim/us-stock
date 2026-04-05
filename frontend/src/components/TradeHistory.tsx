@@ -3,6 +3,7 @@ import { useQuery } from '@tanstack/react-query'
 import { useTrades } from '../hooks/useApi'
 import { fetchTradeSummaryPeriods, type PeriodSummary } from '../api/client'
 import { formatCurrency } from '../utils/format'
+import { useAccount, hexToRgba } from '../contexts/AccountContext'
 import clsx from 'clsx'
 
 const PAGE_SIZE = 30
@@ -69,12 +70,13 @@ interface DateGroup {
 }
 
 export default function TradeHistory() {
+  const { selectedAccountId, selectedAccount, accountColor } = useAccount()
   const [page, setPage] = useState(0)
   const offset = page * PAGE_SIZE
-  const { data: rawTrades, isLoading } = useTrades(PAGE_SIZE, undefined, offset)
+  const { data: rawTrades, isLoading } = useTrades(PAGE_SIZE, undefined, offset, selectedAccountId)
   const { data: periodSummary } = useQuery({
-    queryKey: ['trade-summary-periods'],
-    queryFn: () => fetchTradeSummaryPeriods(),
+    queryKey: ['trade-summary-periods', selectedAccountId ?? 'all'],
+    queryFn: () => fetchTradeSummaryPeriods(undefined, selectedAccountId),
     refetchInterval: 60_000,
   })
   const trades = rawTrades?.filter(t => t.status !== 'pending')
@@ -105,7 +107,20 @@ export default function TradeHistory() {
 
   return (
     <div className="space-y-4">
-      <h2 className="text-lg font-semibold">Trade History</h2>
+      <div className="flex items-center gap-2">
+        <h2 className="text-lg font-semibold">Trade History</h2>
+        {selectedAccount && (
+          <span
+            className="text-xs px-2 py-0.5 rounded-full font-medium"
+            style={{
+              backgroundColor: hexToRgba(accountColor(selectedAccount.account_id), 0.2),
+              color: accountColor(selectedAccount.account_id),
+            }}
+          >
+            {selectedAccount.name}
+          </span>
+        )}
+      </div>
 
       {/* Period Summary Cards */}
       {periodSummary && (
