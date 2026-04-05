@@ -1,3 +1,10 @@
+export interface AccountInfo {
+  account_id: string
+  name: string
+  markets: string[]
+  is_paper: boolean
+}
+
 export interface PortfolioSummary {
   market: string
   balance: {

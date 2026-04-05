@@ -1,5 +1,6 @@
 import axios from 'axios'
 import type {
+  AccountInfo,
   PortfolioSummary,
   Position,
   TickerData,
@@ -18,12 +19,20 @@ const api = axios.create({
   timeout: 15_000,
 })
 
-// Portfolio
-export const fetchPortfolioSummary = (market = 'ALL') =>
-  api.get<PortfolioSummary>('/portfolio/summary', { params: { market } }).then(r => r.data)
+// Accounts
+export const fetchAccounts = () =>
+  api.get<AccountInfo[]>('/accounts/').then(r => r.data)
 
-export const fetchPositions = (market = 'ALL') =>
-  api.get<Position[]>('/portfolio/positions', { params: { market } }).then(r => r.data)
+// Portfolio
+export const fetchPortfolioSummary = (market = 'ALL', accountId?: string | null) =>
+  api.get<PortfolioSummary>('/portfolio/summary', {
+    params: { market, ...(accountId ? { account_id: accountId } : {}) },
+  }).then(r => r.data)
+
+export const fetchPositions = (market = 'ALL', accountId?: string | null) =>
+  api.get<Position[]>('/portfolio/positions', {
+    params: { market, ...(accountId ? { account_id: accountId } : {}) },
+  }).then(r => r.data)
 
 // Market
 export const fetchPrice = (symbol: string) =>
@@ -79,9 +88,16 @@ export const removeFromWatchlist = (symbol: string, market = 'US') =>
   api.delete<WatchlistResponse>(`/watchlist/${symbol}`, { params: { market } }).then(r => r.data)
 
 // Trades
-export const fetchTrades = (opts: { limit?: number; market?: string; offset?: number } = {}) => {
-  const { limit = 50, market, offset = 0 } = opts
-  return api.get<Trade[]>('/trades/', { params: { limit, offset, ...(market && { market }) } }).then(r => r.data)
+export const fetchTrades = (opts: { limit?: number; market?: string; offset?: number; account_id?: string | null } = {}) => {
+  const { limit = 50, market, offset = 0, account_id } = opts
+  return api.get<Trade[]>('/trades/', {
+    params: {
+      limit,
+      offset,
+      ...(market && { market }),
+      ...(account_id ? { account_id } : {}),
+    },
+  }).then(r => r.data)
 }
 
 export const fetchTradeSummary = (market?: string) =>
@@ -174,8 +190,13 @@ export interface TradeSummaryPeriods {
   total_buys: number
   total_sells: number
 }
-export const fetchTradeSummaryPeriods = (market?: string) =>
-  api.get<TradeSummaryPeriods>('/portfolio/trade-summary', { params: { ...(market && { market }) } }).then(r => r.data)
+export const fetchTradeSummaryPeriods = (market?: string, accountId?: string | null) =>
+  api.get<TradeSummaryPeriods>('/portfolio/trade-summary', {
+    params: {
+      ...(market && { market }),
+      ...(accountId ? { account_id: accountId } : {}),
+    },
+  }).then(r => r.data)
 
 // News Sentiment
 export interface SentimentSignal {

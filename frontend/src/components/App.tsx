@@ -18,6 +18,9 @@ import SignalPanel from './SignalPanel'
 import NewsSentiment from './NewsSentiment'
 import EventsCalendar from './EventsCalendar'
 import MarketToggle from './MarketToggle'
+import AccountSelector from './AccountSelector'
+import { AccountProvider } from '../contexts/AccountContext'
+import { useAccounts } from '../hooks/useApi'
 import clsx from 'clsx'
 
 type Tab = 'dashboard' | 'positions' | 'trades' | 'signals' | 'chart' | 'strategies' | 'scanner' | 'watchlist' | 'logs' | 'backtest' | 'optimize' | 'portfolio' | 'sectors' | 'performance' | 'etf' | 'sentiment'
@@ -41,14 +44,31 @@ const TABS: { key: Tab; label: string }[] = [
   { key: 'logs', label: 'Logs' },
 ]
 
-export default function App() {
+/** Inner component that has access to useAccounts (requires QueryClientProvider). */
+function AppShell() {
   const [tab, setTab] = useState<Tab>('dashboard')
+  const { data: accounts = [] } = useAccounts()
 
+  return (
+    <AccountProvider accounts={accounts}>
+      <AppContent tab={tab} setTab={setTab} />
+    </AccountProvider>
+  )
+}
+
+export default function App() {
+  return <AppShell />
+}
+
+function AppContent({ tab, setTab }: { tab: Tab; setTab: (t: Tab) => void }) {
   return (
     <div className="min-h-screen bg-gray-950">
       <header className="bg-gray-900 border-b border-gray-800 px-6 py-3 flex items-center justify-between">
         <h1 className="text-xl font-bold text-white">Trading Engine</h1>
-        <EngineControl />
+        <div className="flex items-center gap-3">
+          <AccountSelector />
+          <EngineControl />
+        </div>
       </header>
 
       <nav className="bg-gray-900 border-b border-gray-800 px-3 sm:px-6 py-1">

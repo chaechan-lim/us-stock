@@ -5,6 +5,7 @@ import { usePriceStream } from '../hooks/usePriceStream'
 import { fetchMacroIndicators, fetchMarketState, fetchTradeSummaryPeriods } from '../api/client'
 import type { PeriodReturn } from '../api/client'
 import { formatCurrency } from '../utils/format'
+import { useAccount } from '../contexts/AccountContext'
 
 function PnLText({ value, currency }: { value: number; currency: string }) {
   const color = value >= 0 ? 'text-green-400' : 'text-red-400'
@@ -19,18 +20,19 @@ function PctText({ value }: { value: number }) {
 }
 
 export default function Dashboard() {
-  const { data: summary, isLoading } = usePortfolioSummary()
-  const { data: positions } = usePositions()
+  const { selectedAccountId, selectedAccount, accountColor } = useAccount()
+  const { data: summary, isLoading } = usePortfolioSummary('ALL', selectedAccountId)
+  const { data: positions } = usePositions('ALL', selectedAccountId)
   const { data: engineStatus } = useEngineStatus()
   const { data: returns } = usePortfolioReturns()
   const { data: usTradeSummary } = useQuery({
-    queryKey: ['portfolio', 'trade-summary', 'US'],
-    queryFn: () => fetchTradeSummaryPeriods('US'),
+    queryKey: ['portfolio', 'trade-summary', 'US', selectedAccountId ?? 'all'],
+    queryFn: () => fetchTradeSummaryPeriods('US', selectedAccountId),
     refetchInterval: 60_000,
   })
   const { data: krTradeSummary } = useQuery({
-    queryKey: ['portfolio', 'trade-summary', 'KR'],
-    queryFn: () => fetchTradeSummaryPeriods('KR'),
+    queryKey: ['portfolio', 'trade-summary', 'KR', selectedAccountId ?? 'all'],
+    queryFn: () => fetchTradeSummaryPeriods('KR', selectedAccountId),
     refetchInterval: 60_000,
   })
   const symbols = useMemo(
@@ -128,7 +130,20 @@ export default function Dashboard() {
       {sortedPositions.length > 0 && (
         <div className="bg-gray-900 rounded-lg p-4">
           <div className="flex items-center justify-between mb-3">
-            <h2 className="text-lg font-semibold">Holdings</h2>
+            <div className="flex items-center gap-2">
+              <h2 className="text-lg font-semibold">Holdings</h2>
+              {selectedAccount && (
+                <span
+                  className="text-xs px-2 py-0.5 rounded-full font-medium"
+                  style={{
+                    backgroundColor: accountColor(selectedAccount.account_id) + '33',
+                    color: accountColor(selectedAccount.account_id),
+                  }}
+                >
+                  {selectedAccount.name}
+                </span>
+              )}
+            </div>
             <div className="flex items-center gap-3">
               {krActive && (
                 <span className="text-xs text-purple-400 flex items-center gap-1">

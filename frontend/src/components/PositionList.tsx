@@ -1,9 +1,11 @@
 import { useMemo } from 'react'
 import { usePositions, useEngineStatus } from '../hooks/useApi'
 import { formatCurrency } from '../utils/format'
+import { useAccount } from '../contexts/AccountContext'
 
 export default function PositionList() {
-  const { data: positions, isLoading } = usePositions()
+  const { selectedAccountId, selectedAccount, accountColor } = useAccount()
+  const { data: positions, isLoading } = usePositions('ALL', selectedAccountId)
   const { data: engineStatus } = useEngineStatus()
 
   const usActive = engineStatus?.market_phase === 'regular'
@@ -29,7 +31,20 @@ export default function PositionList() {
   return (
     <div className="bg-gray-900 rounded-lg p-4">
       <div className="flex items-center justify-between mb-4">
-        <h2 className="text-lg font-semibold">All Positions</h2>
+        <div className="flex items-center gap-2">
+          <h2 className="text-lg font-semibold">All Positions</h2>
+          {selectedAccount && (
+            <span
+              className="text-xs px-2 py-0.5 rounded-full font-medium"
+              style={{
+                backgroundColor: accountColor(selectedAccount.account_id) + '33',
+                color: accountColor(selectedAccount.account_id),
+              }}
+            >
+              {selectedAccount.name}
+            </span>
+          )}
+        </div>
         <div className="flex items-center gap-3">
           {krActive && (
             <span className="text-xs text-purple-400 flex items-center gap-1">

@@ -1,18 +1,27 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import * as api from '../api/client'
 
-export function usePortfolioSummary(market = 'ALL') {
+export function useAccounts() {
   return useQuery({
-    queryKey: ['portfolio', 'summary', market],
-    queryFn: () => api.fetchPortfolioSummary(market),
+    queryKey: ['accounts'],
+    queryFn: api.fetchAccounts,
+    refetchInterval: 60_000,
+    staleTime: 30_000,
+  })
+}
+
+export function usePortfolioSummary(market = 'ALL', accountId?: string | null) {
+  return useQuery({
+    queryKey: ['portfolio', 'summary', market, accountId ?? 'all'],
+    queryFn: () => api.fetchPortfolioSummary(market, accountId),
     refetchInterval: 30_000,
   })
 }
 
-export function usePositions(market = 'ALL') {
+export function usePositions(market = 'ALL', accountId?: string | null) {
   return useQuery({
-    queryKey: ['portfolio', 'positions', market],
-    queryFn: () => api.fetchPositions(market),
+    queryKey: ['portfolio', 'positions', market, accountId ?? 'all'],
+    queryFn: () => api.fetchPositions(market, accountId),
     refetchInterval: 30_000,
   })
 }
