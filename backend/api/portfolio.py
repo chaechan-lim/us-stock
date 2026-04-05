@@ -2,10 +2,12 @@
 
 import logging
 from datetime import date, datetime, timedelta
+from typing import Optional
 from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Request
 
+from api.accounts import validate_account_id_or_404
 from data.stock_name_service import get_name, resolve_names
 
 router = APIRouter(prefix="/portfolio", tags=["portfolio"])
@@ -25,10 +27,16 @@ def init_portfolio(session_factory):
 
 
 @router.get("/summary")
-async def portfolio_summary(request: Request, market: str = "ALL"):
+async def portfolio_summary(
+    request: Request,
+    market: str = "ALL",
+    account_id: Optional[str] = Depends(validate_account_id_or_404),
+) -> dict:
     """Get portfolio summary: balance + positions + PnL.
 
     market=ALL returns unified view with total_equity in KRW (USD converted).
+    account_id is validated against configured accounts; unknown IDs return 404.
+    account_id omitted → default (all accounts) summary.
     """
     if market == "ALL":
         return await _combined_summary(request)
