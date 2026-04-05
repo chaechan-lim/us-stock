@@ -6,11 +6,11 @@ On startup, the trade log is restored from DB so history survives restarts.
 """
 
 import logging
-from datetime import datetime, timezone
+
+from fastapi import APIRouter, Query
 
 from data.stock_name_service import get_name
 from db.trade_repository import TradeRepository
-from fastapi import APIRouter, Query, Request
 
 router = APIRouter(prefix="/trades", tags=["trades"])
 logger = logging.getLogger(__name__)
@@ -254,7 +254,7 @@ async def persist_trade_to_db(trade: dict) -> bool:
         return False
 
 
-def _order_to_dict(o) -> dict:
+def order_to_dict(o) -> dict:
     """Convert an Order ORM object to trade log dict."""
     return {
         "order_id": o.kis_order_id or "",
@@ -302,7 +302,7 @@ async def restore_trade_log(exclude_paper: bool = True) -> int:
             _trade_log.clear()
             seen_order_ids: dict[str, int] = {}  # order_id -> index in _trade_log
             for o in reversed(orders):  # oldest first
-                entry = _order_to_dict(o)
+                entry = order_to_dict(o)
                 oid = entry.get("order_id", "")
                 if oid and oid in seen_order_ids:
                     # Duplicate kis_order_id — keep the one with PnL

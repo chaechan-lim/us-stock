@@ -245,7 +245,7 @@ async def test_order_manager_pnl_pct_zero_entry_price():
 
 def test_order_to_dict_includes_pnl_pct():
     """_order_to_dict includes pnl_pct from Order object."""
-    from api.trades import _order_to_dict
+    from api.trades import order_to_dict
 
     order = MagicMock()
     order.kis_order_id = "ORD1"
@@ -266,13 +266,13 @@ def test_order_to_dict_includes_pnl_pct():
     order.created_at = datetime(2024, 1, 1)
     order.id = 1
 
-    d = _order_to_dict(order)
+    d = order_to_dict(order)
     assert d["pnl_pct"] == 10.0
 
 
 def test_order_to_dict_pnl_pct_none():
     """_order_to_dict handles missing pnl_pct (old orders)."""
-    from api.trades import _order_to_dict
+    from api.trades import order_to_dict
 
     order = MagicMock(spec=[])
     order.kis_order_id = "ORD2"
@@ -289,7 +289,7 @@ def test_order_to_dict_pnl_pct_none():
     order.created_at = datetime(2024, 1, 1)
     # pnl_pct not set (simulates old data)
 
-    d = _order_to_dict(order)
+    d = order_to_dict(order)
     assert d["pnl_pct"] is None
 
 

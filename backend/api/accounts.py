@@ -18,6 +18,9 @@ router = APIRouter(prefix="/accounts", tags=["accounts"])
 logger = logging.getLogger(__name__)
 
 # Module-level cache — accounts config is static for the lifetime of the process.
+# TODO: if hot-reload of accounts.yaml is ever required (similar to strategies.yaml),
+#   expose a cache-invalidation hook (e.g. reset_accounts_cache()) and call it from
+#   the reload signal handler so that new accounts become visible without restart.
 _accounts_cache: list[dict] | None = None
 
 

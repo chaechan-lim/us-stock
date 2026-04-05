@@ -12,12 +12,12 @@ kept for future per-account adapter routing.
 """
 
 import logging
-from typing import Optional
+from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, Request
 
 from api.accounts import validate_account_id_or_404
-from api.portfolio import _enrich_positions, _get_market_data
+from api.portfolio import enrich_positions, get_market_data
 
 router = APIRouter(prefix="/positions", tags=["positions"])
 logger = logging.getLogger(__name__)
@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 @router.get("/")
 async def get_positions(
     request: Request,
-    market: str = "ALL",
+    market: Literal["US", "KR", "ALL"] = "ALL",
     account_id: Optional[str] = Depends(validate_account_id_or_404),
 ) -> list[dict]:
     """Return live positions, optionally filtered by account and market.
@@ -37,23 +37,23 @@ async def get_positions(
     if market == "ALL":
         results: list[dict] = []
         for m in ("US", "KR"):
-            md = _get_market_data(request, m)
+            md = get_market_data(request, m)
             if not md:
                 continue
             try:
                 positions = await md.get_positions()
-                results.extend(await _enrich_positions(positions, m, request))
+                results.extend(await enrich_positions(positions, m, request))
             except Exception as e:
                 logger.warning("Position fetch failed for %s market: %s", m, e)
         return results
 
-    md = _get_market_data(request, market)
+    md = get_market_data(request, market)
     if not md:
         return []
 
     try:
         positions = await md.get_positions()
-        return await _enrich_positions(positions, market, request)
+        return await enrich_positions(positions, market, request)
     except Exception as e:
         logger.warning("Position fetch failed for %s market: %s", market, e)
         return []

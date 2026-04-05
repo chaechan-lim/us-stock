@@ -1,18 +1,18 @@
 """Tests for trade history module: restore, reconciliation, persistence."""
 
-import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
 from api.trades import (
+    _merge_trade_entry,
     _trade_log,
     get_trades,
+    order_to_dict,
+    reconcile_pending_orders,
     record_trade,
     restore_trade_log,
-    reconcile_pending_orders,
     update_order_in_db,
-    init_trades,
-    _order_to_dict,
-    _merge_trade_entry,
 )
 
 
@@ -232,7 +232,7 @@ class TestOrderToDict:
         mock_order.market = "US"
         mock_order.created_at = "2026-03-10 15:30:00"
 
-        d = _order_to_dict(mock_order)
+        d = order_to_dict(mock_order)
         assert d["order_id"] == "KIS555"
         assert d["symbol"] == "NVDA"
         assert d["status"] == "filled"
@@ -256,7 +256,7 @@ class TestOrderToDict:
         mock_order.market = "US"
         mock_order.created_at = "2026-03-10 10:00:00"
 
-        d = _order_to_dict(mock_order)
+        d = order_to_dict(mock_order)
         assert d["is_paper"] is True
         assert d["order_id"] == ""
 
@@ -1342,7 +1342,6 @@ class TestRecordTradeSkipDbPersist:
 
     def test_skip_db_persist_true_does_not_fire_background_task(self):
         """When skip_db_persist=True, no fire-and-forget DB task is created."""
-        import asyncio
         from unittest.mock import patch as _patch
 
         created_tasks = []
