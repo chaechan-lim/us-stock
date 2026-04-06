@@ -128,6 +128,9 @@ class EvaluationLoop:
         self._min_confidence: float | None = None
         # STOCK-65/66: Per-market min_active_ratio override (None = use per-call defaults)
         self._min_active_ratio: float | None = None
+        # Signal quality dynamic weighting: boost/suppress strategies by live profit factor
+        self._quality_weight_enabled: bool = True
+        self._quality_min_trades: int = 10
 
     def set_disabled_strategies(self, names: list[str]) -> None:
         """Set market-specific disabled strategy names."""
@@ -174,6 +177,55 @@ class EvaluationLoop:
         logger.info(
             "Market %s: min_hold_secs=%d (%.2fh)", self._market, value, value / 3600
         )
+
+    def set_quality_weight_enabled(self, enabled: bool) -> None:
+        """Enable/disable signal quality dynamic weighting."""
+        self._quality_weight_enabled = enabled
+        logger.info("Market %s: quality_weight_enabled=%s", self._market, enabled)
+
+    def _apply_quality_weights(
+        self, weights: dict[str, float],
+    ) -> dict[str, float]:
+        """Apply signal quality multiplier to strategy weights.
+
+        Strategies with proven edge (high profit factor, sufficient trades)
+        get boosted. Poor performers get suppressed. Normalizes after.
+
+        Multiplier logic:
+        - PF >= 1.5 → boost up to 1.5x (0.25 per PF point above 1.0)
+        - PF 1.0-1.5 → neutral 1.0x
+        - PF < 1.0 → suppress to max(0.3, PF)
+        - < min_trades → no adjustment
+        """
+        if not self._quality_weight_enabled:
+            return weights
+
+        adjusted = dict(weights)
+        any_adjusted = False
+
+        for name in adjusted:
+            metrics = self._signal_quality.get_metrics(name)
+            if metrics.total_trades < self._quality_min_trades:
+                continue
+
+            pf = metrics.profit_factor
+            if pf >= 1.5:
+                mult = 1.0 + min(0.5, (pf - 1.0) * 0.25)
+            elif pf >= 1.0:
+                mult = 1.0
+            else:
+                mult = max(0.3, pf)
+
+            adjusted[name] = adjusted[name] * mult
+            any_adjusted = True
+
+        if not any_adjusted:
+            return weights
+
+        total = sum(adjusted.values())
+        if total > 0:
+            adjusted = {k: v / total for k, v in adjusted.items()}
+        return adjusted
 
     def _get_active_strategies(self) -> list[BaseStrategy]:
         """Return enabled strategies minus the market-specific disabled list."""
@@ -419,6 +471,7 @@ class EvaluationLoop:
             # Get per-stock blended weights
             market_weights = self._registry.get_profile_weights(self._market_state)
             weights = self._adaptive.get_weights(symbol, market_weights)
+            weights = self._apply_quality_weights(weights)
 
             # For held positions, remap BUY→HOLD for exit evaluation
             if is_held:
@@ -597,6 +650,7 @@ class EvaluationLoop:
 
                 market_weights = self._registry.get_profile_weights(self._market_state)
                 weights = self._adaptive.get_weights(symbol, market_weights)
+                weights = self._apply_quality_weights(weights)
 
                 # For held positions, remap BUY signals to HOLD before combining.
                 # Rationale: we already own the stock, so BUY signals (meaning
