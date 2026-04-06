@@ -58,7 +58,7 @@ def reset_all_daily_risk(us_rm: RiskManager, kr_rm: RiskManager) -> None:
 def _warn_if_disabled_empty(market: str, disabled: list[str]) -> None:
     """Emit a WARNING when disabled_strategies is unexpectedly empty.
 
-    An empty list means all 15 strategies will be active for that market.
+    An empty list means all 16 strategies will be active for that market.
     This is almost certainly a misconfiguration (e.g. YAML merge conflict that
     silently drops the list), so we surface it as a WARNING rather than letting
     it propagate silently as an INFO-level startup log.
@@ -69,7 +69,7 @@ def _warn_if_disabled_empty(market: str, disabled: list[str]) -> None:
     if not disabled:
         logger.warning(
             "markets.%s.disabled_strategies is empty or missing in strategies.yaml"
-            " — all 15 strategies are active for %s. Verify this is intentional"
+            " — all 16 strategies are active for %s. Verify this is intentional"
             " before live trading.",
             market,
             market,

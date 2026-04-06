@@ -23,6 +23,7 @@ from strategies.larry_williams import LarryWilliamsStrategy
 from strategies.bnf_deviation import BNFDeviationStrategy
 from strategies.volume_surge_strategy import VolumeSurgeStrategy
 from strategies.cross_sectional_momentum import CrossSectionalMomentumStrategy
+from strategies.quality_factor import QualityFactorStrategy
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +44,7 @@ STRATEGY_CLASSES: dict[str, type[BaseStrategy]] = {
     "bnf_deviation": BNFDeviationStrategy,
     "volume_surge": VolumeSurgeStrategy,
     "cross_sectional_momentum": CrossSectionalMomentumStrategy,
+    "quality_factor": QualityFactorStrategy,
 }
 
 

@@ -78,49 +78,53 @@ global:
 # Market state -> strategy weight profiles
 profiles:
   strong_uptrend:
-    trend_following: 0.20
-    dual_momentum: 0.15
+    trend_following: 0.18
+    dual_momentum: 0.14
     cross_sectional_momentum: 0.10
+    quality_factor: 0.05
     donchian_breakout: 0.10
     supertrend: 0.10
     cis_momentum: 0.05
-    larry_williams: 0.10
+    larry_williams: 0.08
     bnf_deviation: 0.05
     volume_surge: 0.15
 
   uptrend:
-    trend_following: 0.13
-    dual_momentum: 0.15
+    trend_following: 0.12
+    dual_momentum: 0.13
     cross_sectional_momentum: 0.10
+    quality_factor: 0.07
     donchian_breakout: 0.10
     supertrend: 0.10
     macd_histogram: 0.05
     cis_momentum: 0.05
-    larry_williams: 0.10
-    bnf_deviation: 0.07
+    larry_williams: 0.08
+    bnf_deviation: 0.05
     volume_surge: 0.15
 
   sideways:
     trend_following: 0.05
     dual_momentum: 0.05
     cross_sectional_momentum: 0.05
+    quality_factor: 0.10
     donchian_breakout: 0.05
     supertrend: 0.05
-    macd_histogram: 0.10
-    rsi_divergence: 0.15
-    bollinger_squeeze: 0.15
-    volume_profile: 0.10
+    macd_histogram: 0.08
+    rsi_divergence: 0.13
+    bollinger_squeeze: 0.13
+    volume_profile: 0.08
     cis_momentum: 0.03
     larry_williams: 0.05
-    bnf_deviation: 0.07
+    bnf_deviation: 0.05
     volume_surge: 0.10
 
   weak_downtrend:
     # Early downtrend: reduce exposure, favor defensive strategies
-    dual_momentum: 0.12
+    dual_momentum: 0.10
     cross_sectional_momentum: 0.03
-    rsi_divergence: 0.25
-    bollinger_squeeze: 0.15
+    quality_factor: 0.07
+    rsi_divergence: 0.22
+    bollinger_squeeze: 0.13
     bnf_deviation: 0.25
     volume_surge: 0.10
     regime_switch: 0.10
@@ -153,13 +157,14 @@ stock_profiles:
 
   stable_large_cap:
     # Stable blue-chips with low volatility (e.g. AAPL, MSFT, JNJ)
-    trend_following: 0.18
-    donchian_breakout: 0.15
-    rsi_divergence: 0.15
-    bnf_deviation: 0.12
+    trend_following: 0.15
+    quality_factor: 0.12
+    donchian_breakout: 0.13
+    rsi_divergence: 0.13
+    bnf_deviation: 0.10
     macd_histogram: 0.10
-    larry_williams: 0.10
-    bollinger_squeeze: 0.10
+    larry_williams: 0.08
+    bollinger_squeeze: 0.09
     volume_profile: 0.05
     dual_momentum: 0.05
 
@@ -452,6 +457,29 @@ strategies:
       volume_ratio_threshold: 0.8
       reversal_filter: true
       reversal_threshold: -0.05
+    stop_loss:
+      type: atr
+      atr_multiplier: 2.5
+      max_pct: 0.12
+    take_profit:
+      type: fixed_pct
+      max_pct: 0.20
+    trailing_stop:
+      enabled: true
+      activation_pct: 0.08
+      trail_pct: 0.04
+
+  quality_factor:
+    enabled: true
+    timeframe: "1D"
+    params:
+      lookback_days: 126       # 6-month quality assessment
+      vol_lookback: 60         # 60-day volatility window
+      max_volatility: 0.40     # max annualized vol ratio for BUY (40%)
+      min_up_ratio: 0.52       # min fraction of positive return days
+      min_sharpe: 0.5          # min annualized Sharpe
+      max_drawdown: -0.15      # max drawdown threshold
+      sell_quality_threshold: 0.25
     stop_loss:
       type: atr
       atr_multiplier: 2.5

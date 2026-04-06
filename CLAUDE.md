@@ -43,7 +43,7 @@ Architecture inherited from ~/coin project (crypto trading bot). **Live trading*
 
 ### Directory Layout
 - backend/exchange/: Exchange adapters (KIS US REST, KIS KR REST, KIS WebSocket, Paper)
-- backend/strategies/: Trading strategies (1 file per strategy, 15 active strategies)
+- backend/strategies/: Trading strategies (1 file per strategy, 16 active strategies)
 - backend/engine/: Trading engine (order, position, risk, portfolio managers, evaluation loop)
 - backend/scanner/: Stock scanning (3-Layer pipeline: Indicator -> yfinance -> AI, + news Layer 2.5)
 - backend/data/: Data services (market data, indicators, FRED, news, earnings, events)
@@ -82,7 +82,7 @@ Architecture inherited from ~/coin project (crypto trading bot). **Live trading*
   - Mutual exclusivity: sell conflicting 1x/2x sibling before buying target
 - Dynamic universe: scanner/universe_expander.py — yfinance screeners + sector weighting + KIS ranking APIs
 - All strategy params in config/strategies.yaml with runtime hot-reload
-- 15 strategies total: 10 original + 3 ported from coin (cis_momentum, larry_williams, bnf_deviation) + volume_surge + cross_sectional_momentum
+- 16 strategies total: 10 original + 3 ported from coin + volume_surge + cross_sectional_momentum + quality_factor
 - SignalCombiner: Mode B (HOLD excluded from denominator, 15% min active ratio), group consensus (trend/mean_reversion)
 - Port separation: us-stock 8001/3001, coin 8000/3000
 - Shared infra: PostgreSQL (coin's container, separate DB), Redis db 1 (coin uses db 0)

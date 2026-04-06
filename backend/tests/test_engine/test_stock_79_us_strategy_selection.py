@@ -36,13 +36,13 @@ _ALL_STRATEGIES = [
     "trend_following", "donchian_breakout", "supertrend", "macd_histogram",
     "dual_momentum", "rsi_divergence", "bollinger_squeeze", "volume_profile",
     "regime_switch", "sector_rotation", "cis_momentum", "larry_williams",
-    "bnf_deviation", "volume_surge", "cross_sectional_momentum",
+    "bnf_deviation", "volume_surge", "cross_sectional_momentum", "quality_factor",
 ]
 
 _US_ENABLED = {
     "dual_momentum", "volume_surge", "trend_following", "donchian_breakout",
     "supertrend", "macd_histogram", "rsi_divergence", "regime_switch",
-    "sector_rotation", "cross_sectional_momentum",
+    "sector_rotation", "cross_sectional_momentum", "quality_factor",
 }
 
 
@@ -241,16 +241,16 @@ class TestWarnIfDisabledEmpty:
         mock_warn.assert_not_called()
 
     def test_warning_mentions_strategy_count(self) -> None:
-        """WARNING message references all-strategies-active risk (15 strategies)."""
+        """WARNING message references all-strategies-active risk (16 strategies)."""
         with patch.object(_main_module.logger, "warning") as mock_warn:
             _main_module._warn_if_disabled_empty("US", [])
 
         mock_warn.assert_called_once()
-        # The full formatted message (with % substitution) should mention 15
+        # The full formatted message (with % substitution) should mention 16
         call_args = mock_warn.call_args[0]
         full_msg = call_args[0] % tuple(call_args[1:]) if len(call_args) > 1 else call_args[0]
-        assert "15" in full_msg, (
-            f"WARNING should mention 15 strategies. Full message: {full_msg}"
+        assert "16" in full_msg, (
+            f"WARNING should mention 16 strategies. Full message: {full_msg}"
         )
 
     def test_kr_market_empty_list_emits_warning(self) -> None:

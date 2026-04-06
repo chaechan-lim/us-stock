@@ -691,7 +691,7 @@ class TestYAMLKRSection:
         assert "min_hold_days" in ev
 
     def test_yaml_kr_disabled_count(self):
-        """11 strategies disabled (15 total - 4 enabled = 11)."""
+        """11 strategies disabled (16 total - 5 enabled = 11)."""
         loader = StrategyConfigLoader()
         disabled = loader._config["markets"]["KR"]["disabled_strategies"]
         assert len(disabled) == 11

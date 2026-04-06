@@ -199,7 +199,7 @@
 │   │   ├── stock_classifier.py   # 종목 분류
 │   │   └── recovery.py           # 에러 복구
 │   │
-│   ├── strategies/               # 15 active strategies
+│   ├── strategies/               # 16 active strategies
 │   │   ├── base.py               # BaseStrategy (abstract)
 │   │   ├── registry.py           # StrategyRegistry (동적 등록)
 │   │   ├── combiner.py           # SignalCombiner (Mode B, 그룹 합의)
