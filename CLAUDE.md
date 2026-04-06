@@ -92,12 +92,15 @@ Architecture inherited from ~/coin project (crypto trading bot). **Live trading*
 - Event calendar: earnings (buy block D-3, SL widen 1.5x), macro (FOMC block, CPI/Jobs 50%), insider (confidence ±0.10)
 - ATR-based dynamic SL/TP: per-stock volatility-adjusted (US 3-15%, KR 5-20%)
 - Exit management: hard SL -15%, profit protection ≥25%, trailing stop activation +8%/-4%, high_profit_auto_sell ≥10% PnL
-- Market allocation: 50:50 US/KR, regime-based dynamic (bull +20%, bear -20%, clamp 20%-70%)
+- Market allocation: dual momentum + inverse vol dynamic (daily pre-market rebalance, clamp 20%-80%)
+  - Momentum: 12-1 month return (SPY vs KODEX 200), skip last month
+  - Regime boost: bull +20%, bear -20%, clamp 20%-70% (on top of base)
+  - Signal quality: live profit factor → strategy weight boost/suppress (1.5x max, 0.3x floor)
 - DST auto-detection: zoneinfo("America/New_York") for US market phase
 - MCP server: backend/mcp_server.py (FastMCP, 28 tools for Claude Desktop/Code)
 - DB backup: local daily (7-day retention) + GitHub weekly (4-week), systemd timers
 - API auth: Bearer token middleware (AUTH_API_TOKEN env, empty=disabled)
-- Scheduler tasks: 29 total (20 US + 7 KR + system tasks)
+- Scheduler tasks: 30 total (21 US + 7 KR + system tasks)
 - Donchian breakout: uses previous bar's channel (pandas-ta donchian includes current bar)
 - Bollinger squeeze: squeeze_min_bars=3 (daily timeframe; 6 was too strict)
 - AI agent integration: RiskAssessmentAgent pre-trade check in evaluation_loop (non-blocking), TradeReviewAgent daily review (after-hours), agent memory cleanup (daily)

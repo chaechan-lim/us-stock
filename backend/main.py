@@ -1144,6 +1144,41 @@ async def lifespan(app: FastAPI):
         interval_sec=900,
         phases=[MarketPhase.REGULAR],
     )
+
+    # Dynamic market allocation (dual momentum + inverse volatility)
+    from engine.market_allocator import MarketAllocator
+
+    market_allocator = MarketAllocator()
+    app.state.market_allocator = market_allocator
+
+    async def task_rebalance_allocation():
+        """Recompute US/KR allocation using dual momentum + inverse vol."""
+        try:
+            spy_df = await market_data.get_ohlcv("SPY", limit=300)
+            kospi_df = await kr_market_data.get_ohlcv("069500", limit=300)
+            if spy_df.empty or kospi_df.empty:
+                return
+
+            alloc = market_allocator.compute(
+                us_prices=spy_df["close"],
+                kr_prices=kospi_df["close"],
+            )
+
+            risk_manager._params.market_allocations = alloc
+            kr_risk_manager._params.market_allocations = alloc
+            logger.info(
+                "Dynamic allocation updated: US=%.0f%% KR=%.0f%%",
+                alloc["US"] * 100, alloc["KR"] * 100,
+            )
+        except Exception as e:
+            logger.error("Allocation rebalance failed: %s", e)
+
+    scheduler.add_task(
+        "rebalance_allocation",
+        task_rebalance_allocation,
+        interval_sec=86400,
+        phases=[MarketPhase.PRE_MARKET],
+    )
     scheduler.add_task(
         "etf_evaluation",
         task_etf_evaluation,
