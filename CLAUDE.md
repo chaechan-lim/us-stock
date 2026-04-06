@@ -100,7 +100,7 @@ Architecture inherited from ~/coin project (crypto trading bot). **Live trading*
 - MCP server: backend/mcp_server.py (FastMCP, 28 tools for Claude Desktop/Code)
 - DB backup: local daily (7-day retention) + GitHub weekly (4-week), systemd timers
 - API auth: Bearer token middleware (AUTH_API_TOKEN env, empty=disabled)
-- Scheduler tasks: 30 total (21 US + 7 KR + system tasks)
+- Scheduler tasks: 31 total (22 US + 7 KR + system tasks)
 - Donchian breakout: uses previous bar's channel (pandas-ta donchian includes current bar)
 - Bollinger squeeze: squeeze_min_bars=3 (daily timeframe; 6 was too strict)
 - AI agent integration: RiskAssessmentAgent pre-trade check in evaluation_loop (non-blocking), TradeReviewAgent daily review (after-hours), agent memory cleanup (daily)

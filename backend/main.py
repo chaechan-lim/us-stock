@@ -1222,6 +1222,75 @@ async def lifespan(app: FastAPI):
         phases=[MarketPhase.AFTER_HOURS],
     )
 
+    # ML Factor Selection (weekly, after-hours)
+    from analytics.ml_factor_selector import MLFactorSelector
+    from analytics.factor_model import FactorWeights
+
+    ml_factor_selector = MLFactorSelector(
+        forward_days=20, n_estimators=100, max_depth=5,
+    )
+    app.state.ml_factor_selector = ml_factor_selector
+
+    async def task_ml_factor_update():
+        """Weekly ML factor weight recalibration using LightGBM."""
+        try:
+            from db.trade_repository import TradeRepository
+
+            async with session_factory() as session:
+                repo = TradeRepository(session)
+                watchlist = await repo.get_watchlist(active_only=True, market="US")
+                symbols = [w.symbol for w in watchlist][:50]  # limit to 50 stocks
+
+            if len(symbols) < 10:
+                symbols = ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA",
+                           "META", "TSLA", "JPM", "V", "JNJ",
+                           "WMT", "PG", "UNH", "HD", "MA"]
+
+            # Fetch historical data for each symbol
+            price_data = {}
+            for sym in symbols:
+                try:
+                    df = await market_data.get_ohlcv(sym, limit=300)
+                    if not df.empty and len(df) >= 60:
+                        price_data[sym] = df
+                except Exception:
+                    continue
+
+            if len(price_data) < 10:
+                logger.info("ML factor update: insufficient data (%d stocks)", len(price_data))
+                return
+
+            result = ml_factor_selector.select_factors(price_data)
+            if result.success and result.test_r2 > -0.5:
+                weights = result.to_factor_weights()
+                new_fw = FactorWeights(
+                    growth=weights.get("growth", 0.35),
+                    profitability=weights.get("profitability", 0.30),
+                    garp=weights.get("garp", 0.20),
+                    momentum=weights.get("momentum", 0.15),
+                )
+                evaluation_loop._factor_model._weights = new_fw
+                logger.info(
+                    "ML factor weights updated: growth=%.2f prof=%.2f "
+                    "garp=%.2f mom=%.2f (test_R2=%.3f)",
+                    new_fw.growth, new_fw.profitability,
+                    new_fw.garp, new_fw.momentum, result.test_r2,
+                )
+            else:
+                logger.info(
+                    "ML factor update: keeping defaults (success=%s, R2=%.3f)",
+                    result.success, result.test_r2,
+                )
+        except Exception as e:
+            logger.error("ML factor update failed: %s", e)
+
+    scheduler.add_task(
+        "ml_factor_update",
+        task_ml_factor_update,
+        interval_sec=7 * 86400,  # weekly
+        phases=[MarketPhase.AFTER_HOURS],
+    )
+
     async def task_macro_update():
         """T5: Fetch FRED macro indicators (daily, pre-market)."""
         if not fred_service.available:
