@@ -1545,7 +1545,20 @@ KR 태스크 (7개):
 | 섹터 집중 한도 | 40% | 단일 섹터 |
 | 레짐 적응 | 강상승 15%/95% | 하락장 5%/40% |
 
-### 9.3 시스템 레벨
+### 9.3 Exit Management (청산 관리)
+
+| 항목 | 값 | 설명 |
+|------|-----|------|
+| Hard Stop Loss | -15% | 무조건 손절 (min hold bypass) |
+| Profit Protection | ≥25% | HOLD + 고수익 → 자동 매도 |
+| High Profit Auto-Sell | ≥10% PnL | HOLD시 기술적 약세 없이도 매도 |
+| Trailing Stop 활성화 | +8% | 활성화 후 -4% 추적 |
+| Profit Protection % | 25% | 고수익 포지션 보호 비율 |
+
+- **Winners 보호**: 높은 threshold (25%)로 설정하여 수익 포지션이 조기 청산되지 않도록 함
+- **Losers 빠른 제거**: Hard SL -15%로 큰 손실 방지, ATR 기반 동적 SL로 변동성 적응
+
+### 9.4 시스템 레벨
 
 ```
 - API 에러 연속 5회 → 엔진 일시 중지, 알림 발송

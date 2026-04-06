@@ -553,7 +553,8 @@ class TestConfidenceRankedBuy:
         mock_adapter.create_buy_order = AsyncMock(side_effect=track_buy)
 
         # Each symbol returns a different confidence BUY signal
-        confidence_map = {"LOW_CONF": 0.55, "HIGH_CONF": 0.95, "MID_CONF": 0.75}
+        # With quadratic combiner weighting: conf² must exceed min_confidence
+        confidence_map = {"LOW_CONF": 0.65, "HIGH_CONF": 0.95, "MID_CONF": 0.80}
 
         def make_strategy(symbol):
             s = AsyncMock()
@@ -588,7 +589,7 @@ class TestConfidenceRankedBuy:
 
         await loop._evaluate_all()
 
-        # Should be called in order: HIGH_CONF (0.95), MID_CONF (0.75), LOW_CONF (0.55)
+        # Should be called in order: HIGH_CONF (0.95), MID_CONF (0.80), LOW_CONF (0.65)
         assert len(call_order) == 3
         assert call_order[0] == "HIGH_CONF"
         assert call_order[1] == "MID_CONF"
@@ -3249,7 +3250,7 @@ class TestProfitProtection:
         mock_market_data,
         mock_registry,
     ):
-        """HOLD + P&L >= 15% on held position should trigger profit_protection SELL."""
+        """HOLD + P&L >= 25% on held position should trigger profit_protection SELL."""
         from data.indicator_service import IndicatorService
         from strategies.combiner import SignalCombiner
 
@@ -3275,7 +3276,7 @@ class TestProfitProtection:
         position_tracker.get_buy_strategy.return_value = "trend_following"
         position_tracker._tracked = {}
 
-        # VG held at +20% gain (simulating the STOCK-34 scenario)
+        # VG held at +30% gain (simulating the STOCK-34 scenario)
         mock_market_data.get_positions = AsyncMock(
             return_value=[
                 Position(
@@ -3283,7 +3284,7 @@ class TestProfitProtection:
                     exchange="NASD",
                     quantity=5,
                     avg_price=100.0,
-                    current_price=120.0,  # +20%
+                    current_price=130.0,  # +30%
                 ),
             ]
         )
@@ -3295,7 +3296,7 @@ class TestProfitProtection:
                 side="SELL",
                 order_type="market",
                 quantity=5,
-                price=120.0,
+                price=130.0,
                 status="filled",
             )
         )
@@ -3326,7 +3327,7 @@ class TestProfitProtection:
         mock_market_data,
         mock_registry,
     ):
-        """HOLD + P&L < 15% should NOT trigger profit protection SELL."""
+        """HOLD + P&L < 25% should NOT trigger profit protection SELL."""
         from data.indicator_service import IndicatorService
         from strategies.combiner import SignalCombiner
 
@@ -3944,22 +3945,19 @@ class TestAntiWhipsawDefaults:
         assert eval_loop._min_hold_secs == 4 * 3600
 
     def test_hard_sl_pct_default(self, eval_loop):
-        """_hard_sl_pct should be -7% (hardcoded EvaluationLoop default)."""
-        # Note: -0.07 is the hardcoded default in EvaluationLoop.__init__.
-        # In production (main.py), this is overridden to -0.15 from config.
-        # This test verifies the hardcoded default; config tests verify loader overrides it to -0.15.
-        assert eval_loop._hard_sl_pct == -0.07
+        """_hard_sl_pct should be -15% (hardcoded EvaluationLoop default)."""
+        assert eval_loop._hard_sl_pct == -0.15
 
     def test_hard_sl_pct_config_override(self, eval_loop, mock_registry):
         """hard_sl_pct should be overridable from config (STOCK-61)."""
         # STOCK-61: Verify that evaluation_loop can be configured with a custom hard_sl_pct
         # from the config_loader (as done in main.py at startup).
-        mock_registry._config_loader.get_hard_sl_pct.return_value = -0.15
+        mock_registry._config_loader.get_hard_sl_pct.return_value = -0.10
 
         # Simulate the startup behavior in main.py
         eval_loop._hard_sl_pct = mock_registry._config_loader.get_hard_sl_pct()
 
-        assert eval_loop._hard_sl_pct == -0.15
+        assert eval_loop._hard_sl_pct == -0.10
         mock_registry._config_loader.get_hard_sl_pct.assert_called_once()
 
     def test_max_loss_sells_default(self, eval_loop):
@@ -4257,7 +4255,7 @@ class TestMinimumHoldPeriod:
     async def test_hard_sl_bypasses_min_hold_in_position_cleanup(
         self, mock_adapter, mock_market_data
     ):
-        """Hard SL (-7%+) bypasses min hold in position_cleanup path."""
+        """Hard SL (-15%+) bypasses min hold in position_cleanup path."""
 
         loop = self._make_full_loop(
             mock_adapter,
@@ -4270,7 +4268,7 @@ class TestMinimumHoldPeriod:
             ),
             tracked_at=time.monotonic() - 1800,  # 30min ago (< 4h)
             avg_price=100.0,
-            current_price=92.0,  # -8%, below -7% hard SL → bypass min hold
+            current_price=84.0,  # -16%, below -15% hard SL → bypass min hold
         )
         await loop._evaluate_all()
         mock_adapter.create_sell_order.assert_called_once()
@@ -4314,7 +4312,7 @@ class TestMinimumHoldPeriod:
         mock_adapter.create_sell_order.assert_called_once()
 
     async def test_strategy_hard_sl_bypasses_min_hold(self, mock_adapter, mock_market_data):
-        """Strategy SELL with hard SL (-7%+) bypasses min hold check."""
+        """Strategy SELL with hard SL (-15%+) bypasses min hold check."""
 
         loop = self._make_full_loop(
             mock_adapter,
@@ -4327,7 +4325,7 @@ class TestMinimumHoldPeriod:
             ),
             tracked_at=time.monotonic() - 1800,  # 30min ago (< 4h)
             avg_price=100.0,
-            current_price=92.0,  # -8%, hard SL bypasses
+            current_price=84.0,  # -16%, hard SL bypasses
         )
         await loop._evaluate_all()
         mock_adapter.create_sell_order.assert_called_once()

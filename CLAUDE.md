@@ -91,6 +91,7 @@ Architecture inherited from ~/coin project (crypto trading bot). **Live trading*
 - Order safety: dedup check, reconciliation task (2min), slippage/partial fill tracking, fetch_executed_orders fallback
 - Event calendar: earnings (buy block D-3, SL widen 1.5x), macro (FOMC block, CPI/Jobs 50%), insider (confidence ±0.10)
 - ATR-based dynamic SL/TP: per-stock volatility-adjusted (US 3-15%, KR 5-20%)
+- Exit management: hard SL -15%, profit protection ≥25%, trailing stop activation +8%/-4%, high_profit_auto_sell ≥10% PnL
 - Market allocation: 50:50 US/KR, regime-based dynamic (bull +20%, bear -20%, clamp 20%-70%)
 - DST auto-detection: zoneinfo("America/New_York") for US market phase
 - MCP server: backend/mcp_server.py (FastMCP, 28 tools for Claude Desktop/Code)

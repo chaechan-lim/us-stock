@@ -110,8 +110,8 @@ class EvaluationLoop:
         self._max_per_symbol_pct: float = 0.10  # 10% max per symbol
         # STOCK-47: Minimum hold period before non-emergency sells (4 hours)
         self._min_hold_secs: int = 4 * 3600
-        # STOCK-47: Hard stop-loss threshold that bypasses min hold (-7%)
-        self._hard_sl_pct: float = -0.07
+        # Hard stop-loss threshold that bypasses min hold (aligned with YAML -15%)
+        self._hard_sl_pct: float = -0.15
         # STOCK-47: Whipsaw counter — track loss sell timestamps per symbol
         self._loss_sell_history: dict[str, list[float]] = {}  # {symbol: [timestamps]}
         self._max_loss_sells: int = 2  # block re-entry after N loss sells in 7 days
@@ -706,7 +706,7 @@ class EvaluationLoop:
                 # safety net: if position_tracker TP doesn't fire and
                 # evaluate_exit() doesn't convert to SELL, this ensures
                 # highly profitable positions are eventually exited.
-                _ppp = getattr(self, "_profit_protection_pct", 0.15)
+                _ppp = getattr(self, "_profit_protection_pct", 0.25)
                 if (
                     is_held
                     and combined.signal_type == SignalType.HOLD

@@ -35,21 +35,24 @@ global:
     profit_take_weakness_required: 1      # min weakness indicators (0-3) needed
     rsi_overbought: 70.0                 # RSI threshold for technical weakness
     volume_weakness_ratio: 0.8           # volume/MA ratio below = weakness
-    # STOCK-34: High-profit auto-sell — sell without weakness at very high PnL
-    high_profit_auto_sell_pnl: 0.10      # 10%+ PnL → auto-SELL on HOLD (no weakness needed)
+    # High-profit auto-sell — sell without weakness at very high PnL
+    # Raised from 10% to 25% to let winners run longer
+    high_profit_auto_sell_pnl: 0.25      # 25%+ PnL → auto-SELL on HOLD (no weakness needed)
     high_profit_auto_sell_confidence: 0.70  # base confidence for auto-sell
-  # STOCK-34: Profit protection — evaluation loop safety net
+  # Profit protection — evaluation loop safety net
   # When all strategies say HOLD but unrealized gain is very high,
   # generate SELL to prevent unrealized gains from evaporating.
-  profit_protection_pct: 0.10             # 10%+ unrealized gain → force SELL
+  # Raised from 10% to 25% to avoid capping winners too early
+  profit_protection_pct: 0.25             # 25%+ unrealized gain → force SELL
   # STOCK-61: Hard stop-loss threshold that bypasses min_hold (4 hours)
   # When P&L drops below this, position is sold immediately even if not held 4h yet.
   # Set to -15% to only trigger on genuine crashes, not normal 5-7% dips.
   hard_sl_pct: -0.15                      # -15% hard SL that bypasses min_hold
   # Default trailing stop for strategies without explicit config
+  # Raised activation from 4% to 8% to avoid clipping early winners
   trailing_stop_defaults:
-    activation_pct: 0.04   # activate after 4% gain
-    trail_pct: 0.03        # sell if drops 3% from peak
+    activation_pct: 0.08   # activate after 8% gain
+    trail_pct: 0.04        # sell if drops 4% from peak
   # Tiered trailing stop: tighter trail at higher gain levels (STOCK-24)
   # Protects large unrealized gains without cutting early winners.
   # Each tier: {gain_pct: activation threshold, trail_pct: trail from peak}

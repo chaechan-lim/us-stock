@@ -60,10 +60,22 @@ class _TestStrategy(BaseStrategy):
 
 @pytest.fixture(autouse=True)
 def reset_profit_exit_params():
-    """Reset class-level params before each test."""
-    original = BaseStrategy._profit_exit_params.copy()
+    """Reset class-level params to hardcoded defaults before/after each test."""
+    _DEFAULTS = {
+        "sell_confidence_boost_min_pnl": 0.02,
+        "sell_confidence_boost_factor": 0.5,
+        "sell_confidence_boost_max": 0.15,
+        "profit_take_min_pnl": 0.05,
+        "profit_take_base_confidence": 0.65,
+        "profit_take_weakness_required": 1,
+        "rsi_overbought": 70.0,
+        "volume_weakness_ratio": 0.8,
+        "high_profit_auto_sell_pnl": 0.10,
+        "high_profit_auto_sell_confidence": 0.70,
+    }
+    BaseStrategy._profit_exit_params = _DEFAULTS.copy()
     yield
-    BaseStrategy._profit_exit_params = original
+    BaseStrategy._profit_exit_params = _DEFAULTS.copy()
 
 
 @pytest.fixture
