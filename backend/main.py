@@ -509,12 +509,6 @@ async def lifespan(app: FastAPI):
     us_disabled = registry.config_loader.get_market_disabled_strategies("US")
     _warn_if_disabled_empty("US", us_disabled)
     evaluation_loop.set_disabled_strategies(us_disabled)
-    # Sector concentration: build sector cache from ETFUniverse top holdings
-    _sector_cache: dict[str, str] = {}
-    for sector_name, sector_etf in etf_universe.get_all_sectors().items():
-        for sym in sector_etf.top_holdings:
-            _sector_cache[sym] = sector_name
-    evaluation_loop.set_sector_cache(_sector_cache)
     evaluation_loop.set_max_sector_pct(config.risk.max_sector_pct)
     evaluation_loop.set_min_confidence(0.30)
     evaluation_loop.set_min_active_ratio(0.0)
@@ -534,6 +528,13 @@ async def lifespan(app: FastAPI):
         kis_adapter=adapter,
         rate_limiter=rate_limiter,
     )
+    # Sector concentration: build sector cache from ETFUniverse top holdings
+    _sector_cache: dict[str, str] = {}
+    for sector_name, sector_etf in etf_universe.get_all_sectors().items():
+        for sym in sector_etf.top_holdings:
+            _sector_cache[sym] = sector_name
+    evaluation_loop.set_sector_cache(_sector_cache)
+
     app.state.stock_scanner = stock_scanner
     app.state.sector_analyzer = sector_analyzer
     app.state.external_data = external_data
