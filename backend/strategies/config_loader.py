@@ -142,5 +142,18 @@ class StrategyConfigLoader:
         """
         return dict(self._get_market_config(market).get("evaluation_loop", {}))
 
+    def get_market_cash_parking_config(self, market: str) -> dict:
+        """Get cash parking config for a specific market.
+
+        Schema (under markets.<MARKET>.cash_parking):
+            enabled: bool       — master switch (default False)
+            symbol: str         — parking symbol (default SPY for US, 069500 for KR)
+            threshold: float    — park when cash/equity > threshold (default 0.30)
+            buffer: float       — fraction of equity to keep in cash (default 0.10)
+
+        Returns empty dict if no overrides are set.
+        """
+        return dict(self._get_market_config(market).get("cash_parking", {}))
+
     def get_screening_config(self) -> dict:
         return self._config.get("screening", {})

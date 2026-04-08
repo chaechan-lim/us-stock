@@ -4598,3 +4598,171 @@ class TestWhipsawCounter:
 
         await loop.evaluate_symbol("AAPL")
         mock_adapter.create_buy_order.assert_called_once()
+
+
+class TestCashParking:
+    """Tests for cash parking — port from backtest, validated +13.3pp alpha
+    in backend/scripts/validate_cash_parking.py V1_park_30 (US 2y).
+    """
+
+    @pytest.fixture
+    def loop(self, mock_adapter, mock_market_data, mock_registry):
+        from data.indicator_service import IndicatorService
+        from strategies.combiner import SignalCombiner
+        from engine.order_manager import OrderManager
+        from engine.risk_manager import RiskManager
+
+        risk = RiskManager()
+        order_mgr = OrderManager(adapter=mock_adapter, risk_manager=risk)
+        loop = EvaluationLoop(
+            adapter=mock_adapter,
+            market_data=mock_market_data,
+            indicator_svc=IndicatorService(),
+            registry=mock_registry,
+            combiner=SignalCombiner(),
+            order_manager=order_mgr,
+            risk_manager=risk,
+            watchlist=["AAPL"],
+            market_state="uptrend",
+        )
+        return loop
+
+    def test_default_off(self, loop):
+        assert loop._cash_parking_enabled is False
+        assert loop._cash_parking_symbol == "SPY"
+        assert loop._cash_parking_threshold == 0.30
+        assert loop._cash_parking_buffer == 0.10
+
+    def test_set_config_basic(self, loop):
+        loop.set_cash_parking_config(enabled=True)
+        assert loop._cash_parking_enabled is True
+
+    def test_set_config_overrides(self, loop):
+        loop.set_cash_parking_config(
+            enabled=True, symbol="QQQ", threshold=0.25, buffer=0.05,
+        )
+        assert loop._cash_parking_symbol == "QQQ"
+        assert loop._cash_parking_threshold == 0.25
+        assert loop._cash_parking_buffer == 0.05
+
+    def test_set_config_validates_threshold(self, loop):
+        with pytest.raises(ValueError):
+            loop.set_cash_parking_config(enabled=True, threshold=1.5)
+        with pytest.raises(ValueError):
+            loop.set_cash_parking_config(enabled=True, threshold=-0.1)
+
+    def test_set_config_validates_buffer(self, loop):
+        with pytest.raises(ValueError):
+            loop.set_cash_parking_config(enabled=True, buffer=1.5)
+
+    def test_kr_default_symbol(self, mock_adapter, mock_market_data, mock_registry):
+        from data.indicator_service import IndicatorService
+        from strategies.combiner import SignalCombiner
+        from engine.order_manager import OrderManager
+        from engine.risk_manager import RiskManager
+        risk = RiskManager()
+        order_mgr = OrderManager(adapter=mock_adapter, risk_manager=risk)
+        kr_loop = EvaluationLoop(
+            adapter=mock_adapter,
+            market_data=mock_market_data,
+            indicator_svc=IndicatorService(),
+            registry=mock_registry,
+            combiner=SignalCombiner(),
+            order_manager=order_mgr,
+            risk_manager=risk,
+            market="KR",
+        )
+        assert kr_loop._cash_parking_symbol == "069500"
+
+    async def test_park_does_nothing_when_disabled(self, loop):
+        loop._cash_parking_enabled = False
+        await loop._park_excess_cash()
+        # Should not call place_buy
+        loop._order_manager._adapter.create_buy_order.assert_not_called()
+
+    async def test_park_does_nothing_when_cash_below_threshold(self, loop, mock_adapter):
+        loop.set_cash_parking_config(enabled=True)
+        # cash_pct = 80k / 100k = 80% — wait that's > 30%, so it WOULD park
+        # Lower available so cash_pct < 30%
+        mock_adapter.fetch_balance = AsyncMock(
+            return_value=Balance(currency="USD", total=100_000, available=20_000)
+        )
+        await loop._park_excess_cash()
+        mock_adapter.create_buy_order.assert_not_called()
+
+    async def test_park_buys_spy_when_cash_excess(self, loop, mock_adapter, mock_market_data):
+        loop.set_cash_parking_config(enabled=True, threshold=0.30, buffer=0.10)
+        # cash 80k / 100k = 80% > 30% → park (80k - 100k*0.10 = 70k)
+        # SPY price from mock_market_data ohlcv → ~100
+        mock_market_data.get_positions = AsyncMock(return_value=[])
+        # ohlcv mock returns ~100 close prices, so quantity ~ 70k / 100 = 700
+        mock_adapter.create_buy_order = AsyncMock(
+            return_value=OrderResult(
+                order_id="PARK1",
+                symbol="SPY",
+                side="BUY",
+                order_type="limit",
+                quantity=700,
+                price=100.0,
+                status="filled",
+                filled_price=100.0,
+            )
+        )
+        await loop._park_excess_cash()
+        mock_adapter.create_buy_order.assert_called_once()
+        call_kwargs = mock_adapter.create_buy_order.call_args.kwargs
+        assert call_kwargs["symbol"] == "SPY"
+        assert call_kwargs["quantity"] > 0
+
+    async def test_park_skipped_if_already_holding_spy(self, loop, mock_adapter, mock_market_data):
+        loop.set_cash_parking_config(enabled=True)
+        mock_market_data.get_positions = AsyncMock(
+            return_value=[Position(
+                symbol="SPY", quantity=100, avg_price=100, current_price=100, exchange="NASD",
+            )]
+        )
+        await loop._park_excess_cash()
+        mock_adapter.create_buy_order.assert_not_called()
+
+    async def test_unpark_sells_spy_when_held(self, loop, mock_adapter, mock_market_data):
+        loop.set_cash_parking_config(enabled=True)
+        mock_market_data.get_positions = AsyncMock(
+            return_value=[Position(
+                symbol="SPY", quantity=700, avg_price=100, current_price=105, exchange="NASD",
+            )]
+        )
+        mock_adapter.create_sell_order = AsyncMock(
+            return_value=OrderResult(
+                order_id="UNPARK1",
+                symbol="SPY",
+                side="SELL",
+                order_type="limit",
+                quantity=700,
+                price=105.0,
+                status="filled",
+                filled_price=105.0,
+            )
+        )
+        await loop._unpark_cash_for_buys()
+        mock_adapter.create_sell_order.assert_called_once()
+
+    async def test_unpark_noop_when_no_parking(self, loop, mock_adapter, mock_market_data):
+        loop.set_cash_parking_config(enabled=True)
+        mock_market_data.get_positions = AsyncMock(return_value=[])
+        await loop._unpark_cash_for_buys()
+        mock_adapter.create_sell_order.assert_not_called()
+
+    async def test_park_handles_balance_failure(self, loop, mock_adapter):
+        loop.set_cash_parking_config(enabled=True)
+        mock_adapter.fetch_balance = AsyncMock(side_effect=Exception("API down"))
+        # Should not raise
+        await loop._park_excess_cash()
+        mock_adapter.create_buy_order.assert_not_called()
+
+    async def test_park_handles_zero_equity(self, loop, mock_adapter):
+        loop.set_cash_parking_config(enabled=True)
+        mock_adapter.fetch_balance = AsyncMock(
+            return_value=Balance(currency="USD", total=0, available=0)
+        )
+        await loop._park_excess_cash()
+        mock_adapter.create_buy_order.assert_not_called()

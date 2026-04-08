@@ -135,6 +135,15 @@ class EvaluationLoop:
         self._max_sector_pct: float = 0.40
         self._sector_cache: dict[str, str] = {}  # symbol -> sector name
 
+        # Cash parking (port from backtest/full_pipeline.py — recovers ~13pp
+        # alpha by parking idle cash in SPY/KODEX 200 instead of letting it
+        # sit during low-conviction periods). Default disabled; opt-in via
+        # markets.<MARKET>.cash_parking.enabled in strategies.yaml.
+        self._cash_parking_enabled: bool = False
+        self._cash_parking_symbol: str = "SPY" if market == "US" else "069500"
+        self._cash_parking_threshold: float = 0.30  # park if cash > 30% of equity
+        self._cash_parking_buffer: float = 0.10     # keep 10% cash buffer for opportunities
+
     def set_disabled_strategies(self, names: list[str]) -> None:
         """Set market-specific disabled strategy names."""
         self._disabled_strategies = frozenset(names)
@@ -142,6 +151,38 @@ class EvaluationLoop:
             "Market %s: disabled strategies = %s",
             self._market,
             sorted(self._disabled_strategies),
+        )
+
+    def set_cash_parking_config(
+        self,
+        enabled: bool,
+        symbol: str | None = None,
+        threshold: float | None = None,
+        buffer: float | None = None,
+    ) -> None:
+        """Configure cash parking (idle cash → SPY/KODEX 200).
+
+        Args:
+            enabled: Master switch.
+            symbol: Parking symbol (default SPY for US, 069500 for KR).
+            threshold: Park when cash/equity > threshold (default 0.30).
+            buffer: Keep this fraction of equity in cash (default 0.10).
+        """
+        self._cash_parking_enabled = bool(enabled)
+        if symbol:
+            self._cash_parking_symbol = symbol
+        if threshold is not None:
+            if not (0.0 <= threshold <= 1.0):
+                raise ValueError(f"cash_parking threshold must be in [0,1], got {threshold}")
+            self._cash_parking_threshold = float(threshold)
+        if buffer is not None:
+            if not (0.0 <= buffer <= 1.0):
+                raise ValueError(f"cash_parking buffer must be in [0,1], got {buffer}")
+            self._cash_parking_buffer = float(buffer)
+        logger.info(
+            "Market %s: cash_parking enabled=%s symbol=%s threshold=%.2f buffer=%.2f",
+            self._market, self._cash_parking_enabled, self._cash_parking_symbol,
+            self._cash_parking_threshold, self._cash_parking_buffer,
         )
 
     def set_min_confidence(self, value: float | None) -> None:
@@ -676,6 +717,14 @@ class EvaluationLoop:
             if symbol in sold_in_phase0:
                 logger.debug("Skipping %s in Phase 1: already sold in Phase 0", symbol)
                 continue
+            # Cash parking position is system-managed — never let strategies
+            # generate BUY/SELL signals on it (would cause double-sell or
+            # phantom buy alongside the unpark/park logic).
+            if (
+                self._cash_parking_enabled
+                and symbol == self._cash_parking_symbol
+            ):
+                continue
             try:
                 df = await self._market_data.get_ohlcv(symbol, limit=250)
                 if df.empty:
@@ -899,8 +948,149 @@ class EvaluationLoop:
                 "Buy candidates ranked: %s",
                 [(s, f"{c:.2f}") for c, s, _, _ in buy_candidates[:10]],
             )
+            # Cash parking: unpark SPY before processing buys to free up cash
+            if self._cash_parking_enabled:
+                await self._unpark_cash_for_buys()
             for _conf, symbol, combined, df in buy_candidates:
                 await self._execute_signal(combined, symbol, df)
+
+        # Phase 3: Park leftover cash in SPY/KODEX 200 if above threshold
+        if self._cash_parking_enabled:
+            await self._park_excess_cash()
+
+    async def _park_excess_cash(self) -> None:
+        """Park idle cash in SPY/KODEX 200 if cash > threshold * equity.
+
+        Backtest validated +13.3pp return / +0.97 Sharpe over 2y on US
+        wide universe (validate_cash_parking.py V1_park_30, 2026-04-08).
+        Skipped silently if anything is missing — never raises.
+        """
+        if not self._cash_parking_enabled:
+            return
+        sym = self._cash_parking_symbol
+        try:
+            balance = await self._adapter.fetch_balance()
+        except Exception as e:
+            logger.debug("park: balance fetch failed: %s", e)
+            return
+        equity = float(getattr(balance, "total", 0.0) or 0.0)
+        cash = float(getattr(balance, "available", 0.0) or 0.0)
+        if equity <= 0 or cash <= 0:
+            return
+        cash_pct = cash / equity
+        if cash_pct < self._cash_parking_threshold:
+            return
+
+        # Already parked? skip
+        try:
+            positions = await self._market_data.get_positions()
+            if any(p.symbol == sym and p.quantity > 0 for p in positions):
+                return
+        except Exception as e:
+            logger.debug("park: position check failed: %s", e)
+            return
+
+        # Compute park amount: cash above the buffer
+        park_amount = cash - equity * self._cash_parking_buffer
+        if park_amount <= 0:
+            return
+
+        # Get current SPY price
+        try:
+            df = await self._market_data.get_ohlcv(sym, limit=2)
+            if df.empty:
+                return
+            price = float(df["close"].iloc[-1])
+        except Exception as e:
+            logger.debug("park: price fetch failed for %s: %s", sym, e)
+            return
+        if price <= 0:
+            return
+
+        quantity = int(park_amount / price)
+        if quantity <= 0:
+            return
+
+        from engine.risk_manager import PositionSizeResult
+        sizing = PositionSizeResult(
+            quantity=quantity,
+            allocation_usd=quantity * price,
+            risk_per_share=0.0,
+            reason="cash_parking",
+            allowed=True,
+        )
+        logger.info(
+            "Cash parking: buying %d %s @ %.2f (cash=%.0f, equity=%.0f, cash_pct=%.0f%%)",
+            quantity, sym, price, cash, equity, cash_pct * 100,
+        )
+        try:
+            exchange = self._exchange_resolver.resolve(sym) if self._exchange_resolver else "NASD"
+        except Exception:
+            exchange = "NASD" if self._market == "US" else "KRX"
+        try:
+            await self._order_manager.place_buy(
+                symbol=sym,
+                price=price,
+                portfolio_value=equity,
+                cash_available=cash,
+                current_positions=0,
+                strategy_name="cash_parking",
+                order_type="limit",
+                exchange=exchange,
+                sizing_override=sizing,
+                skip_position_limit=True,
+            )
+        except Exception as e:
+            logger.warning("Cash parking BUY for %s failed: %s", sym, e)
+
+    async def _unpark_cash_for_buys(self) -> None:
+        """Sell parked SPY/KODEX 200 to free up cash before stock buys.
+
+        Counterpart of _park_excess_cash. Called once per evaluation cycle
+        when buy_candidates exist. The parked position uses
+        strategy_name="cash_parking" so we identify it via the order
+        history; here we just check if the parking symbol is currently
+        held and sell it via market order.
+        """
+        sym = self._cash_parking_symbol
+        try:
+            positions = await self._market_data.get_positions()
+        except Exception as e:
+            logger.debug("unpark: position fetch failed: %s", e)
+            return
+        parked = next(
+            (p for p in positions if p.symbol == sym and p.quantity > 0),
+            None,
+        )
+        if not parked:
+            return
+        try:
+            df = await self._market_data.get_ohlcv(sym, limit=2)
+            if df.empty:
+                return
+            price = float(df["close"].iloc[-1])
+        except Exception as e:
+            logger.debug("unpark: price fetch failed: %s", e)
+            return
+        try:
+            exchange = self._exchange_resolver.resolve(sym) if self._exchange_resolver else "NASD"
+        except Exception:
+            exchange = "NASD" if self._market == "US" else "KRX"
+        logger.info(
+            "Cash unpark: selling %d %s @ %.2f to free cash for stock buys",
+            int(parked.quantity), sym, price,
+        )
+        try:
+            await self._order_manager.place_sell(
+                symbol=sym,
+                price=price,
+                quantity=int(parked.quantity),
+                strategy_name="cash_parking:unpark",
+                order_type="limit",
+                exchange=exchange,
+            )
+        except Exception as e:
+            logger.warning("Cash unpark SELL for %s failed: %s", sym, e)
 
     @staticmethod
     def _dedup_buy_candidates(

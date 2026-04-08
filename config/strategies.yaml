@@ -573,6 +573,19 @@ markets:
       - larry_williams
       - bnf_deviation
       - donchian_breakout
+    # Cash parking — recovers ~13pp alpha by parking idle cash in SPY
+    # instead of letting it sit through low-conviction periods.
+    # Source: backend/scripts/validate_cash_parking.py V1_park_30 (US 2y, wide universe).
+    #   V0_no_parking : Ret +1.2%   Sharpe -0.25  Alpha -30.7%
+    #   V1_park_30    : Ret +14.5%  Sharpe +0.72  Alpha -17.5%  ← winner
+    #   V2_park_20    : Ret +11.0%  Sharpe +0.52  Alpha -21.0%
+    #   V3_park_50    : Ret +11.8%  Sharpe +0.57  Alpha -20.2%
+    #   V4_park_10    : Ret +13.3%  Sharpe +0.65  Alpha -18.7%
+    cash_parking:
+      enabled: true
+      symbol: SPY
+      threshold: 0.30   # park when cash > 30% of equity
+      buffer: 0.10      # keep 10% of equity in cash for opportunities
   KR:
     # 2026-04-08 — full KR re-evaluation after the KR-currency bug fix
     #   (full_pipeline.py initial_equity now auto-scales to 100M KRW).
@@ -613,6 +626,15 @@ markets:
       - cross_sectional_momentum
       - pead_drift
       - quality_factor
+    # Cash parking off for KR until validated. KR full-pipeline backtest
+    # is currently broken-then-fixed (currency bug, see project memory),
+    # so we don't yet have a clean validation run for parking in KR.
+    # Re-enable after running validate_cash_parking.py with market=KR.
+    cash_parking:
+      enabled: false
+      symbol: "069500"  # KODEX 200
+      threshold: 0.30
+      buffer: 0.10
     risk:
       kelly_fraction: 0.40       # Conservative (was 1.00, full Kelly too aggressive)
       max_position_pct: 0.10     # 10% per position (was 0.30)

@@ -544,12 +544,15 @@ class FullPipelineBacktest:
             "Loading data for %d universe symbols + %s (%s market)...",
             len(cfg.universe), regime_sym, cfg.market,
         )
-        # Include leveraged ETF symbols in data load
+        # Include leveraged ETF + cash-parking symbol in data load
         etf_symbols = []
         if cfg.enable_leveraged_etf:
             etf_symbols = [cfg.etf_symbol, cfg.etf_inverse_symbol]
+        parking_symbols = []
+        if cfg.enable_cash_parking and cfg.cash_parking_symbol:
+            parking_symbols = [cfg.cash_parking_symbol]
         all_symbols = list(dict.fromkeys(
-            [regime_sym] + cfg.universe + etf_symbols
+            [regime_sym] + cfg.universe + etf_symbols + parking_symbols
         ))
         all_data = self._data_loader.load_multiple(
             all_symbols, period=period,
@@ -561,7 +564,17 @@ class FullPipelineBacktest:
             )
 
         spy_data = all_data[regime_sym]
+        # Keep regime symbol out of stock_data for screening, BUT keep
+        # the cash-parking symbol available even if it equals regime_sym
+        # (otherwise _manage_cash_parking can never find it).
         stock_data = {s: d for s, d in all_data.items() if s != regime_sym}
+        if (
+            cfg.enable_cash_parking
+            and cfg.cash_parking_symbol
+            and cfg.cash_parking_symbol == regime_sym
+            and regime_sym in all_data
+        ):
+            stock_data[cfg.cash_parking_symbol] = all_data[regime_sym]
 
         if not stock_data:
             raise ValueError("No stock data loaded")

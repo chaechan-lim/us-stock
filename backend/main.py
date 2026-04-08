@@ -119,6 +119,16 @@ def _apply_kr_eval_overrides(
     _warn_if_disabled_empty("KR", kr_disabled)
     kr_loop.set_disabled_strategies(kr_disabled)
 
+    # Cash parking: opt-in via markets.KR.cash_parking in strategies.yaml.
+    kr_park = config_loader.get_market_cash_parking_config("KR")
+    if kr_park.get("enabled"):
+        kr_loop.set_cash_parking_config(
+            enabled=True,
+            symbol=kr_park.get("symbol"),
+            threshold=kr_park.get("threshold"),
+            buffer=kr_park.get("buffer"),
+        )
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -512,6 +522,16 @@ async def lifespan(app: FastAPI):
     evaluation_loop.set_max_sector_pct(config.risk.max_sector_pct)
     evaluation_loop.set_min_confidence(0.30)
     evaluation_loop.set_min_active_ratio(0.0)
+    # Cash parking: opt-in via markets.US.cash_parking in strategies.yaml.
+    # Backtest validated +13.3pp / +0.97 Sharpe (validate_cash_parking.py V1).
+    us_park = registry.config_loader.get_market_cash_parking_config("US")
+    if us_park.get("enabled"):
+        evaluation_loop.set_cash_parking_config(
+            enabled=True,
+            symbol=us_park.get("symbol"),
+            threshold=us_park.get("threshold"),
+            buffer=us_park.get("buffer"),
+        )
     app.state.evaluation_loop = evaluation_loop
 
     # Stock scanner & sector analyzer
