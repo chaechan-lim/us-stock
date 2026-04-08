@@ -1,6 +1,25 @@
 # US Stock Auto-Trading - Strategy Configuration
 # All strategy parameters, weights, and SL/TP are managed here.
 # Runtime hot-reload supported via StrategyRegistry.reload_config()
+#
+# ─────────────────────────────────────────────────────────────────────────
+# ⚠ Backtest reliability note (2026-04-08)
+# ─────────────────────────────────────────────────────────────────────────
+# Inline parameter comments tagged "optimized: X -> Y" or "walk-forward
+# confirmed" without an explicit source were produced before commit
+# ff6279f (2026-04-07 09:37 KST) which fixed look-ahead bias, Kelly param
+# mismatch, asymmetric slippage, and the KR currency silently-zero-trades
+# bug. Treat them as INDICATIVE only — they are not guaranteed to still
+# be optimal under fresh backtests.
+#
+# When changing any parameter or strategy enable/disable, the convention
+# going forward is:
+#   1. Run a fresh full pipeline backtest (post-ff6279f code).
+#   2. In the comment, cite (a) the script path, (b) the period, (c) the
+#      baseline vs new metrics (Ret, Sharpe, MDD, PF, Trades, Alpha).
+#   3. Mark the entry with the date and a 2-line summary of the change.
+# See markets.US / markets.KR comments below for the format.
+# ─────────────────────────────────────────────────────────────────────────
 
 global:
   min_confidence: 0.50
@@ -529,20 +548,56 @@ strategies:
 # Each market key can override: disabled_strategies, risk, evaluation_loop
 markets:
   US:
-    # Walk-forward validated combo: re-enable strategies with positive OOS alpha.
-    # Pipeline backtest (conservative, 20pos/8%): Return=8.6%, Sharpe=0.64
-    # Key performers: dual_momentum (WR 58%), trend_following (WR 56%),
-    #   supertrend (WR 59%), sector_rotation (WR 67%)
+    # NOTE on backtest metrics in this file:
+    # Any backtest figure quoted below is from a fresh run AFTER commit
+    # ff6279f (2026-04-07 09:37 KST) which fixed look-ahead bias, Kelly
+    # param mismatch, asymmetric slippage, and the KR currency
+    # silently-zero-trades bug. Earlier numbers (e.g. "Return=8.6% Sharpe=0.64",
+    # "+114K dual_momentum", "-110K supertrend KR") cited in prior versions
+    # of this file came from broken backtest paths and were removed
+    # 2026-04-08. When changing this section, run a fresh full pipeline
+    # backtest first and quote both the run command and the metric.
+    #
+    # 2026-04-08 (commit pending) — donchian_breakout US disable:
+    #   Source: backend/scripts/verify_donchian_disable.py (US 2y, max_pos=20,
+    #   8% pos pct, fresh data, all post-ff6279f fixes applied).
+    #   Baseline:  Ret +8.0%, Sharpe 0.47, MDD -3.9%, PF 1.21, 341 trades, Alpha -24.0%
+    #   Disabled:  Ret +9.5%, Sharpe 0.59, MDD -5.8%, PF 1.25, 360 trades, Alpha -22.4%
+    #   Per-strategy:  donchian_breakout = 77 trades, WR 43%, PnL -$1,856
+    #     (single largest US loser; absorbed into dual_momentum +$1,728 after disable).
+    #   Profile weights left in place; market-level disable filters it out.
     disabled_strategies:
       - bollinger_squeeze
       - volume_profile
       - cis_momentum
       - larry_williams
       - bnf_deviation
+      - donchian_breakout
   KR:
-    # Walk-forward rollback: supertrend disabled (KR backtest -110K loss driver).
-    # dual_momentum is the only proven KR performer (+114K).
-    # Re-enable donchian_breakout (+2K in backtest) and trend_following.
+    # 2026-04-08 — full KR re-evaluation after the KR-currency bug fix
+    #   (full_pipeline.py initial_equity now auto-scales to 100M KRW).
+    # All earlier KR backtest claims (e.g. "+114K dual_momentum",
+    # "-110K supertrend") are invalidated because they were produced when
+    # the simulator silently rounded position sizes to 0 — see
+    # data/backtest_results stale flag for affected entries.
+    #
+    # Source: backend/scripts/verify_kr_no_trend_following.py (KR 2y,
+    # max_pos=15, 8% pos pct, slippage 0.08, post-ff6279f).
+    #   KR_baseline (4-07 신규 포함):    431 trades  -2.5%  Sharpe -0.44  PF 0.95
+    #   KR_no_trend_following:          425 trades  -5.7%  Sharpe -0.74  PF 0.89
+    #   KR_no_donchian:                 436 trades  -8.0%  Sharpe -0.93  PF 0.86
+    #   KR_no_tf_no_donchian:           507 trades  -2.3%  Sharpe -0.34  PF 0.96
+    #   KR_only_dual_mom:               311 trades  +3.0%  Sharpe -0.03  PF 1.09  ← only positive variant
+    #   KR_lower_minconf (0.30):        438 trades  -4.0%  Sharpe -0.54  PF 0.93
+    # Per-strategy contribution (KR_no_tf_no_donchian):
+    #   dual_momentum:              272 trades  WR 66%  PnL +₩4,746,249
+    #   pead_drift:                  28 trades  WR 54%  PnL -₩1,679,868
+    #   cross_sectional_momentum:   206 trades  WR 57%  PnL -₩5,490,055
+    #   quality_factor:               1 trade           PnL +₩110,040
+    # Decision: keep dual_momentum as the only proven KR strategy and the
+    # 4-07 newly-added 3 strategies disabled. trend_following + donchian
+    # remain enabled because removing them BOTH (KR_no_tf_no_donchian)
+    # only marginally helps and KR_only_dual_mom is the cleaner choice.
     disabled_strategies:
       - supertrend
       - macd_histogram
@@ -555,6 +610,9 @@ markets:
       - larry_williams
       - bnf_deviation
       - volume_surge
+      - cross_sectional_momentum
+      - pead_drift
+      - quality_factor
     risk:
       kelly_fraction: 0.40       # Conservative (was 1.00, full Kelly too aggressive)
       max_position_pct: 0.10     # 10% per position (was 0.30)

@@ -73,6 +73,100 @@ class SignalQualityTracker:
         self._lookback_days = lookback_days
         self._trades: dict[str, list[TradeRecord]] = defaultdict(list)
 
+    # ------------------------------------------------------------------
+    # Serialization (for snapshotting live state into backtests)
+    # ------------------------------------------------------------------
+
+    def to_dict(self) -> dict:
+        """Serialize tracker state to a JSON-friendly dict.
+
+        Used to snapshot live signal-quality history so a backtest can
+        start from the same accumulated state instead of cold.
+        """
+        return {
+            "version": 1,
+            "config": {
+                "max_trades_per_strategy": self._max_trades,
+                "min_trades_for_gating": self._min_trades,
+                "lookback_days": self._lookback_days,
+            },
+            "trades": {
+                strategy: [
+                    {"symbol": t.symbol, "return_pct": t.return_pct, "timestamp": t.timestamp}
+                    for t in records
+                ]
+                for strategy, records in self._trades.items()
+            },
+        }
+
+    def load_dict(self, payload: dict) -> int:
+        """Load tracker state from a previously-serialized dict.
+
+        Existing in-memory trades are replaced. Returns the total
+        number of trade records loaded across all strategies.
+        """
+        if not isinstance(payload, dict):
+            raise ValueError("payload must be a dict")
+        trades = payload.get("trades", {})
+        if not isinstance(trades, dict):
+            raise ValueError("payload['trades'] must be a dict")
+        self._trades = defaultdict(list)
+        total = 0
+        for strategy, records in trades.items():
+            if not isinstance(records, list):
+                continue
+            for r in records:
+                if not isinstance(r, dict):
+                    continue
+                # return_pct is required — silently inserting 0.0 would
+                # corrupt the metrics for any malformed source.
+                if "return_pct" not in r:
+                    continue
+                try:
+                    self._trades[strategy].append(TradeRecord(
+                        strategy=strategy,
+                        symbol=str(r.get("symbol", "")),
+                        return_pct=float(r["return_pct"]),
+                        timestamp=float(r.get("timestamp", 0.0)),
+                    ))
+                    total += 1
+                except (TypeError, ValueError):
+                    continue
+            # Trim to max_trades, keeping the most recent
+            if len(self._trades[strategy]) > self._max_trades:
+                self._trades[strategy] = self._trades[strategy][-self._max_trades:]
+        return total
+
+    def seed_from_trades(
+        self,
+        trade_records: list[dict],
+    ) -> int:
+        """Seed the tracker from a list of {strategy, symbol, return_pct,
+        timestamp} dicts (e.g. derived from the trades DB table).
+
+        Existing tracker state is preserved; new records are appended.
+        Returns count of records ingested.
+        """
+        n = 0
+        for r in trade_records:
+            try:
+                strategy = r["strategy"]
+                ret = float(r["return_pct"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            ts = float(r.get("timestamp", 0.0)) if isinstance(r, dict) else 0.0
+            self._trades[strategy].append(TradeRecord(
+                strategy=strategy,
+                symbol=str(r.get("symbol", "")) if isinstance(r, dict) else "",
+                return_pct=ret,
+                timestamp=ts,
+            ))
+            n += 1
+            # Trim to max
+            if len(self._trades[strategy]) > self._max_trades:
+                self._trades[strategy] = self._trades[strategy][-self._max_trades:]
+        return n
+
     def record_trade(
         self,
         strategy: str,

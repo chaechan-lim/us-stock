@@ -1,0 +1,127 @@
+{
+  "key": "537ac540fe83e98d",
+  "strategy": "wf_dual_momentum",
+  "symbol": "NVDA",
+  "period": "5y",
+  "mode": "walk_forward",
+  "params": {},
+  "timestamp": "2026-04-06T22:42:42.114360",
+  "result": {
+    "strategy": "dual_momentum",
+    "symbol": "NVDA",
+    "n_splits": 3,
+    "avg_in_sample": {
+      "sharpe_ratio": 1.3177468228118758,
+      "cagr": 0.598783421392799,
+      "max_drawdown_pct": -24.681474097496732,
+      "win_rate": 66.66666666666667,
+      "sortino_ratio": 1.9995764755762468,
+      "total_return_pct": 72.46914990165537,
+      "profit_factor": 66.66666666666667,
+      "total_trades": 1.3333333333333333
+    },
+    "avg_out_of_sample": {
+      "sharpe_ratio": -1.2875382309427976,
+      "cagr": -0.0593105969452975,
+      "max_drawdown_pct": -14.596042585067712,
+      "win_rate": 14.285714285714285,
+      "sortino_ratio": -0.2752851314065141,
+      "total_return_pct": -3.4234437835337115,
+      "profit_factor": 0.06664627349166348,
+      "total_trades": 2.6666666666666665
+    },
+    "robustness_ratio": {
+      "sharpe_ratio": -0.9770755722221226,
+      "cagr": -0.09905183548224865,
+      "win_rate": 0.21428571428571425,
+      "profit_factor": 0.000999694102374952
+    },
+    "splits": [
+      {
+        "train": "2021-04-06 ~ 2022-05-31",
+        "test": "2022-06-01 ~ 2022-11-29",
+        "best_params": {
+          "lookback_months": 6,
+          "min_absolute_return": 0.0
+        },
+        "in_sample": {
+          "sharpe_ratio": 0.9822604354827796,
+          "cagr": 0.4227710508916398,
+          "max_drawdown_pct": -35.22430854991807,
+          "win_rate": 100.0,
+          "sortino_ratio": 1.3775608569591955,
+          "total_return_pct": 50.256921754980574,
+          "profit_factor": 100.0,
+          "total_trades": 1
+        },
+        "out_of_sample": {
+          "sharpe_ratio": -2.382180704774659,
+          "cagr": -0.18419569610373376,
+          "max_drawdown_pct": -9.605117345321663,
+          "win_rate": 0.0,
+          "sortino_ratio": -0.5033365717709338,
+          "total_return_pct": -9.605117345321663,
+          "profit_factor": 0.0,
+          "total_trades": 1
+        }
+      },
+      {
+        "train": "2022-11-30 ~ 2024-01-30",
+        "test": "2024-01-31 ~ 2024-07-31",
+        "best_params": {
+          "lookback_months": 6,
+          "min_absolute_return": 0.0
+        },
+        "in_sample": {
+          "sharpe_ratio": 1.995668953037381,
+          "cagr": 1.0300504661122023,
+          "max_drawdown_pct": -17.77677830236887,
+          "win_rate": 0.0,
+          "sortino_ratio": 3.692272094516331,
+          "total_return_pct": 126.51511015885544,
+          "profit_factor": 0.0,
+          "total_trades": 0
+        },
+        "out_of_sample": {
+          "sharpe_ratio": 0.5477717609807511,
+          "cagr": 0.1999464157978741,
+          "max_drawdown_pct": -22.65221673015108,
+          "win_rate": 0.0,
+          "sortino_ratio": 0.7034370148002945,
+          "total_return_pct": 9.462860268661505,
+          "profit_factor": 0.0,
+          "total_trades": 0
+        }
+      },
+      {
+        "train": "2024-08-01 ~ 2025-09-30",
+        "test": "2025-10-01 ~ 2026-04-01",
+        "best_params": {
+          "lookback_months": 6,
+          "min_absolute_return": 0.0
+        },
+        "in_sample": {
+          "sharpe_ratio": 0.9753110799154673,
+          "cagr": 0.34352874717455517,
+          "max_drawdown_pct": -21.04333544020325,
+          "win_rate": 100.0,
+          "sortino_ratio": 0.9288964752532136,
+          "total_return_pct": 40.63541779113011,
+          "profit_factor": 100.0,
+          "total_trades": 3
+        },
+        "out_of_sample": {
+          "sharpe_ratio": -2.0282057490344845,
+          "cagr": -0.19368251053003283,
+          "max_drawdown_pct": -11.530793679730394,
+          "win_rate": 42.857142857142854,
+          "sortino_ratio": -1.025955837248903,
+          "total_return_pct": -10.128074273940976,
+          "profit_factor": 0.19993882047499045,
+          "total_trades": 7
+        }
+      }
+    ],
+    "elapsed_sec": 22.022612544009462
+  }
+}

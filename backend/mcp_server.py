@@ -405,15 +405,24 @@ async def run_backtest(
 
 @mcp.tool()
 async def get_backtest_results(
-    strategy: str | None = None, symbol: str | None = None,
+    strategy: str | None = None,
+    symbol: str | None = None,
+    include_stale: bool = False,
 ) -> str:
     """Get stored backtest results.
+
+    Each result includes a ``stale`` flag — True means the result was
+    produced before commit ff6279f (2026-04-07 09:37 KST) which fixed
+    look-ahead bias, Kelly param mismatch, asymmetric slippage, and the
+    KR currency bug. Stale results should not be used for live decisions.
 
     Args:
         strategy: Optional filter by strategy name.
         symbol: Optional filter by stock ticker.
+        include_stale: When True, also returns pre-cutoff results (default
+            False — only fresh results, safer for decision-making).
     """
-    params: dict[str, str] = {}
+    params: dict[str, str | bool] = {"include_stale": include_stale}
     if strategy:
         params["strategy"] = strategy
     if symbol:

@@ -4,41 +4,196 @@
     "symbol": "AAPL,JPM,MSFT,NVDA,XOM",
     "period": "3y",
     "mode": "sl_tp",
-    "timestamp": "2026-03-26T22:57:01.587497"
+    "timestamp": "2026-03-26T22:57:01.587497",
+    "stale": true,
+    "stale_reason": "timestamp predates reliability cutoff 2026-04-07T09:37:20 (commit ff6279f)"
   },
   "aeec7c722a53ecc3": {
     "strategy": "sl_tp_supertrend",
     "symbol": "AAPL,JPM,MSFT,NVDA,XOM",
     "period": "3y",
     "mode": "sl_tp",
-    "timestamp": "2026-03-26T22:57:08.337480"
+    "timestamp": "2026-03-26T22:57:08.337480",
+    "stale": true,
+    "stale_reason": "timestamp predates reliability cutoff 2026-04-07T09:37:20 (commit ff6279f)"
   },
   "c21ad6a279898571": {
     "strategy": "sl_tp_dual_momentum",
     "symbol": "AAPL,JPM,MSFT,NVDA,XOM",
     "period": "3y",
     "mode": "sl_tp",
-    "timestamp": "2026-03-26T22:57:14.728113"
+    "timestamp": "2026-03-26T22:57:14.728113",
+    "stale": true,
+    "stale_reason": "timestamp predates reliability cutoff 2026-04-07T09:37:20 (commit ff6279f)"
   },
   "a86b326737ded619": {
     "strategy": "trend_following",
     "symbol": "AAPL",
     "period": "3y",
     "mode": "single",
-    "timestamp": "2026-03-26T22:57:15.341678"
+    "timestamp": "2026-03-26T22:57:15.341678",
+    "stale": true,
+    "stale_reason": "timestamp predates reliability cutoff 2026-04-07T09:37:20 (commit ff6279f)"
   },
   "f8ecf54a989a96ef": {
     "strategy": "supertrend",
     "symbol": "AAPL",
     "period": "3y",
     "mode": "single",
-    "timestamp": "2026-03-26T22:57:16.393009"
+    "timestamp": "2026-03-26T22:57:16.393009",
+    "stale": true,
+    "stale_reason": "timestamp predates reliability cutoff 2026-04-07T09:37:20 (commit ff6279f)"
   },
   "70e79e1f8683d152": {
     "strategy": "dual_momentum",
     "symbol": "AAPL",
     "period": "3y",
     "mode": "single",
-    "timestamp": "2026-03-26T22:57:17.144035"
+    "timestamp": "2026-03-26T22:57:17.144035",
+    "stale": true,
+    "stale_reason": "timestamp predates reliability cutoff 2026-04-07T09:37:20 (commit ff6279f)"
+  },
+  "d1cba407d1a7b3e7": {
+    "strategy": "wf_dual_momentum",
+    "symbol": "AAPL",
+    "period": "5y",
+    "mode": "walk_forward",
+    "timestamp": "2026-04-06T22:41:59.820611",
+    "stale": true,
+    "stale_reason": "timestamp predates reliability cutoff 2026-04-07T09:37:20 (commit ff6279f)"
+  },
+  "c4c85e766ee84675": {
+    "strategy": "wf_dual_momentum",
+    "symbol": "MSFT",
+    "period": "5y",
+    "mode": "walk_forward",
+    "timestamp": "2026-04-06T22:42:19.640557",
+    "stale": true,
+    "stale_reason": "timestamp predates reliability cutoff 2026-04-07T09:37:20 (commit ff6279f)"
+  },
+  "537ac540fe83e98d": {
+    "strategy": "wf_dual_momentum",
+    "symbol": "NVDA",
+    "period": "5y",
+    "mode": "walk_forward",
+    "timestamp": "2026-04-06T22:42:42.114360",
+    "stale": true,
+    "stale_reason": "timestamp predates reliability cutoff 2026-04-07T09:37:20 (commit ff6279f)"
+  },
+  "2894feb1459e3583": {
+    "strategy": "wf_supertrend",
+    "symbol": "AAPL",
+    "period": "5y",
+    "mode": "walk_forward",
+    "timestamp": "2026-04-06T22:43:19.593129",
+    "stale": true,
+    "stale_reason": "timestamp predates reliability cutoff 2026-04-07T09:37:20 (commit ff6279f)"
+  },
+  "9798a68a0d7ae555": {
+    "strategy": "wf_supertrend",
+    "symbol": "MSFT",
+    "period": "5y",
+    "mode": "walk_forward",
+    "timestamp": "2026-04-06T22:44:05.131524",
+    "stale": true,
+    "stale_reason": "timestamp predates reliability cutoff 2026-04-07T09:37:20 (commit ff6279f)"
+  },
+  "4de56c450d830e17": {
+    "strategy": "wf_supertrend",
+    "symbol": "NVDA",
+    "period": "5y",
+    "mode": "walk_forward",
+    "timestamp": "2026-04-06T22:44:44.724874",
+    "stale": true,
+    "stale_reason": "timestamp predates reliability cutoff 2026-04-07T09:37:20 (commit ff6279f)"
+  },
+  "e5687c18da7eebba": {
+    "strategy": "wf_trend_following",
+    "symbol": "AAPL",
+    "period": "5y",
+    "mode": "walk_forward",
+    "timestamp": "2026-04-06T22:45:10.935753",
+    "stale": true,
+    "stale_reason": "timestamp predates reliability cutoff 2026-04-07T09:37:20 (commit ff6279f)"
+  },
+  "cd0a70de54af84c1": {
+    "strategy": "wf_trend_following",
+    "symbol": "MSFT",
+    "period": "5y",
+    "mode": "walk_forward",
+    "timestamp": "2026-04-06T22:45:40.436144",
+    "stale": true,
+    "stale_reason": "timestamp predates reliability cutoff 2026-04-07T09:37:20 (commit ff6279f)"
+  },
+  "392c1876202f20f3": {
+    "strategy": "wf_trend_following",
+    "symbol": "NVDA",
+    "period": "5y",
+    "mode": "walk_forward",
+    "timestamp": "2026-04-06T22:46:07.389516",
+    "stale": true,
+    "stale_reason": "timestamp predates reliability cutoff 2026-04-07T09:37:20 (commit ff6279f)"
+  },
+  "a9663d78bf240a03": {
+    "strategy": "wf_macd_histogram",
+    "symbol": "AAPL",
+    "period": "5y",
+    "mode": "walk_forward",
+    "timestamp": "2026-04-06T22:46:53.458503",
+    "stale": true,
+    "stale_reason": "timestamp predates reliability cutoff 2026-04-07T09:37:20 (commit ff6279f)"
+  },
+  "6d895ddf52c36c21": {
+    "strategy": "wf_macd_histogram",
+    "symbol": "MSFT",
+    "period": "5y",
+    "mode": "walk_forward",
+    "timestamp": "2026-04-06T22:47:44.396344",
+    "stale": true,
+    "stale_reason": "timestamp predates reliability cutoff 2026-04-07T09:37:20 (commit ff6279f)"
+  },
+  "8dceeecbef5b3a58": {
+    "strategy": "wf_macd_histogram",
+    "symbol": "NVDA",
+    "period": "5y",
+    "mode": "walk_forward",
+    "timestamp": "2026-04-06T22:48:40.496245",
+    "stale": true,
+    "stale_reason": "timestamp predates reliability cutoff 2026-04-07T09:37:20 (commit ff6279f)"
+  },
+  "bfa8e0302a2d50ed": {
+    "strategy": "wf_rsi_divergence",
+    "symbol": "AAPL",
+    "period": "5y",
+    "mode": "walk_forward",
+    "timestamp": "2026-04-06T22:49:42.296492",
+    "stale": true,
+    "stale_reason": "timestamp predates reliability cutoff 2026-04-07T09:37:20 (commit ff6279f)"
+  },
+  "79cded7741404e8f": {
+    "strategy": "wf_rsi_divergence",
+    "symbol": "MSFT",
+    "period": "5y",
+    "mode": "walk_forward",
+    "timestamp": "2026-04-06T22:50:32.630364",
+    "stale": true,
+    "stale_reason": "timestamp predates reliability cutoff 2026-04-07T09:37:20 (commit ff6279f)"
+  },
+  "b1d0f5b532a6fa99": {
+    "strategy": "wf_rsi_divergence",
+    "symbol": "NVDA",
+    "period": "5y",
+    "mode": "walk_forward",
+    "timestamp": "2026-04-06T22:51:30.704401",
+    "stale": true,
+    "stale_reason": "timestamp predates reliability cutoff 2026-04-07T09:37:20 (commit ff6279f)"
+  },
+  "b3ab20abb4c0421b": {
+    "strategy": "supertrend",
+    "symbol": "SPY",
+    "period": "1y",
+    "mode": "single",
+    "timestamp": "2026-04-08T12:46:11.539468",
+    "stale": false
   }
 }

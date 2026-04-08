@@ -1,0 +1,130 @@
+{
+  "key": "b1d0f5b532a6fa99",
+  "strategy": "wf_rsi_divergence",
+  "symbol": "NVDA",
+  "period": "5y",
+  "mode": "walk_forward",
+  "params": {},
+  "timestamp": "2026-04-06T22:51:30.704401",
+  "result": {
+    "strategy": "rsi_divergence",
+    "symbol": "NVDA",
+    "n_splits": 3,
+    "avg_in_sample": {
+      "sharpe_ratio": 0.5623825691964703,
+      "cagr": 0.11161438960228276,
+      "max_drawdown_pct": -16.669620437997914,
+      "win_rate": 66.66666666666667,
+      "sortino_ratio": 0.2885426336281465,
+      "total_return_pct": 13.000660126065583,
+      "profit_factor": 66.66666666666667,
+      "total_trades": 0.6666666666666666
+    },
+    "avg_out_of_sample": {
+      "sharpe_ratio": 0.673707353791905,
+      "cagr": 0.23800379469576635,
+      "max_drawdown_pct": -11.509626429603877,
+      "win_rate": 66.66666666666667,
+      "sortino_ratio": 0.765308915249299,
+      "total_return_pct": 9.987107856142066,
+      "profit_factor": 66.66666666666667,
+      "total_trades": 0.6666666666666666
+    },
+    "robustness_ratio": {
+      "sharpe_ratio": 1.1979520538029744,
+      "cagr": 2.132375543546391,
+      "win_rate": 1.0,
+      "profit_factor": 1.0
+    },
+    "splits": [
+      {
+        "train": "2021-04-06 ~ 2022-05-31",
+        "test": "2022-06-01 ~ 2022-11-29",
+        "best_params": {
+          "rsi_period": 10,
+          "overbought": 65,
+          "oversold": 25
+        },
+        "in_sample": {
+          "sharpe_ratio": 0.5455496047915569,
+          "cagr": 0.0899035763077185,
+          "max_drawdown_pct": -5.38405563655003,
+          "win_rate": 0.0,
+          "sortino_ratio": 0.15378915974696686,
+          "total_return_pct": 10.452189096084606,
+          "profit_factor": 0.0,
+          "total_trades": 0
+        },
+        "out_of_sample": {
+          "sharpe_ratio": 0.2527232338408974,
+          "cagr": 0.07370326154652207,
+          "max_drawdown_pct": -14.61012520713567,
+          "win_rate": 100.0,
+          "sortino_ratio": 0.1929719374563179,
+          "total_return_pct": 3.5904165772533596,
+          "profit_factor": 100.0,
+          "total_trades": 1
+        }
+      },
+      {
+        "train": "2022-11-30 ~ 2024-01-30",
+        "test": "2024-01-31 ~ 2024-07-31",
+        "best_params": {
+          "rsi_period": 10,
+          "overbought": 70,
+          "oversold": 35
+        },
+        "in_sample": {
+          "sharpe_ratio": 0.8008537549142684,
+          "cagr": 0.14140455756714232,
+          "max_drawdown_pct": -13.467799910574382,
+          "win_rate": 100.0,
+          "sortino_ratio": 0.4147766574716084,
+          "total_return_pct": 16.50084210633088,
+          "profit_factor": 100.0,
+          "total_trades": 1
+        },
+        "out_of_sample": {
+          "sharpe_ratio": 2.5369036173749744,
+          "cagr": 0.7515033451525561,
+          "max_drawdown_pct": -5.126174087798234,
+          "win_rate": 100.0,
+          "sortino_ratio": 2.724220964517719,
+          "total_return_pct": 32.050353756797826,
+          "profit_factor": 100.0,
+          "total_trades": 1
+        }
+      },
+      {
+        "train": "2024-08-01 ~ 2025-09-30",
+        "test": "2025-10-01 ~ 2026-04-01",
+        "best_params": {
+          "rsi_period": 10,
+          "overbought": 75,
+          "oversold": 35
+        },
+        "in_sample": {
+          "sharpe_ratio": 0.3407443478835859,
+          "cagr": 0.10353503493198746,
+          "max_drawdown_pct": -31.15700576686933,
+          "win_rate": 100.0,
+          "sortino_ratio": 0.29706208366586445,
+          "total_return_pct": 12.048949175781265,
+          "profit_factor": 100.0,
+          "total_trades": 1
+        },
+        "out_of_sample": {
+          "sharpe_ratio": -0.7685047898401562,
+          "cagr": -0.11119522261177917,
+          "max_drawdown_pct": -14.792579993877727,
+          "win_rate": 0.0,
+          "sortino_ratio": -0.6212661562261398,
+          "total_return_pct": -5.679446765624991,
+          "profit_factor": 0.0,
+          "total_trades": 0
+        }
+      }
+    ],
+    "elapsed_sec": 57.643266497179866
+  }
+}

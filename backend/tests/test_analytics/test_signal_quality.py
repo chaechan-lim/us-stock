@@ -205,3 +205,110 @@ class TestLookback:
         # Should not count
         metrics = tracker.get_metrics("old_strat")
         assert metrics.total_trades == 0
+
+
+class TestSerialization:
+    """Tests for to_dict / load_dict / seed_from_trades.
+
+    These power live → backtest state injection so the backtest's gating
+    + Kelly inputs match live behavior instead of starting cold.
+    """
+
+    def test_to_dict_round_trip(self, tracker):
+        _seed_trades(tracker, "dual_momentum", wins=8, losses=4)
+        _seed_trades(tracker, "trend_following", wins=5, losses=5)
+
+        snapshot = tracker.to_dict()
+        assert snapshot["version"] == 1
+        assert "dual_momentum" in snapshot["trades"]
+        assert "trend_following" in snapshot["trades"]
+        assert len(snapshot["trades"]["dual_momentum"]) == 12
+
+        # Load into a fresh tracker
+        fresh = SignalQualityTracker()
+        n = fresh.load_dict(snapshot)
+        assert n == 22
+
+        # Metrics match the original
+        m_orig = tracker.get_metrics("dual_momentum")
+        m_fresh = fresh.get_metrics("dual_momentum")
+        assert m_fresh.total_trades == m_orig.total_trades
+        assert m_fresh.win_rate == m_orig.win_rate
+        assert m_fresh.profit_factor == m_orig.profit_factor
+
+    def test_load_dict_replaces_existing(self, tracker):
+        _seed_trades(tracker, "old", wins=3, losses=3)
+        snapshot = {
+            "version": 1,
+            "trades": {
+                "new_strat": [
+                    {"symbol": "AAPL", "return_pct": 0.05, "timestamp": time.time()},
+                    {"symbol": "MSFT", "return_pct": -0.02, "timestamp": time.time()},
+                ],
+            },
+        }
+        tracker.load_dict(snapshot)
+        # "old" gone, "new_strat" present
+        assert tracker.get_metrics("old").total_trades == 0
+        assert tracker.get_metrics("new_strat").total_trades == 2
+
+    def test_load_dict_rejects_non_dict(self, tracker):
+        with pytest.raises(ValueError):
+            tracker.load_dict([1, 2, 3])  # type: ignore[arg-type]
+
+    def test_load_dict_skips_malformed_records(self, tracker):
+        now = time.time()
+        snapshot = {
+            "trades": {
+                "s1": [
+                    {"symbol": "AAPL", "return_pct": 0.05, "timestamp": now},
+                    {"missing": "fields"},  # skipped (no return_pct)
+                    "not a dict",            # skipped (wrong type)
+                    {"symbol": "MSFT", "return_pct": "not a number"},  # skipped (bad cast)
+                ],
+            },
+        }
+        n = tracker.load_dict(snapshot)
+        assert n == 1
+        assert tracker.get_metrics("s1").total_trades == 1
+
+    def test_load_dict_respects_max_trades(self):
+        tracker = SignalQualityTracker(max_trades_per_strategy=5)
+        snapshot = {
+            "trades": {
+                "s1": [
+                    {"symbol": "X", "return_pct": float(i % 2 * 2 - 1) * 0.01,
+                     "timestamp": time.time() - i}
+                    for i in range(20)
+                ],
+            },
+        }
+        tracker.load_dict(snapshot)
+        # Only the most recent 5 are kept
+        assert len(tracker._trades["s1"]) == 5
+
+    def test_seed_from_trades_dicts(self):
+        tracker = SignalQualityTracker()
+        records = [
+            {"strategy": "supertrend", "symbol": "AAPL",
+             "return_pct": 0.06, "timestamp": time.time()},
+            {"strategy": "supertrend", "symbol": "MSFT",
+             "return_pct": -0.03, "timestamp": time.time()},
+            {"strategy": "dual_momentum", "symbol": "NVDA",
+             "return_pct": 0.10, "timestamp": time.time()},
+        ]
+        n = tracker.seed_from_trades(records)
+        assert n == 3
+        assert tracker.get_metrics("supertrend").total_trades == 2
+        assert tracker.get_metrics("dual_momentum").total_trades == 1
+
+    def test_seed_from_trades_skips_bad_records(self):
+        tracker = SignalQualityTracker()
+        records = [
+            {"strategy": "s1", "return_pct": 0.05},
+            {"strategy": "s1", "return_pct": "bad"},  # skipped
+            {"return_pct": 0.05},  # missing strategy → skipped
+            "not a dict",  # skipped
+        ]
+        n = tracker.seed_from_trades(records)  # type: ignore[arg-type]
+        assert n == 1

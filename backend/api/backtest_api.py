@@ -156,13 +156,22 @@ async def list_results(
     strategy: str | None = None,
     symbol: str | None = None,
     mode: str | None = None,
+    include_stale: bool = True,
 ):
-    """List all stored backtest results."""
+    """List all stored backtest results.
+
+    Each result includes a ``stale`` boolean. When ``include_stale=False``,
+    results produced before the reliability cutoff (commit ff6279f) are
+    excluded — use this when basing live decisions on the response.
+    """
+    results = _result_store.list_results(
+        strategy_name=strategy, symbol=symbol, mode=mode,
+        include_stale=include_stale,
+    )
     return {
-        "count": _result_store.count,
-        "results": _result_store.list_results(
-            strategy_name=strategy, symbol=symbol, mode=mode,
-        ),
+        "count": len(results),
+        "stale_count": sum(1 for r in results if r.get("stale")),
+        "results": results,
     }
 
 

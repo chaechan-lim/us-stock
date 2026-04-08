@@ -1,6 +1,7 @@
 """Tests for Full Pipeline Backtest Engine."""
 
 import asyncio
+import json
 from unittest.mock import patch, MagicMock
 
 import numpy as np
@@ -52,7 +53,8 @@ def _make_backtest_data(symbol: str, n_days: int = 500, trend: float = 0.0005) -
 class TestPipelineConfig:
     def test_default_config(self):
         config = PipelineConfig()
-        assert config.initial_equity == 100_000.0
+        # initial_equity is None until FullPipelineBacktest.__init__ resolves it
+        assert config.initial_equity is None
         assert config.max_positions == 20
         assert config.max_position_pct == 0.10
         assert config.screen_interval == 20
@@ -70,6 +72,177 @@ class TestPipelineConfig:
         assert config.universe == ["AAPL", "MSFT"]
         assert config.initial_equity == 50_000.0
         assert config.max_positions == 5
+
+    def test_us_default_equity_resolved(self):
+        """US market: __init__ auto-fills initial_equity to 100_000 USD."""
+        config = PipelineConfig(universe=["AAPL"])  # market defaults to "US"
+        assert config.initial_equity is None  # not yet resolved
+        FullPipelineBacktest(config)
+        assert config.initial_equity == 100_000.0
+
+    def test_kr_default_equity_auto_scaled_to_krw(self):
+        """KR market: __init__ auto-fills initial_equity to 100M KRW.
+
+        Regression for the silent 0-trades bug. Before this fix, KR
+        backtests defaulted to 100_000 (USD-style) which made
+        int(allocation/krw_price) round to 0 for every position.
+        """
+        config = PipelineConfig(market="KR", universe=["005930.KS"])
+        assert config.initial_equity is None
+        FullPipelineBacktest(config)
+        assert config.initial_equity == 100_000_000.0
+
+    def test_explicit_equity_not_overridden(self):
+        """Explicitly-passed initial_equity is respected for both markets."""
+        us = PipelineConfig(universe=["AAPL"], initial_equity=250_000.0)
+        FullPipelineBacktest(us)
+        assert us.initial_equity == 250_000.0
+
+        kr = PipelineConfig(market="KR", universe=["005930.KS"], initial_equity=50_000_000.0)
+        FullPipelineBacktest(kr)
+        assert kr.initial_equity == 50_000_000.0
+
+
+class TestUniverseResolution:
+    """Tests for the universe selection precedence in __init__:
+    explicit `universe` > `universe_path` > wide constant > narrow default.
+    """
+
+    def test_explicit_universe_wins(self):
+        cfg = PipelineConfig(universe=["AAPL", "MSFT"], use_wide_universe=True)
+        FullPipelineBacktest(cfg)
+        assert cfg.universe == ["AAPL", "MSFT"]
+
+    def test_default_us_is_narrow(self):
+        cfg = PipelineConfig()  # market=US, no overrides
+        FullPipelineBacktest(cfg)
+        from backtest.full_pipeline import DEFAULT_UNIVERSE
+        assert cfg.universe == list(DEFAULT_UNIVERSE)
+        assert len(cfg.universe) >= 50
+
+    def test_use_wide_universe_us(self):
+        cfg = PipelineConfig(use_wide_universe=True)
+        FullPipelineBacktest(cfg)
+        from backtest.full_pipeline import WIDE_UNIVERSE, DEFAULT_UNIVERSE
+        assert cfg.universe == list(WIDE_UNIVERSE)
+        assert len(cfg.universe) > len(DEFAULT_UNIVERSE)
+        # Wide includes small-cap names the live system actually trades
+        assert "ELVN" in cfg.universe
+        assert "BW" in cfg.universe
+        assert "ADTN" in cfg.universe
+        # And sector ETFs (so dual_momentum/sector_rotation can pick them)
+        for etf in ("XLK", "XLF", "XLE", "XLU"):
+            assert etf in cfg.universe
+
+    def test_kr_unaffected_by_wide_flag(self):
+        cfg = PipelineConfig(market="KR", use_wide_universe=True)
+        FullPipelineBacktest(cfg)
+        from backtest.full_pipeline import DEFAULT_KR_UNIVERSE
+        assert cfg.universe == list(DEFAULT_KR_UNIVERSE)
+
+    def test_universe_path_loads_snapshot(self, tmp_path):
+        snap = tmp_path / "snapshot.json"
+        snap.write_text(json.dumps({
+            "market": "US",
+            "symbols": ["aapl", "msft", "googl", "elvn", "bw"],
+        }))
+        cfg = PipelineConfig(universe_path=str(snap))
+        FullPipelineBacktest(cfg)
+        # Symbols are uppercased on load
+        assert cfg.universe == ["AAPL", "MSFT", "GOOGL", "ELVN", "BW"]
+
+    def test_universe_path_falls_back_on_missing_file(self, tmp_path, caplog):
+        cfg = PipelineConfig(universe_path=str(tmp_path / "nope.json"))
+        FullPipelineBacktest(cfg)
+        # Should fall back to default narrow universe (US)
+        from backtest.full_pipeline import DEFAULT_UNIVERSE
+        assert cfg.universe == list(DEFAULT_UNIVERSE)
+
+    def test_universe_path_falls_back_on_malformed(self, tmp_path):
+        snap = tmp_path / "bad.json"
+        snap.write_text('{"not_symbols": [1, 2, 3]}')
+        cfg = PipelineConfig(universe_path=str(snap))
+        FullPipelineBacktest(cfg)
+        from backtest.full_pipeline import DEFAULT_UNIVERSE
+        assert cfg.universe == list(DEFAULT_UNIVERSE)
+
+    def test_explicit_universe_beats_universe_path(self, tmp_path):
+        snap = tmp_path / "snap.json"
+        snap.write_text(json.dumps({"symbols": ["XYZ"]}))
+        cfg = PipelineConfig(universe=["AAPL"], universe_path=str(snap))
+        FullPipelineBacktest(cfg)
+        assert cfg.universe == ["AAPL"]
+
+
+class TestSignalQualitySeed:
+    """Tests for signal_quality_seed_path injection.
+
+    Without this, backtest tracker starts cold while live has 6+ months
+    of accumulated trade history → different gating + Kelly behavior.
+    """
+
+    def test_seed_path_loads_into_tracker(self, tmp_path):
+        import time as _time
+        snap = tmp_path / "sq.json"
+        snap.write_text(json.dumps({
+            "version": 1,
+            "tracker": {
+                "version": 1,
+                "trades": {
+                    "dual_momentum": [
+                        {"symbol": "AAPL", "return_pct": 0.06, "timestamp": _time.time()},
+                        {"symbol": "MSFT", "return_pct": -0.02, "timestamp": _time.time()},
+                        {"symbol": "NVDA", "return_pct": 0.10, "timestamp": _time.time()},
+                    ],
+                    "supertrend": [
+                        {"symbol": "TSLA", "return_pct": 0.04, "timestamp": _time.time()},
+                    ],
+                },
+            },
+        }))
+        cfg = PipelineConfig(
+            universe=["AAPL"],
+            signal_quality_seed_path=str(snap),
+        )
+        eng = FullPipelineBacktest(cfg)
+
+        m_dm = eng._signal_quality.get_metrics("dual_momentum")
+        m_st = eng._signal_quality.get_metrics("supertrend")
+        assert m_dm.total_trades == 3
+        assert m_st.total_trades == 1
+
+    def test_seed_path_accepts_bare_tracker_dict(self, tmp_path):
+        # Snapshot file may also be a raw tracker dict (no enclosing wrapper)
+        import time as _time
+        snap = tmp_path / "sq.json"
+        snap.write_text(json.dumps({
+            "version": 1,
+            "trades": {
+                "dual_momentum": [
+                    {"symbol": "AAPL", "return_pct": 0.05, "timestamp": _time.time()},
+                ],
+            },
+        }))
+        cfg = PipelineConfig(
+            universe=["AAPL"],
+            signal_quality_seed_path=str(snap),
+        )
+        eng = FullPipelineBacktest(cfg)
+        assert eng._signal_quality.get_metrics("dual_momentum").total_trades == 1
+
+    def test_missing_seed_file_falls_back_to_cold(self, tmp_path):
+        cfg = PipelineConfig(
+            universe=["AAPL"],
+            signal_quality_seed_path=str(tmp_path / "nope.json"),
+        )
+        eng = FullPipelineBacktest(cfg)
+        # Should not raise; tracker is just empty
+        assert eng._signal_quality.get_metrics("dual_momentum").total_trades == 0
+
+    def test_no_seed_path_means_cold_tracker(self):
+        cfg = PipelineConfig(universe=["AAPL"])
+        eng = FullPipelineBacktest(cfg)
+        assert len(eng._signal_quality._trades) == 0
 
 
 class TestDefaultUniverse:

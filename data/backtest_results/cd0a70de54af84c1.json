@@ -1,0 +1,130 @@
+{
+  "key": "cd0a70de54af84c1",
+  "strategy": "wf_trend_following",
+  "symbol": "MSFT",
+  "period": "5y",
+  "mode": "walk_forward",
+  "params": {},
+  "timestamp": "2026-04-06T22:45:40.436144",
+  "result": {
+    "strategy": "trend_following",
+    "symbol": "MSFT",
+    "n_splits": 3,
+    "avg_in_sample": {
+      "sharpe_ratio": 0.5842082818108637,
+      "cagr": 0.0907880295626576,
+      "max_drawdown_pct": -5.594715731717026,
+      "win_rate": 44.444444444444436,
+      "sortino_ratio": 0.5257682983255356,
+      "total_return_pct": 10.556205059489017,
+      "profit_factor": 3.9124884961641655,
+      "total_trades": 7.0
+    },
+    "avg_out_of_sample": {
+      "sharpe_ratio": -0.08203539152732027,
+      "cagr": 0.00774858249223372,
+      "max_drawdown_pct": -0.9620612616942954,
+      "win_rate": 33.333333333333336,
+      "sortino_ratio": -0.035551770386281885,
+      "total_return_pct": 0.38212877324422395,
+      "profit_factor": 33.333333333333336,
+      "total_trades": 0.3333333333333333
+    },
+    "robustness_ratio": {
+      "sharpe_ratio": -0.14042147994382434,
+      "cagr": 0.08534806328058939,
+      "win_rate": 0.7500000000000002,
+      "profit_factor": 8.519726860798082
+    },
+    "splits": [
+      {
+        "train": "2021-04-06 ~ 2022-05-31",
+        "test": "2022-06-01 ~ 2022-11-29",
+        "best_params": {
+          "ema_fast": 10,
+          "ema_slow": 50,
+          "adx_threshold": 20
+        },
+        "in_sample": {
+          "sharpe_ratio": 0.5635654008039112,
+          "cagr": 0.09582656863862771,
+          "max_drawdown_pct": -5.676941698116482,
+          "win_rate": 44.44444444444444,
+          "sortino_ratio": 0.4853043687020148,
+          "total_return_pct": 11.145618384704692,
+          "profit_factor": 2.4816991014964356,
+          "total_trades": 9
+        },
+        "out_of_sample": {
+          "sharpe_ratio": 0.0,
+          "cagr": 0.0,
+          "max_drawdown_pct": 0.0,
+          "win_rate": 0.0,
+          "sortino_ratio": 0.0,
+          "total_return_pct": 0.0,
+          "profit_factor": 0.0,
+          "total_trades": 0
+        }
+      },
+      {
+        "train": "2022-11-30 ~ 2024-01-30",
+        "test": "2024-01-31 ~ 2024-07-31",
+        "best_params": {
+          "ema_fast": 10,
+          "ema_slow": 50,
+          "adx_threshold": 20
+        },
+        "in_sample": {
+          "sharpe_ratio": 0.3827186384184299,
+          "cagr": 0.07976576375259614,
+          "max_drawdown_pct": -7.080635792496967,
+          "win_rate": 55.55555555555556,
+          "sortino_ratio": 0.3786334848978293,
+          "total_return_pct": 9.266667608947857,
+          "profit_factor": 1.4063955936503978,
+          "total_trades": 9
+        },
+        "out_of_sample": {
+          "sharpe_ratio": -0.24610617458196082,
+          "cagr": 0.023245747476701162,
+          "max_drawdown_pct": -2.886183785082886,
+          "win_rate": 100.0,
+          "sortino_ratio": -0.10665531115884565,
+          "total_return_pct": 1.1463863197326718,
+          "profit_factor": 100.0,
+          "total_trades": 1
+        }
+      },
+      {
+        "train": "2024-08-01 ~ 2025-09-30",
+        "test": "2025-10-01 ~ 2026-04-01",
+        "best_params": {
+          "ema_fast": 10,
+          "ema_slow": 50,
+          "adx_threshold": 30
+        },
+        "in_sample": {
+          "sharpe_ratio": 0.80634080621025,
+          "cagr": 0.09677175629674895,
+          "max_drawdown_pct": -4.026569704537629,
+          "win_rate": 33.33333333333333,
+          "sortino_ratio": 0.7133670413767629,
+          "total_return_pct": 11.256329184814502,
+          "profit_factor": 7.849370793345663,
+          "total_trades": 3
+        },
+        "out_of_sample": {
+          "sharpe_ratio": 0.0,
+          "cagr": 0.0,
+          "max_drawdown_pct": 0.0,
+          "win_rate": 0.0,
+          "sortino_ratio": 0.0,
+          "total_return_pct": 0.0,
+          "profit_factor": 0.0,
+          "total_trades": 0
+        }
+      }
+    ],
+    "elapsed_sec": 29.05946713499725
+  }
+}

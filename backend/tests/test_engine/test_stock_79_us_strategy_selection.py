@@ -41,7 +41,9 @@ _ALL_STRATEGIES = [
 ]
 
 _US_ENABLED = {
-    "dual_momentum", "volume_surge", "trend_following", "donchian_breakout",
+    # 2026-04-08: donchian_breakout removed — fresh 2y pipeline backtest
+    # showed 77 trades, WR 43%, PnL -$1,856 (single largest US loser).
+    "dual_momentum", "volume_surge", "trend_following",
     "supertrend", "macd_histogram", "rsi_divergence", "regime_switch",
     "sector_rotation", "cross_sectional_momentum", "quality_factor",
     "pead_drift",

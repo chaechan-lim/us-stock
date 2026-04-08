@@ -45,7 +45,13 @@ from core.enums import SignalType
 
 logger = logging.getLogger(__name__)
 
-# Default broad universe (S&P 100 subset + growth/value mix)
+# Default narrow universe (S&P 100 subset + growth/value mix). 55 mega-caps.
+# Kept as the legacy default for backwards compatibility — covers the symbol
+# space the system *historically* used to backtest before live universe
+# expansion. Most live trades happen in WIDE_UNIVERSE territory now (small/mid
+# cap biotechs, energy, industrials surfaced by yfinance screeners + KIS
+# ranking APIs), so for any decision-grade backtest set
+# ``PipelineConfig.use_wide_universe=True`` or pass an explicit universe.
 DEFAULT_UNIVERSE = [
     # Mega-cap tech
     "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA", "AVGO",
@@ -64,6 +70,59 @@ DEFAULT_UNIVERSE = [
     # Other
     "DIS", "NFLX", "PYPL", "V", "MA", "BRK-B",
 ]
+
+
+# Wider universe (~155 symbols) covering mega-cap + S&P 500 mid-caps + the
+# small-cap segments the live UniverseExpander typically surfaces (energy
+# E&P, biotech, industrial, utilities, materials). Closer to the actual
+# symbol space the live system trades. Use this when backtesting for
+# decision-grade analysis — the narrow DEFAULT_UNIVERSE gives misleadingly
+# high alpha estimates because it omits the small-cap segment where the
+# strategy combiner spends most of its trade volume.
+#
+# Survivorship caveat: this list is curated from currently-listed tickers,
+# so it has the same survivorship bias as any static historical universe
+# (delisted names are missing). For production-grade evaluation, prefer
+# `universe_path=` pointing to a snapshot taken via
+# ``scripts/snapshot_universe.py``.
+WIDE_UNIVERSE = sorted(set(DEFAULT_UNIVERSE) | {
+    # Tech / Software / Cloud (additional)
+    "CSCO", "IBM", "NOW", "INTU", "ADSK", "MRVL", "KLAC", "LRCX",
+    "SNOW", "NET", "CRWD", "PANW", "OKTA", "ZS", "DDOG", "MDB", "ZM", "TEAM",
+    # Semis additional
+    "ASML", "TSM", "ARM", "ON", "MCHP", "STX", "WDC",
+    # Finance additional
+    "BRK-B", "V", "MA", "COF", "USB", "PNC", "SCHW", "TFC", "BK", "STT",
+    # Healthcare / Pharma additional
+    "BMY", "AMGN", "GILD", "BIIB", "REGN", "VRTX", "ISRG", "DHR",
+    "SYK", "ZTS", "MDT", "BSX", "EW", "BAX",
+    # Biotech / small pharma (live system trades these)
+    "MRNA", "IONS", "BMRN", "INCY", "NBIX", "JAZZ", "EXEL", "RARE",
+    "BPMC", "FOLD", "RGNX", "ARWR", "VKTX", "CRSP", "BEAM", "EDIT",
+    "ELVN", "CNTA", "GRDN", "DFTX",
+    # Consumer additional
+    "PEP", "LOW", "TGT", "DG", "EL", "CL", "MDLZ", "KMB", "GIS", "K",
+    "SBUX", "CMG", "YUM", "DPZ", "ULTA", "TJX", "ROST", "BBY",
+    # Energy additional
+    "OXY", "FANG", "CVE", "CNQ", "MPC", "VLO", "PSX", "DEC", "DVN",
+    "HES", "PXD", "MRO", "APA", "EQT", "AR", "BW",
+    # Industrial / Defense additional
+    "LMT", "NOC", "GD", "TDG", "ETN", "EMR", "PH", "ITW", "ROK",
+    "FAST", "PCAR", "CMI", "URI", "ADTN", "IRDM",
+    # Materials
+    "LIN", "FCX", "NEM", "NUE", "DOW", "DD", "APD", "CSTM", "ALB",
+    "VMC", "MLM", "STLD",
+    # Comm / Media
+    "CMCSA", "T", "VZ", "TMUS", "WBD", "CHTR", "PARA",
+    # Transport
+    "FDX", "LUV", "DAL", "UAL", "AAL", "EXPD", "JBHT",
+    # Utilities (incl ones the system has traded)
+    "NEE", "DUK", "SO", "AEP", "EXC", "XEL", "IDA", "ETR", "ED",
+    # Real Estate
+    "PLD", "AMT", "EQIX", "SPG", "O", "WELL", "PSA",
+    # Sector ETFs (so dual_momentum / sector_rotation can pick them in backtest)
+    "XLK", "XLF", "XLE", "XLV", "XLI", "XLP", "XLY", "XLU", "XLB", "XLRE", "XLC",
+})
 
 # Default KR universe (KOSPI/KOSDAQ major stocks, yfinance format)
 DEFAULT_KR_UNIVERSE = [
@@ -91,11 +150,18 @@ DEFAULT_KR_UNIVERSE = [
 ]
 
 
-def _default_universe_for_market(market: str) -> list[str]:
-    """Return the default universe for the given market."""
+def _default_universe_for_market(market: str, wide: bool = False) -> list[str]:
+    """Return the default universe for the given market.
+
+    Args:
+        market: "US" or "KR".
+        wide: When True, returns the wider US universe (~155 symbols
+            covering mega + mid + small caps) closer to the live
+            UniverseExpander output. KR currently has only one universe.
+    """
     if market == "KR":
         return list(DEFAULT_KR_UNIVERSE)
-    return list(DEFAULT_UNIVERSE)
+    return list(WIDE_UNIVERSE if wide else DEFAULT_UNIVERSE)
 
 
 @dataclass
@@ -105,11 +171,26 @@ class PipelineConfig:
     market: str = "US"  # "US" or "KR"
 
     # Universe
+    # Resolution priority (in __init__): explicit `universe` list >
+    # `universe_path` (JSON snapshot) > wide/default constant.
     universe: list[str] | None = None  # None = auto from market
     regime_symbol: str | None = None  # None = auto (SPY or 069500.KS)
+    use_wide_universe: bool = False  # US: True → WIDE_UNIVERSE (~155 symbols)
+    universe_path: str | None = None  # JSON file with {"symbols": [...]}
+
+    # Live state injection — load a previously-snapshotted SignalQualityTracker
+    # so the backtest starts from accumulated live history rather than a
+    # cold tracker. Generate via scripts/snapshot_signal_quality.py.
+    # Without this, dynamic strategy gating + Kelly inputs in the backtest
+    # diverge from live behavior because the tracker has no trade history.
+    signal_quality_seed_path: str | None = None
 
     # Simulation
-    initial_equity: float = 100_000.0
+    # initial_equity uses raw price units (no FX conversion). For US (USD prices)
+    # the default is 100_000 = $100k. For KR (KRW prices, e.g. 470,000원/share),
+    # leaving this at 100_000 makes int(allocation/price) = 0 → 0 trades silently.
+    # When None, FullPipelineBacktest auto-scales: US → 100_000, KR → 100_000_000.
+    initial_equity: float | None = None
     slippage_pct: float = 0.05  # 0.05%
     commission_per_order: float = 0.0
 
@@ -293,10 +374,18 @@ class FullPipelineBacktest:
         # Resolve market-dependent defaults
         cfg = self._config
         if cfg.universe is None:
-            cfg.universe = _default_universe_for_market(cfg.market)
+            cfg.universe = self._resolve_default_universe(cfg)
         if cfg.regime_symbol is None:
             cfg.regime_symbol = "069500.KS" if cfg.market == "KR" else "SPY"
+        if cfg.initial_equity is None:
+            # Auto-scale equity to match the price units of the target market.
+            # KR stock prices are in KRW (often 100k+ per share); a USD-style
+            # 100_000 default makes int(allocation/price) = 0 and silently
+            # produces 0 trades.
+            cfg.initial_equity = 100_000_000.0 if cfg.market == "KR" else 100_000.0
 
+        # Will be populated below; load signal-quality seed (if any) after
+        # the tracker is created.
         self._data_loader = BacktestDataLoader()
         self._indicator_svc = IndicatorService()
         self._screener = IndicatorScreener(min_grade=self._config.min_screen_grade)
@@ -305,6 +394,7 @@ class FullPipelineBacktest:
         self._adaptive = AdaptiveWeightManager()
         self._factor_model = MultiFactorModel()
         self._signal_quality = SignalQualityTracker()
+        self._load_signal_quality_seed(cfg)
         self._risk_manager = RiskManager(RiskParams(
             max_position_pct=self._config.max_position_pct,
             max_total_exposure_pct=self._config.max_exposure_pct,
@@ -360,6 +450,75 @@ class FullPipelineBacktest:
 
         # Sector concentration tracking
         self._sector_cache: dict[str, str] = {}  # symbol → sector
+
+    def _load_signal_quality_seed(self, cfg: "PipelineConfig") -> None:
+        """Optionally seed self._signal_quality from a JSON snapshot.
+
+        Snapshot is generated by ``scripts/snapshot_signal_quality.py``
+        which dumps the live tracker state (or rebuilds it from the trades
+        DB table). Without seeding, the backtest's gating + Kelly inputs
+        diverge from live behavior.
+
+        Accepts two snapshot shapes:
+            1. Bare tracker dict: ``{"version": 1, "trades": {...}}``
+            2. Wrapper with metadata: ``{"version": 1, "tracker": {...}}``
+
+        Failures are logged and the backtest continues with a cold tracker.
+        """
+        if not cfg.signal_quality_seed_path:
+            return
+        try:
+            import json as _json
+            from pathlib import Path as _Path
+
+            path = _Path(cfg.signal_quality_seed_path)
+            payload = _json.loads(path.read_text())
+            # Unwrap the optional metadata layer
+            if isinstance(payload, dict) and isinstance(payload.get("tracker"), dict):
+                tracker_payload = payload["tracker"]
+            else:
+                tracker_payload = payload
+            n = self._signal_quality.load_dict(tracker_payload)
+            logger.info(
+                "Seeded signal_quality with %d trade records from %s",
+                n, cfg.signal_quality_seed_path,
+            )
+        except Exception as e:
+            logger.warning(
+                "Failed to load signal_quality seed %s: %s — using cold tracker",
+                cfg.signal_quality_seed_path, e,
+            )
+
+    @staticmethod
+    def _resolve_default_universe(cfg: "PipelineConfig") -> list[str]:
+        """Resolve the universe when none was passed explicitly.
+
+        Order: universe_path (JSON snapshot) > wide constant > narrow default.
+        """
+        if cfg.universe_path:
+            try:
+                import json as _json
+                from pathlib import Path as _Path
+
+                p = _Path(cfg.universe_path)
+                payload = _json.loads(p.read_text())
+                symbols = payload.get("symbols") if isinstance(payload, dict) else payload
+                if isinstance(symbols, list) and symbols:
+                    logger.info(
+                        "Loaded %d symbols from universe snapshot %s",
+                        len(symbols), cfg.universe_path,
+                    )
+                    return [str(s).upper() for s in symbols]
+                logger.warning(
+                    "Universe snapshot %s has no 'symbols' list — falling back",
+                    cfg.universe_path,
+                )
+            except Exception as e:
+                logger.warning(
+                    "Failed to load universe snapshot %s: %s — falling back",
+                    cfg.universe_path, e,
+                )
+        return _default_universe_for_market(cfg.market, wide=cfg.use_wide_universe)
 
     async def run(
         self,
