@@ -590,6 +590,7 @@ class TestHoldLimits:
 
         pos = MagicMock(symbol="TQQQ", quantity=100, current_price=55.0)
         mock_market_data.get_positions.return_value = [pos]
+        mock_order_manager.place_sell.return_value = MagicMock()
 
         actions = await engine._check_hold_limits()
         assert len(actions) == 1
@@ -622,7 +623,7 @@ class TestHoldLimits:
 
     @pytest.mark.asyncio
     async def test_sell_failure_retains_tracking(
-        self, engine, mock_order_manager, mock_market_data
+        self, engine, mock_order_manager, mock_market_data, mock_notification
     ):
         """When place_sell returns None, tracking must NOT be removed so retry is possible."""
         engine._managed_positions["TQQQ"] = ETFPosition(
@@ -644,6 +645,46 @@ class TestHoldLimits:
         assert actions == []
         # Tracking must still be present for retry
         assert "TQQQ" in engine._managed_positions
+        # A Discord notification must fire so operators are alerted
+        mock_notification.notify_system_event.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_sell_exception_does_not_abort_loop(
+        self, engine, mock_order_manager, mock_market_data, mock_notification
+    ):
+        """An exception from place_sell must not abort processing of remaining symbols."""
+        now = time.time()
+        engine._managed_positions["TQQQ"] = ETFPosition(
+            symbol="TQQQ",
+            entry_date=now - 15 * 86400,
+            reason="regime_bull",
+        )
+        engine._managed_positions["SOXL"] = ETFPosition(
+            symbol="SOXL",
+            entry_date=now - 12 * 86400,
+            reason="regime_bull",
+        )
+
+        tqqq_pos = MagicMock(symbol="TQQQ", quantity=100, current_price=55.0)
+        soxl_pos = MagicMock(symbol="SOXL", quantity=50, current_price=30.0)
+        mock_market_data.get_positions.return_value = [tqqq_pos, soxl_pos]
+
+        # TQQQ raises; SOXL succeeds
+        mock_order_manager.place_sell.side_effect = [
+            Exception("API error"),
+            MagicMock(),
+        ]
+
+        # Must not propagate exception to caller
+        actions = await engine._check_hold_limits()
+
+        # TQQQ sell failed — tracking retained, no action logged
+        assert "TQQQ" in engine._managed_positions
+        # SOXL sell succeeded — tracking removed, action logged
+        assert "SOXL" not in engine._managed_positions
+        assert any("SOXL" in a for a in actions)
+        # Notification fired for TQQQ failure
+        mock_notification.notify_system_event.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_sell_success_removes_tracking(

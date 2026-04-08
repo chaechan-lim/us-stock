@@ -35,6 +35,7 @@ class ETFPosition:
     entry_date: float  # timestamp
     reason: str  # "regime_bull", "regime_bear", "sector_rotation"
     sector: str = ""
+    sell_failed_at: float = 0.0  # timestamp of first hold-limit sell failure (0 = no failure)
 
 
 @dataclass
@@ -628,20 +629,41 @@ class ETFEngine:
                 pos = next((p for p in positions if p.symbol == sym), None)
                 if pos and pos.quantity > 0:
                     price = float(pos.current_price) if pos.current_price else 0
-                    sell_result = await self._order_manager.place_sell(
-                        symbol=sym,
-                        quantity=int(pos.quantity),
-                        price=price,
-                        strategy_name="etf_engine_hold_limit",
-                        exchange=self._etf.get_exchange(sym),
-                        entry_price=pos.avg_price,
-                        buy_strategy="etf_engine",
-                    )
+                    try:
+                        sell_result = await self._order_manager.place_sell(
+                            symbol=sym,
+                            quantity=int(pos.quantity),
+                            price=price,
+                            strategy_name="etf_engine_hold_limit",
+                            exchange=self._etf.get_exchange(sym),
+                            entry_price=pos.avg_price,
+                            buy_strategy="etf_engine",
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            "ETF Engine: SELL %s (hold limit) raised exception — retaining tracking: %s",
+                            sym, e,
+                        )
+                        if not etf_pos.sell_failed_at:
+                            etf_pos.sell_failed_at = now
+                        if self._notification:
+                            await self._notification.notify_system_event(
+                                "error",
+                                f"Hold-limit SELL failed for {sym} (exception): {e}",
+                            )
+                        continue
                     if sell_result is None:
                         logger.warning(
                             "ETF Engine: SELL failed for %s — retaining tracking for retry",
                             sym,
                         )
+                        if not etf_pos.sell_failed_at:
+                            etf_pos.sell_failed_at = now
+                        if self._notification:
+                            await self._notification.notify_system_event(
+                                "error",
+                                f"Hold-limit SELL failed for {sym} (order rejected)",
+                            )
                         continue
                     self._last_sell_times[sym] = time.time()
                     hold_days = hold_seconds / 86400
