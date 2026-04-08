@@ -634,6 +634,117 @@ class EvaluationLoop:
         except Exception as e:
             logger.error("Failed to evaluate %s: %s", symbol, e)
 
+    def _resolve_strategy_sl_tp(
+        self,
+        strategy_name: str,
+        price: float,
+        atr_val: float | None,
+        df: "pd.DataFrame",
+    ) -> tuple[float, float]:
+        """Resolve SL/TP percentages for a position based on strategy YAML.
+
+        Reads the strategy's `stop_loss.type` and `take_profit.type` config
+        and converts them into the (sl_pct, tp_pct) tuple that
+        position_tracker uses. Falls back to ATR-based dynamic SL/TP if
+        the strategy has no SL config or if a required input is missing.
+
+        Supported `stop_loss.type` values:
+            fixed_pct  — uses `max_pct` directly (e.g. 0.05 → 5% SL)
+            atr        — uses `atr_multiplier` × ATR / price
+            supertrend — uses (entry - supertrend_line) / entry from df,
+                         falling back to atr × 2.0 if the supertrend column
+                         is missing or the line is above price
+
+        2026-04-09: Before this fix, ``evaluation_loop`` ignored every
+        strategy YAML stop_loss block and used a single ATR/default SL
+        for all positions. This caused 펄어비스 (-7.19%) and 삼성전기
+        (-6.72%) where supertrend's tight line-based SL never fired.
+        See ``docs/IMPROVEMENT_PLAN.md`` §1 for the full diagnosis.
+        """
+        # Try strategy-specific SL config first
+        sl_cfg = self._registry.get_stop_loss_config(strategy_name) if hasattr(
+            self._registry, "get_stop_loss_config"
+        ) else {}
+        tp_cfg = self._registry.get_take_profit_config(strategy_name) if hasattr(
+            self._registry, "get_take_profit_config"
+        ) else {}
+
+        sl_type = sl_cfg.get("type") if isinstance(sl_cfg, dict) else None
+
+        sl_pct: float | None = None
+
+        if sl_type == "fixed_pct":
+            max_pct = sl_cfg.get("max_pct")
+            if isinstance(max_pct, (int, float)) and max_pct > 0:
+                sl_pct = float(max_pct)
+
+        elif sl_type == "atr":
+            mult = sl_cfg.get("atr_multiplier", 2.0)
+            if atr_val and atr_val > 0 and price > 0:
+                sl_pct = float(mult) * float(atr_val) / float(price)
+
+        elif sl_type == "supertrend":
+            # Look for the supertrend line in the indicators dataframe.
+            # pandas-ta usually names it SUPERTl_<period>_<mult> for the long
+            # line, plus a generic 'supertrend' or 'supertrend_long' may exist.
+            line_value: float | None = None
+            for col in (
+                "supertrend_long", "supertrend",
+                "SUPERTl_7_2.0", "SUPERTl_10_3.0", "SUPERTl_14_3.0",
+            ):
+                if col in df.columns:
+                    try:
+                        v = float(df[col].iloc[-1])
+                        if v > 0 and v < price:
+                            line_value = v
+                            break
+                    except (ValueError, TypeError):
+                        continue
+            if line_value is not None:
+                sl_pct = (price - line_value) / price
+            elif atr_val and atr_val > 0 and price > 0:
+                # Fallback: tight ATR-based SL (2x ATR)
+                sl_pct = 2.0 * float(atr_val) / float(price)
+
+        # Sanitize: clamp to a sane range so we never end up with 0 or absurd values
+        if sl_pct is not None:
+            sl_pct = max(0.02, min(sl_pct, 0.20))  # 2% .. 20%
+
+        # If strategy SL config didn't yield a value, fall back to dynamic ATR
+        if sl_pct is None:
+            if atr_val and atr_val > 0:
+                sl_pct, tp_pct = self._risk_manager.calculate_dynamic_sl_tp(
+                    price, atr_val, market=self._market,
+                )
+                return sl_pct, tp_pct
+            sl_pct = self._risk_manager.params.default_stop_loss_pct
+            tp_pct = self._risk_manager.params.default_take_profit_pct
+            return sl_pct, tp_pct
+
+        # SL came from strategy config — pair it with a TP
+        tp_type = tp_cfg.get("type") if isinstance(tp_cfg, dict) else None
+        tp_pct: float | None = None
+        if tp_type == "fixed_pct":
+            mp = tp_cfg.get("max_pct")
+            if isinstance(mp, (int, float)) and mp > 0:
+                tp_pct = float(mp)
+        elif tp_type == "ratio":
+            ratio = tp_cfg.get("risk_multiple", 2.0)
+            tp_pct = float(ratio) * sl_pct
+
+        if tp_pct is None:
+            # Default: 2x risk (1:2 RR) as a sensible burst-catcher TP
+            tp_pct = 2.0 * sl_pct
+
+        # Clamp TP too
+        tp_pct = max(0.04, min(tp_pct, 0.50))
+
+        logger.info(
+            "SL/TP from strategy YAML for %s: type=%s sl=%.1f%% tp=%.1f%%",
+            strategy_name, sl_type, sl_pct * 100, tp_pct * 100,
+        )
+        return sl_pct, tp_pct
+
     def _maybe_classify(self, symbol: str, df: pd.DataFrame) -> None:
         """Classify stock if not yet classified or stale."""
         now = time.time()
@@ -1601,22 +1712,22 @@ class EvaluationLoop:
 
             # Register position for SL/TP/trailing stop monitoring
             if order and self._position_tracker:
-                # Dynamic ATR-based SL/TP per stock volatility
+                # Dynamic ATR-based SL/TP per stock volatility (default fallback)
                 atr_val = None
                 if "atr" in df.columns:
                     atr_val = float(df["atr"].iloc[-1])
                 elif "ATRr_14" in df.columns:
                     atr_val = float(df["ATRr_14"].iloc[-1])
 
-                if atr_val and atr_val > 0:
-                    sl_pct, tp_pct = self._risk_manager.calculate_dynamic_sl_tp(
-                        price,
-                        atr_val,
-                        market=self._market,
-                    )
-                else:
-                    sl_pct = self._risk_manager.params.default_stop_loss_pct
-                    tp_pct = self._risk_manager.params.default_take_profit_pct
+                # Strategy-specific SL config (yaml `stop_loss.type`).
+                # 2026-04-09: this used to be silently ignored — every position
+                # got the same ATR/default SL regardless of what the strategy
+                # YAML said. That caused 펄어비스 (-7.19%) and 삼성전기 (-6.72%)
+                # losses where supertrend's intended tight line-based SL never
+                # fired. See docs/IMPROVEMENT_PLAN.md §1 for the diagnosis.
+                sl_pct, tp_pct = self._resolve_strategy_sl_tp(
+                    strategy_name, price, atr_val, df,
+                )
 
                 # Look up trailing stop config from strategy YAML
                 trail_act: float | None = None

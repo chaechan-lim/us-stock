@@ -4766,3 +4766,123 @@ class TestCashParking:
         )
         await loop._park_excess_cash()
         mock_adapter.create_buy_order.assert_not_called()
+
+
+class TestStrategySLResolution:
+    """Tests for _resolve_strategy_sl_tp — picks SL/TP from strategy YAML
+    instead of always using ATR/default. See docs/IMPROVEMENT_PLAN.md §1.
+
+    This fix unblocks the per-strategy lifecycle — pre-fix, the yaml
+    `stop_loss.type` block was dead code (config_loader.get_stop_loss_config
+    was defined but never called from the live engine).
+    """
+
+    @pytest.fixture
+    def loop(self, mock_adapter, mock_market_data, mock_registry):
+        from data.indicator_service import IndicatorService
+        from strategies.combiner import SignalCombiner
+        from engine.order_manager import OrderManager
+        from engine.risk_manager import RiskManager
+        risk = RiskManager()
+        order_mgr = OrderManager(adapter=mock_adapter, risk_manager=risk)
+        loop = EvaluationLoop(
+            adapter=mock_adapter,
+            market_data=mock_market_data,
+            indicator_svc=IndicatorService(),
+            registry=mock_registry,
+            combiner=SignalCombiner(),
+            order_manager=order_mgr,
+            risk_manager=risk,
+        )
+        return loop
+
+    def _df_with_atr(self, atr=2.0):
+        df = _make_ohlcv_df()
+        df["atr"] = atr
+        return df
+
+    def test_fixed_pct_strategy_uses_max_pct(self, loop, mock_registry):
+        mock_registry.get_stop_loss_config = MagicMock(
+            return_value={"type": "fixed_pct", "max_pct": 0.05}
+        )
+        mock_registry.get_take_profit_config = MagicMock(return_value={})
+        sl, tp = loop._resolve_strategy_sl_tp("rsi_divergence", 100.0, 2.0, self._df_with_atr())
+        assert sl == 0.05
+        assert tp == 0.10  # default 2x risk
+
+    def test_atr_strategy_uses_multiplier(self, loop, mock_registry):
+        mock_registry.get_stop_loss_config = MagicMock(
+            return_value={"type": "atr", "atr_multiplier": 1.5}
+        )
+        mock_registry.get_take_profit_config = MagicMock(return_value={})
+        sl, tp = loop._resolve_strategy_sl_tp("bollinger_squeeze", 100.0, 2.0, self._df_with_atr())
+        # 1.5 * 2.0 / 100.0 = 0.03 → clamped to min 0.02 (passes)
+        assert abs(sl - 0.03) < 1e-6
+        assert tp == 0.06
+
+    def test_supertrend_uses_line_when_present(self, loop, mock_registry):
+        mock_registry.get_stop_loss_config = MagicMock(
+            return_value={"type": "supertrend"}
+        )
+        mock_registry.get_take_profit_config = MagicMock(return_value={})
+        df = self._df_with_atr()
+        df["supertrend_long"] = 96.5  # 3.5% below entry of 100
+        sl, tp = loop._resolve_strategy_sl_tp("supertrend", 100.0, 2.0, df)
+        assert abs(sl - 0.035) < 1e-6
+        assert abs(tp - 0.07) < 1e-6  # 2x risk
+
+    def test_supertrend_falls_back_to_atr_when_no_line(self, loop, mock_registry):
+        mock_registry.get_stop_loss_config = MagicMock(
+            return_value={"type": "supertrend"}
+        )
+        mock_registry.get_take_profit_config = MagicMock(return_value={})
+        df = self._df_with_atr(atr=3.0)
+        # No supertrend_long column → falls back to 2x ATR / price = 0.06
+        sl, tp = loop._resolve_strategy_sl_tp("supertrend", 100.0, 3.0, df)
+        assert abs(sl - 0.06) < 1e-6
+
+    def test_no_strategy_config_falls_back_to_dynamic_atr(self, loop, mock_registry):
+        mock_registry.get_stop_loss_config = MagicMock(return_value={})
+        mock_registry.get_take_profit_config = MagicMock(return_value={})
+        sl, tp = loop._resolve_strategy_sl_tp("unknown", 100.0, 2.0, self._df_with_atr())
+        # Should call risk_manager.calculate_dynamic_sl_tp which has its own logic
+        assert 0 < sl < 0.30
+        assert 0 < tp < 0.50
+
+    def test_no_atr_no_config_falls_back_to_default(self, loop, mock_registry):
+        mock_registry.get_stop_loss_config = MagicMock(return_value={})
+        mock_registry.get_take_profit_config = MagicMock(return_value={})
+        df = _make_ohlcv_df()  # no atr column
+        sl, tp = loop._resolve_strategy_sl_tp("unknown", 100.0, None, df)
+        # Should fall back to RiskManager defaults
+        from engine.risk_manager import RiskParams
+        defaults = RiskParams()
+        assert sl == defaults.default_stop_loss_pct
+        assert tp == defaults.default_take_profit_pct
+
+    def test_sl_clamped_to_max_20pct(self, loop, mock_registry):
+        mock_registry.get_stop_loss_config = MagicMock(
+            return_value={"type": "fixed_pct", "max_pct": 0.50}  # 50% absurd
+        )
+        mock_registry.get_take_profit_config = MagicMock(return_value={})
+        sl, tp = loop._resolve_strategy_sl_tp("test", 100.0, 2.0, self._df_with_atr())
+        assert sl == 0.20  # clamped
+
+    def test_sl_clamped_to_min_2pct(self, loop, mock_registry):
+        mock_registry.get_stop_loss_config = MagicMock(
+            return_value={"type": "fixed_pct", "max_pct": 0.005}  # 0.5% too tight
+        )
+        mock_registry.get_take_profit_config = MagicMock(return_value={})
+        sl, tp = loop._resolve_strategy_sl_tp("test", 100.0, 2.0, self._df_with_atr())
+        assert sl == 0.02  # clamped
+
+    def test_ratio_tp_config(self, loop, mock_registry):
+        mock_registry.get_stop_loss_config = MagicMock(
+            return_value={"type": "fixed_pct", "max_pct": 0.04}
+        )
+        mock_registry.get_take_profit_config = MagicMock(
+            return_value={"type": "ratio", "risk_multiple": 3.0}
+        )
+        sl, tp = loop._resolve_strategy_sl_tp("test", 100.0, 2.0, self._df_with_atr())
+        assert sl == 0.04
+        assert abs(tp - 0.12) < 1e-6  # 3 * 0.04

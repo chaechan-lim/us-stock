@@ -65,4 +65,16 @@ async def reload_config(
             "NOT updated by hot-reload."
         )
 
+    # 2026-04-09: Same for US — previously the hot-reload endpoint silently
+    # ignored markets.US.disabled_strategies + cash_parking changes,
+    # requiring a backend restart for every yaml tweak. The 4-08 trade
+    # history showed donchian_breakout still buying after a yaml-only
+    # disable + reload_strategies call. Fixed by extracting US setup into
+    # _apply_us_eval_overrides.
+    if hasattr(request.app.state, "apply_us_eval_overrides"):
+        request.app.state.apply_us_eval_overrides()
+        logger.info(
+            "US eval-loop config reloaded (disabled_strategies + cash_parking)."
+        )
+
     return {"status": "ok", "strategies": registry.get_names()}

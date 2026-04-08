@@ -566,6 +566,13 @@ markets:
     #   Per-strategy:  donchian_breakout = 77 trades, WR 43%, PnL -$1,856
     #     (single largest US loser; absorbed into dual_momentum +$1,728 after disable).
     #   Profile weights left in place; market-level disable filters it out.
+    # 2026-04-09: dual_momentum disabled — confirmed bleeder by both
+    # backtest and 9-day live data analysis (analyze_trade_patterns.py).
+    #   Live: 10 trades, 3W/7L, avg -2.28%, worst -10.22% (FANG)
+    #         3 of 5 SMALL_WIN_BIG_LOSS cases (FANG/CVE/XOM stop_loss)
+    #   Backtest 2y: -$3,865 contribution
+    # Strategy thesis (12-18mo lookback) doesn't fit user's burst-catching
+    # goal — see docs/STRATEGY_REDESIGN.md §2.
     disabled_strategies:
       - bollinger_squeeze
       - volume_profile
@@ -573,6 +580,7 @@ markets:
       - larry_williams
       - bnf_deviation
       - donchian_breakout
+      - dual_momentum
     # Cash parking — recovers ~13pp alpha by parking idle cash in SPY
     # instead of letting it sit through low-conviction periods.
     # Source: backend/scripts/validate_cash_parking.py V1_park_30 (US 2y, wide universe).

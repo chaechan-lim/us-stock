@@ -130,6 +130,38 @@ def _apply_kr_eval_overrides(
         )
 
 
+def _apply_us_eval_overrides(
+    us_loop: "EvaluationLoop",
+    config_loader: "StrategyConfigLoader",
+) -> None:
+    """Apply US market-specific evaluation-loop overrides from strategies.yaml.
+
+    Counterpart of ``_apply_kr_eval_overrides``. Called at startup AND
+    after every hot-reload so that runtime config changes to
+    markets.US.disabled_strategies + cash_parking take effect immediately.
+
+    2026-04-09: Created after the 4-08 trade history showed that yesterday's
+    donchian_breakout disable hadn't taken effect — donchian_breakout was
+    still buying XLK/XLF/GOOGL/JPM/GRDN at 13:30 ET. Root cause: the
+    /strategies/reload endpoint was only re-applying KR overrides, not US.
+
+    NOTE: this still does NOT cover US risk params (kelly_fraction etc.)
+    or main.py-only wiring (e.g. ``set_max_sector_pct``). Those still
+    require a full backend restart.
+    """
+    us_disabled = config_loader.get_market_disabled_strategies("US")
+    _warn_if_disabled_empty("US", us_disabled)
+    us_loop.set_disabled_strategies(us_disabled)
+
+    us_park = config_loader.get_market_cash_parking_config("US")
+    us_loop.set_cash_parking_config(
+        enabled=bool(us_park.get("enabled", False)),
+        symbol=us_park.get("symbol"),
+        threshold=us_park.get("threshold"),
+        buffer=us_park.get("buffer"),
+    )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application startup/shutdown lifecycle."""
@@ -513,25 +545,17 @@ async def lifespan(app: FastAPI):
     position_tracker.register_on_sell(evaluation_loop.register_sell_cooldown)
     # STOCK-79: US disabled strategies loaded from config/strategies.yaml (markets.US).
     # See config for backtest results and threshold rationale.
-    # NOTE: disabled_strategies is applied once at startup only — it is NOT
-    # re-applied during config hot-reload.  A restart is required for changes
-    # to markets.US.disabled_strategies to take effect.
-    us_disabled = registry.config_loader.get_market_disabled_strategies("US")
-    _warn_if_disabled_empty("US", us_disabled)
-    evaluation_loop.set_disabled_strategies(us_disabled)
+    # 2026-04-09: disabled_strategies + cash_parking are now extracted into
+    # _apply_us_eval_overrides so the hot-reload endpoint can re-apply them
+    # without a backend restart. Static-once params (max_sector_pct,
+    # min_confidence, min_active_ratio) stay here.
     evaluation_loop.set_max_sector_pct(config.risk.max_sector_pct)
     evaluation_loop.set_min_confidence(0.30)
     evaluation_loop.set_min_active_ratio(0.0)
-    # Cash parking: opt-in via markets.US.cash_parking in strategies.yaml.
-    # Backtest validated +13.3pp / +0.97 Sharpe (validate_cash_parking.py V1).
-    us_park = registry.config_loader.get_market_cash_parking_config("US")
-    if us_park.get("enabled"):
-        evaluation_loop.set_cash_parking_config(
-            enabled=True,
-            symbol=us_park.get("symbol"),
-            threshold=us_park.get("threshold"),
-            buffer=us_park.get("buffer"),
-        )
+    _apply_us_eval_overrides(evaluation_loop, registry.config_loader)
+    app.state.apply_us_eval_overrides = lambda: _apply_us_eval_overrides(
+        evaluation_loop, registry.config_loader,
+    )
     app.state.evaluation_loop = evaluation_loop
 
     # Stock scanner & sector analyzer

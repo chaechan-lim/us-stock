@@ -43,7 +43,10 @@ _ALL_STRATEGIES = [
 _US_ENABLED = {
     # 2026-04-08: donchian_breakout removed — fresh 2y pipeline backtest
     # showed 77 trades, WR 43%, PnL -$1,856 (single largest US loser).
-    "dual_momentum", "volume_surge", "trend_following",
+    # 2026-04-09: dual_momentum removed — 9d live data 10 trades 3W/7L,
+    # avg -2.28%, 3 of 5 SMALL_WIN_BIG_LOSS cases (FANG/CVE/XOM).
+    # Backtest 2y -$3,865 contribution. See docs/IMPROVEMENT_PLAN.md §1.
+    "volume_surge", "trend_following",
     "supertrend", "macd_histogram", "rsi_divergence", "regime_switch",
     "sector_rotation", "cross_sectional_momentum", "quality_factor",
     "pead_drift",
@@ -122,10 +125,14 @@ class TestUSConfigLoader:
         assert isinstance(disabled, list)
         assert len(disabled) > 0
 
-    def test_dual_momentum_not_disabled(self):
+    def test_dual_momentum_disabled_2026_04_09(self):
+        """2026-04-09: dual_momentum disabled in US after 9-day live data
+        analysis showed 10 trades 3W/7L avg -2.28%, 3 of 5
+        SMALL_WIN_BIG_LOSS cases. See docs/IMPROVEMENT_PLAN.md §1.
+        """
         loader = StrategyConfigLoader()
         disabled = loader.get_market_disabled_strategies("US")
-        assert "dual_momentum" not in disabled
+        assert "dual_momentum" in disabled
 
     def test_volume_surge_not_disabled(self):
         loader = StrategyConfigLoader()
@@ -173,11 +180,12 @@ class TestUSEvaluationLoop:
         active_names = {s.name for s in loop._get_active_strategies()}
         assert active_names == _US_ENABLED
 
-    def test_dual_momentum_is_active(self):
+    def test_dual_momentum_is_inactive_2026_04_09(self):
+        """dual_momentum should NOT be in active strategies after 4-09 disable."""
         loader = StrategyConfigLoader()
         loop = _make_loop(disabled=loader.get_market_disabled_strategies("US"))
         active_names = {s.name for s in loop._get_active_strategies()}
-        assert "dual_momentum" in active_names
+        assert "dual_momentum" not in active_names
 
     def test_volume_profile_is_inactive(self):
         loader = StrategyConfigLoader()

@@ -119,3 +119,18 @@ class StrategyRegistry:
     def get_trailing_stop_config(self, strategy_name: str) -> dict:
         """Get trailing stop config for a strategy from YAML."""
         return self._config_loader.get_trailing_stop_config(strategy_name)
+
+    def get_stop_loss_config(self, strategy_name: str) -> dict:
+        """Get stop_loss config for a strategy from YAML.
+
+        Returned dict shape (see config/strategies.yaml strategies.<name>.stop_loss):
+            type: "fixed_pct" | "atr" | "supertrend"
+            max_pct: float (for fixed_pct)
+            atr_multiplier: float (for atr)
+        Empty dict if not configured (caller falls back to ATR/default).
+        """
+        return self._config_loader.get_stop_loss_config(strategy_name)
+
+    def get_take_profit_config(self, strategy_name: str) -> dict:
+        """Get take_profit config for a strategy from YAML."""
+        return self._config_loader.get_strategy_config(strategy_name).get("take_profit", {})
