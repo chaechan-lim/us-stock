@@ -158,6 +158,18 @@ class TestEvaluationLoop:
         await eval_loop.evaluate_symbol("AAPL")
         mock_adapter.create_sell_order.assert_called_once()
 
+    async def test_combined_portfolio_value_uses_integrated_margin_total(self, eval_loop):
+        other_md = AsyncMock()
+        eval_loop._market = "US"
+        eval_loop._exchange_rate = 1450.0
+        eval_loop._market_data._adapter = MagicMock(_us_position_value_krw=9_561_545)
+        other_md._adapter = MagicMock(_tot_evlu_amt=9_602_699)
+        other_md.get_balance = AsyncMock(return_value=MagicMock(total=8_654_115))
+        eval_loop.set_other_market_data(other_md)
+
+        combined = await eval_loop._get_combined_portfolio_value(own_balance_total=9152.0)
+        assert combined == pytest.approx((9_602_699 + 9_561_545) / 1450.0, rel=1e-6)
+
     async def test_evaluate_empty_ohlcv(self, eval_loop, mock_market_data, mock_adapter):
         mock_market_data.get_ohlcv.return_value = pd.DataFrame()
         await eval_loop.evaluate_symbol("AAPL")
@@ -4724,33 +4736,43 @@ class TestCashParking:
         await loop._park_excess_cash()
         mock_adapter.create_buy_order.assert_not_called()
 
-    async def test_unpark_sells_spy_when_held(self, loop, mock_adapter, mock_market_data):
-        loop.set_cash_parking_config(enabled=True)
-        mock_market_data.get_positions = AsyncMock(
-            return_value=[Position(
-                symbol="SPY", quantity=700, avg_price=100, current_price=105, exchange="NASD",
-            )]
-        )
-        mock_adapter.create_sell_order = AsyncMock(
+    async def test_park_cooldown_prevents_rapid_repeat(self, loop, mock_adapter, mock_market_data):
+        """2026-04-11: park should fire at most once per hour (cooldown).
+        The previous version had no cooldown and parked every 5-min cycle,
+        causing 93 SPY round-trips in 2 days (~860k KRW commissions).
+        """
+        loop.set_cash_parking_config(enabled=True, threshold=0.30, buffer=0.10)
+        mock_market_data.get_positions = AsyncMock(return_value=[])
+        mock_adapter.create_buy_order = AsyncMock(
             return_value=OrderResult(
-                order_id="UNPARK1",
-                symbol="SPY",
-                side="SELL",
-                order_type="limit",
-                quantity=700,
-                price=105.0,
-                status="filled",
-                filled_price=105.0,
+                order_id="PARK1", symbol="SPY", side="BUY", order_type="limit",
+                quantity=4, price=680.0, status="filled", filled_price=680.0,
             )
         )
-        await loop._unpark_cash_for_buys()
-        mock_adapter.create_sell_order.assert_called_once()
+        # First park: should fire
+        await loop._park_excess_cash()
+        assert mock_adapter.create_buy_order.call_count == 1
 
-    async def test_unpark_noop_when_no_parking(self, loop, mock_adapter, mock_market_data):
+        # Immediate second park: blocked by cooldown
+        mock_market_data.get_positions = AsyncMock(return_value=[])  # pretend no position (edge case)
+        await loop._park_excess_cash()
+        assert mock_adapter.create_buy_order.call_count == 1  # still 1, not 2
+
+    async def test_park_skips_when_pending_order_exists(self, loop, mock_adapter, mock_market_data):
+        """Don't place a second BUY if a parking BUY is already pending."""
         loop.set_cash_parking_config(enabled=True)
         mock_market_data.get_positions = AsyncMock(return_value=[])
-        await loop._unpark_cash_for_buys()
-        mock_adapter.create_sell_order.assert_not_called()
+        # Simulate pending order via order_manager's internal dict
+        from engine.order_manager import ManagedOrder
+        loop._order_manager._active_orders = {
+            "SPY_BUY_123": ManagedOrder(
+                order_id="SPY_BUY_123", symbol="SPY", side="BUY",
+                quantity=4, price=680.0, status="pending",
+                strategy_name="cash_parking",
+            ),
+        }
+        await loop._park_excess_cash()
+        mock_adapter.create_buy_order.assert_not_called()
 
     async def test_park_handles_balance_failure(self, loop, mock_adapter):
         loop.set_cash_parking_config(enabled=True)

@@ -1059,26 +1059,58 @@ class EvaluationLoop:
                 "Buy candidates ranked: %s",
                 [(s, f"{c:.2f}") for c, s, _, _ in buy_candidates[:10]],
             )
-            # Cash parking: unpark SPY before processing buys to free up cash
-            if self._cash_parking_enabled:
-                await self._unpark_cash_for_buys()
             for _conf, symbol, combined, df in buy_candidates:
                 await self._execute_signal(combined, symbol, df)
 
-        # Phase 3: Park leftover cash in SPY/KODEX 200 if above threshold
+        # Phase 3: Park leftover cash in SPY/KODEX 200 if above threshold.
+        # 2026-04-11: Removed the preemptive unpark-before-buys that caused
+        # 93 SPY round-trips in 2 days (~860k KRW commissions). Now the
+        # parking position is placed ONCE and only sold when the position
+        # tracker detects a strategy SELL or when _unpark_if_needed() is
+        # called from _execute_signal on actual cash shortfall.
         if self._cash_parking_enabled:
             await self._park_excess_cash()
 
     async def _park_excess_cash(self) -> None:
-        """Park idle cash in SPY/KODEX 200 if cash > threshold * equity.
+        """Park idle cash in SPY/KODEX 200 — ONCE, then hold.
 
-        Backtest validated +13.3pp return / +0.97 Sharpe over 2y on US
-        wide universe (validate_cash_parking.py V1_park_30, 2026-04-08).
-        Skipped silently if anything is missing — never raises.
+        2026-04-11 rewrite: the previous version placed a BUY every
+        5-minute evaluation cycle even when SPY was already held, because
+        it failed to detect the existing position reliably (pending order
+        race + position check timing). This caused 93 SPY round-trips
+        in 2 days and ~860k KRW in commissions.
+
+        New invariants:
+        - Only BUY when (a) parking enabled AND (b) cash > threshold AND
+          (c) NOT already holding parking symbol AND (d) no pending
+          parking BUY order exists AND (e) at least 1 hour since last
+          park/unpark action (cooldown).
+        - Place exactly ONE order per trigger, then stop.
         """
         if not self._cash_parking_enabled:
             return
         sym = self._cash_parking_symbol
+
+        # Cooldown: at most 1 park action per hour
+        now = time.time()
+        last = getattr(self, "_last_park_action", 0.0)
+        if now - last < 3600:
+            return
+
+        # Already holding? skip
+        try:
+            positions = await self._market_data.get_positions()
+            if any(p.symbol == sym and p.quantity > 0 for p in positions):
+                return
+        except Exception as e:
+            logger.debug("park: position check failed: %s", e)
+            return
+
+        # Pending BUY order for parking symbol? skip
+        if self._order_manager.has_pending_order(sym, "BUY"):
+            return
+
+        # Cash check
         try:
             balance = await self._adapter.fetch_balance()
         except Exception as e:
@@ -1092,21 +1124,11 @@ class EvaluationLoop:
         if cash_pct < self._cash_parking_threshold:
             return
 
-        # Already parked? skip
-        try:
-            positions = await self._market_data.get_positions()
-            if any(p.symbol == sym and p.quantity > 0 for p in positions):
-                return
-        except Exception as e:
-            logger.debug("park: position check failed: %s", e)
-            return
-
-        # Compute park amount: cash above the buffer
+        # Compute park amount
         park_amount = cash - equity * self._cash_parking_buffer
         if park_amount <= 0:
             return
 
-        # Get current SPY price
         try:
             df = await self._market_data.get_ohlcv(sym, limit=2)
             if df.empty:
@@ -1139,7 +1161,7 @@ class EvaluationLoop:
         except Exception:
             exchange = "NASD" if self._market == "US" else "KRX"
         try:
-            await self._order_manager.place_buy(
+            order = await self._order_manager.place_buy(
                 symbol=sym,
                 price=price,
                 portfolio_value=equity,
@@ -1151,57 +1173,10 @@ class EvaluationLoop:
                 sizing_override=sizing,
                 skip_position_limit=True,
             )
+            if order:
+                self._last_park_action = now
         except Exception as e:
             logger.warning("Cash parking BUY for %s failed: %s", sym, e)
-
-    async def _unpark_cash_for_buys(self) -> None:
-        """Sell parked SPY/KODEX 200 to free up cash before stock buys.
-
-        Counterpart of _park_excess_cash. Called once per evaluation cycle
-        when buy_candidates exist. The parked position uses
-        strategy_name="cash_parking" so we identify it via the order
-        history; here we just check if the parking symbol is currently
-        held and sell it via market order.
-        """
-        sym = self._cash_parking_symbol
-        try:
-            positions = await self._market_data.get_positions()
-        except Exception as e:
-            logger.debug("unpark: position fetch failed: %s", e)
-            return
-        parked = next(
-            (p for p in positions if p.symbol == sym and p.quantity > 0),
-            None,
-        )
-        if not parked:
-            return
-        try:
-            df = await self._market_data.get_ohlcv(sym, limit=2)
-            if df.empty:
-                return
-            price = float(df["close"].iloc[-1])
-        except Exception as e:
-            logger.debug("unpark: price fetch failed: %s", e)
-            return
-        try:
-            exchange = self._exchange_resolver.resolve(sym) if self._exchange_resolver else "NASD"
-        except Exception:
-            exchange = "NASD" if self._market == "US" else "KRX"
-        logger.info(
-            "Cash unpark: selling %d %s @ %.2f to free cash for stock buys",
-            int(parked.quantity), sym, price,
-        )
-        try:
-            await self._order_manager.place_sell(
-                symbol=sym,
-                price=price,
-                quantity=int(parked.quantity),
-                strategy_name="cash_parking:unpark",
-                order_type="limit",
-                exchange=exchange,
-            )
-        except Exception as e:
-            logger.warning("Cash unpark SELL for %s failed: %s", sym, e)
 
     @staticmethod
     def _dedup_buy_candidates(
@@ -1420,8 +1395,28 @@ class EvaluationLoop:
         """
         if not self._other_market_data:
             return None
+
+        own_adapter = getattr(self._market_data, "_adapter", None)
+        other_adapter = getattr(self._other_market_data, "_adapter", None)
+        if self._market == "US":
+            us_adapter = own_adapter
+            kr_adapter = other_adapter
+        else:
+            kr_adapter = own_adapter
+            us_adapter = other_adapter
+
+        us_position_value_krw = float(getattr(us_adapter, "_us_position_value_krw", 0) or 0)
+        kr_tot_evlu_krw = float(getattr(kr_adapter, "_tot_evlu_amt", 0) or 0)
         try:
             other_balance = await self._other_market_data.get_balance()
+            kr_total_krw = own_balance_total if self._market == "KR" else other_balance.total
+            if kr_tot_evlu_krw > 0 and us_position_value_krw > 0:
+                combined_krw = kr_tot_evlu_krw + us_position_value_krw
+                return combined_krw / self._exchange_rate if self._market == "US" else combined_krw
+            if kr_total_krw > 0 and us_position_value_krw > 0:
+                combined_krw = kr_total_krw + us_position_value_krw
+                return combined_krw / self._exchange_rate if self._market == "US" else combined_krw
+
             # Add full other market total for accurate allocation sizing.
             # Deposit double-counting is safe: actual orders are bounded by
             # real cash_available via min() in _apply_market_cap.

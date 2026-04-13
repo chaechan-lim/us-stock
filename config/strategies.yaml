@@ -589,6 +589,14 @@ markets:
     #   V2_park_20    : Ret +11.0%  Sharpe +0.52  Alpha -21.0%
     #   V3_park_50    : Ret +11.8%  Sharpe +0.57  Alpha -20.2%
     #   V4_park_10    : Ret +13.3%  Sharpe +0.65  Alpha -18.7%
+    # 2026-04-11: Re-enabled after rewrite. Previous version caused 93 SPY
+    # round-trips in 2 days (~860k KRW in commissions) because unpark fired
+    # every 5-min cycle regardless of actual buy needs. New invariants:
+    #   - Park ONCE when cash > threshold, hold indefinitely
+    #   - No preemptive unpark (removed _unpark_cash_for_buys entirely)
+    #   - 1-hour cooldown between park actions
+    #   - Pending-order check prevents duplicate BUY orders
+    #   - SPY position is sold only by strategy signals or manual action
     cash_parking:
       enabled: true
       symbol: SPY
