@@ -168,6 +168,30 @@
 
 ---
 
+### Phase 2.5 — 수수료 반영 (Commission-aware trading)
+
+**2026-04-13 추가**: 시스템 전체가 거래 수수료를 **완전히 무시**하고 있음.
+- `backtest/full_pipeline.py`: `commission_per_order: 0.0` (기본값)
+- `engine/evaluation_loop.py`: 수수료 체크 코드 0건
+- `engine/order_manager.py`: 수수료 언급 0건
+- `engine/risk_manager.py`: 수수료 언급 0건
+- `engine/position_tracker.py` PnL 계산: 수수료 미차감
+
+KIS US 수수료 0.25%/건 → round trip 0.50%. **수익 0.50% 이하 거래는 전부 실질 손해**.
+이 맹점이 cash_parking churn 93회 (~860k KRW 수수료)의 근본 원인 중 하나.
+
+**필요 작업:**
+1. **매수 판단 시 minimum profit threshold**: expected PnL > round-trip commission (0.50%) 이상일 때만 BUY
+2. **PnL 실현 시 수수료 차감**: position_tracker/order_manager에서 체결가 × 수수료율 차감
+3. **백테스트 commission 반영**: `PipelineConfig.commission_per_order`를 실 수수료로 세팅 (US $5~7/order, KR 매도세 포함 ~0.3%)
+4. **cash_parking 등 시스템 거래에 수수료 guard**: 예상 수익 < 수수료면 거래 차단
+
+**배포 규칙 추가 (2026-04-13):**
+- **라이브 배포 전 최소 1일 페이퍼 운용** 또는 **라이브에서 첫 1시간 수동 모니터링** 필수
+- 백테스트 OK만으로 라이브 즉시 배포 금지 (cash_parking 사건 재발 방지)
+
+---
+
 ## 5. 알려진 한계 / 미해결
 
 1. **백테스트 universe ≠ 라이브 universe** — `WIDE_UNIVERSE` 추가했지만 동적 discovery 못 replicate. 절대 alpha 추정 부정확
@@ -176,6 +200,8 @@
 4. **dual_momentum disable 후 거래량 급감** — 의도된 변화지만 사용자 perception 주의
 5. **etf_engine_sector** — 18건 noise지만 KR ETF rotation 자체는 의미 있음. trailing 조정으로 살릴지 disable할지 1주일 모니터링 후 결정
 6. **min_hold 4시간** — burst trading에 너무 김. Phase 3 per-strategy lifecycle에서 해소
+7. **수수료 무시** — 시스템 전체가 commission-blind. Phase 2.5에서 해결 예정 (위 참조)
+8. **cash_parking churn** (2026-04-09~10) — 93회 SPY round-trip으로 ~860k KRW 수수료 발생. 4-11 rewrite로 park-once-hold로 전환 + 1시간 cooldown 추가. 추가 재발 시 cash_parking 자체를 삭제
 
 ---
 
