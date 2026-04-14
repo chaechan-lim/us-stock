@@ -26,6 +26,54 @@ def init_portfolio(session_factory):
     _session_factory = session_factory
 
 
+def _get_num(obj: object, attr: str, default: float = 0.0) -> float:
+    val = getattr(obj, attr, None) if obj else None
+    return float(val) if val else default
+
+
+def _snapshot_equity_krw(snapshot, usd_krw: float, combined: bool = False) -> float:
+    """Convert a snapshot to KRW equity.
+
+    For combined ALL-market returns we align with the live KIS-style total:
+    KR total evaluation + US position evaluation only. US cash is shared with KR
+    in integrated-margin accounts, so summing US total_value again would double-count it.
+    """
+    if snapshot is None:
+        return 0.0
+
+    if getattr(snapshot, "market", None) == "KR":
+        return float(getattr(snapshot, "total_value_usd", 0.0) or 0.0)
+
+    rate = float(getattr(snapshot, "usd_krw_rate", None) or usd_krw or 0.0)
+    total_usd = float(getattr(snapshot, "total_value_usd", 0.0) or 0.0)
+    if combined:
+        cash_usd = float(getattr(snapshot, "cash_usd", 0.0) or 0.0)
+        total_usd = max(0.0, total_usd - cash_usd)
+    return total_usd * rate
+
+
+def _snapshot_cash_flow_krw(snapshot, usd_krw: float, combined: bool = False) -> float:
+    """Convert a snapshot cash-flow to KRW.
+
+    In combined integrated-margin mode, deposits/withdrawals should come from the KR side
+    because KR total already includes the shared cash pool. US snapshot cash flows are
+    derived from US total account value and can misclassify shared-cash moves.
+    """
+    if snapshot is None:
+        return 0.0
+
+    cash_flow = float(getattr(snapshot, "cash_flow", 0.0) or 0.0)
+    if cash_flow == 0.0:
+        return 0.0
+
+    if getattr(snapshot, "market", None) == "US":
+        if combined:
+            return 0.0
+        rate = float(getattr(snapshot, "usd_krw_rate", None) or usd_krw or 0.0)
+        return cash_flow * rate
+    return cash_flow
+
+
 @router.get("/summary")
 async def portfolio_summary(
     request: Request,
@@ -131,22 +179,38 @@ async def _combined_summary(request: Request) -> dict:
     adapter = getattr(request.app.state, "adapter", None)
     kr_adapter = getattr(request.app.state, "kr_adapter", None)
 
-    def _get_num(obj: object, attr: str, default: float = 0.0) -> float:
-        val = getattr(obj, attr, None) if obj else None
-        return float(val) if val else default
-
     us_tot_asst = _get_num(adapter, "_tot_asst_krw")
     us_tot_dncl = _get_num(adapter, "_tot_dncl_krw")
+    us_position_value_krw = _get_num(adapter, "_us_position_value_krw")
+    withdrawable_total_krw = _get_num(adapter, "_withdrawable_total_krw")
     kr_tot_evlu = _get_num(kr_adapter, "_tot_evlu_amt")
+    kr_stock_eval_krw = _get_num(kr_adapter, "_scts_evlu_amt")
+    kr_deposit_krw = _get_num(kr_adapter, "_dnca_tot_amt")
     # Also read full_us_usd — still needed for available_cash (STOCK-42) below.
     full_us_usd = _get_num(adapter, "_full_account_usd")
 
-    if kr_tot_evlu > 0 and us_tot_asst > 0 and us_tot_dncl > 0:
-        # 통합증거금: both APIs share the deposit pool.
-        # Subtract the shared deposit to avoid double-counting.
-        total_equity = kr_tot_evlu + us_tot_asst - us_tot_dncl
+    equity_formula = "krw_total + usd_total * exchange_rate"
+    cash_formula = "total_equity - total_position_value"
+    kr_total_krw = krw_total
+    us_total_krw = us_position_value_krw if us_position_value_krw > 0 else (
+        us_tot_asst if us_tot_asst > 0 else usd_total * _cached_usd_krw
+    )
+    shared_deposit_krw = us_tot_dncl
+
+    if kr_tot_evlu > 0 and us_position_value_krw > 0:
+        # 2026-04-15: 통합증거금 실계좌에서 kr_tot_evlu_amt는 이미
+        # 예수금 + 국내주식평가 + 해외주식평가환산을 모두 포함한다.
+        # 이전에 us_position_value_krw를 더했으나 이는 해외주식을
+        # 이중계산하여 KIS 앱 잔고보다 ~150만원 높게 표시됐음.
+        # 수정: kr_tot_evlu 단독 사용 (= KIS 앱의 통합 잔고와 일치).
+        equity_formula = "kr_tot_evlu_krw (includes overseas)"
+        total_equity = kr_tot_evlu
+    elif krw_total > 0 and us_position_value_krw > 0:
+        equity_formula = "kr_total_krw + us_position_value_krw"
+        total_equity = krw_total + us_position_value_krw
     elif us_tot_asst > 0:
         # US-only or non-통합증거금: use US total + KR total separately
+        equity_formula = "krw_total + us_tot_asst"
         total_equity = krw_total + us_tot_asst
     else:
         # Fallback: separate KR total + US total at market rate.
@@ -165,7 +229,12 @@ async def _combined_summary(request: Request) -> dict:
         p.current_price * p.quantity for p in us_positions if p.current_price > 0
     )
     total_position_value = kr_position_value + us_position_value * _cached_usd_krw
-    available_cash = max(0.0, total_equity - total_position_value)
+    if kr_tot_evlu > 0 and us_position_value_krw > 0:
+        # 통합증거금에서는 "가용현금"을 자체 산식이 아니라 KIS 주문가능예수금에 맞춘다.
+        cash_formula = "kis_orderable_cash"
+        available_cash = withdrawable_total_krw or krw_available
+    else:
+        available_cash = max(0.0, total_equity - total_position_value)
 
     all_positions = kr_positions + us_positions
     total_unrealized_pnl_krw = sum(p.unrealized_pnl for p in kr_positions)
@@ -202,6 +271,24 @@ async def _combined_summary(request: Request) -> dict:
         "total_unrealized_pnl_pct": total_unrealized_pnl_pct,
         "total_equity": total_equity,
         "available_cash": available_cash,
+        "equity_breakdown": {
+            "formula": equity_formula,
+            "kr_total_krw": kr_total_krw,
+            "us_total_krw": us_total_krw,
+            "shared_deposit_krw": shared_deposit_krw,
+            "kr_deposit_krw": kr_deposit_krw,
+            "kr_stock_eval_krw": kr_stock_eval_krw,
+            "kr_tot_evlu_krw": kr_tot_evlu,
+        },
+        "cash_breakdown": {
+            "formula": cash_formula,
+            "combined_cash_krw": available_cash,
+            "kr_orderable_cash_krw": krw_available,
+            "us_orderable_cash_usd": usd_available,
+            "us_orderable_cash_krw": usd_available * _cached_usd_krw,
+            "withdrawable_cash_krw": withdrawable_total_krw,
+            "total_position_value_krw": total_position_value,
+        },
     }
 
 
@@ -305,56 +392,63 @@ async def portfolio_returns(request: Request):
         "monthly": now - timedelta(days=30),
     }
 
+    current_total_equity = 0.0
+    try:
+        current_total_equity = float((await _combined_summary(request)).get("total_equity") or 0.0)
+    except Exception as e:
+        logger.warning("Failed to fetch live combined equity for returns: %s", e)
+
     async with _session_factory() as session:
         result = {}
         for period_name, since in periods.items():
-            # Get oldest snapshot after `since` for each market
-            us_old = await _get_oldest_snapshot(session, since, "US")
-            kr_old = await _get_oldest_snapshot(session, since, "KR")
-            us_new = await _get_latest_snapshot(session, "US")
-            kr_new = await _get_latest_snapshot(session, "KR")
+            us_seed = await _get_latest_snapshot_before_or_at(session, since, "US")
+            kr_seed = await _get_latest_snapshot_before_or_at(session, since, "KR")
+            us_snapshots = _prepend_snapshot(us_seed, await _get_snapshots_in_range(session, since, "US"))
+            kr_snapshots = _prepend_snapshot(kr_seed, await _get_snapshots_in_range(session, since, "KR"))
 
-            old_equity = 0.0
-            new_equity = 0.0
-
-            if us_old and us_new:
-                # STOCK-58: Use historical exchange rate for each snapshot
-                # This ensures exchange rate changes are properly captured in returns
-                # Use saved rate, fall back to current if not available
-                old_rate = us_old.usd_krw_rate or _cached_usd_krw
-                new_rate = us_new.usd_krw_rate or _cached_usd_krw
-                old_equity += us_old.total_value_usd * old_rate
-                new_equity += us_new.total_value_usd * new_rate
-            if kr_old and kr_new:
-                old_equity += kr_old.total_value_usd
-                new_equity += kr_new.total_value_usd
-
-            if old_equity > 0:
-                change = new_equity - old_equity
-                simple_pct = (change / old_equity) * 100
-
-                # STOCK-46: Lightweight check first — only fetch all snapshots when
-                # cash flows actually exist (the common case has none).
-                us_has_cf = await _has_cash_flows_db(session, since, "US")
-                kr_has_cf = await _has_cash_flows_db(session, since, "KR")
-                has_cf = us_has_cf or kr_has_cf
-
-                if has_cf:
-                    us_snapshots = await _get_snapshots_in_range(session, since, "US")
-                    kr_snapshots = await _get_snapshots_in_range(session, since, "KR")
-                    twr_pct = _calculate_twr(us_snapshots, kr_snapshots, _cached_usd_krw)
-                else:
-                    twr_pct = simple_pct
-
-                result[period_name] = {
-                    "change": round(change, 0),
-                    "pct": round(twr_pct, 2),
-                    "simple_pct": round(simple_pct, 2),
-                    "base_equity": round(old_equity, 0),
-                    "has_cash_flows": has_cf,
-                }
-            else:
+            timeline = _build_equity_timeline(
+                us_snapshots,
+                kr_snapshots,
+                _cached_usd_krw,
+                combined=True,
+            )
+            if not timeline:
                 result[period_name] = None
+                continue
+
+            base_idx = _find_base_index(timeline, since)
+            if base_idx is None:
+                result[period_name] = None
+                continue
+
+            effective_timeline = _append_live_equity(
+                timeline,
+                at=now,
+                equity_krw=current_total_equity,
+            )
+            period_timeline = effective_timeline[base_idx:]
+            if not period_timeline:
+                result[period_name] = None
+                continue
+
+            old_equity = period_timeline[0][1]
+            new_equity = period_timeline[-1][1]
+            if old_equity <= 0:
+                result[period_name] = None
+                continue
+
+            change = new_equity - old_equity
+            simple_pct = (change / old_equity) * 100
+            has_cf = any((cf or 0.0) != 0.0 for _, _, cf in period_timeline[1:])
+            twr_pct = _calculate_twr_from_timeline(period_timeline) if has_cf else simple_pct
+
+            result[period_name] = {
+                "change": round(change, 0),
+                "pct": round(twr_pct, 2),
+                "simple_pct": round(simple_pct, 2),
+                "base_equity": round(old_equity, 0),
+                "has_cash_flows": has_cf,
+            }
 
         return result
 
@@ -370,6 +464,23 @@ async def _get_oldest_snapshot(session, since, market: str):
         .where(PortfolioSnapshot.recorded_at >= since)
         .where(PortfolioSnapshot.market == market)
         .order_by(PortfolioSnapshot.recorded_at.asc())
+        .limit(1)
+    )
+    result = await session.execute(stmt)
+    return result.scalar_one_or_none()
+
+
+async def _get_latest_snapshot_before_or_at(session, when: datetime, market: str):
+    """Get the most recent snapshot at or before a given time for a market."""
+    from sqlalchemy import desc, select
+
+    from core.models import PortfolioSnapshot
+
+    stmt = (
+        select(PortfolioSnapshot)
+        .where(PortfolioSnapshot.recorded_at <= when)
+        .where(PortfolioSnapshot.market == market)
+        .order_by(desc(PortfolioSnapshot.recorded_at))
         .limit(1)
     )
     result = await session.execute(stmt)
@@ -436,8 +547,56 @@ async def _has_cash_flows_db(session, since: datetime, market: str) -> bool:
     return count > 0
 
 
+def _prepend_snapshot(seed, snapshots: list) -> list:
+    """Prepend a boundary snapshot when it is not already included."""
+    if seed is None:
+        return snapshots
+    if snapshots:
+        first = snapshots[0]
+        if (
+            getattr(first, "id", None) == getattr(seed, "id", None)
+            or getattr(first, "recorded_at", None) == getattr(seed, "recorded_at", None)
+        ):
+            return snapshots
+    return [seed, *snapshots]
+
+
+def _find_base_index(timeline: list[tuple[datetime, float, float]], since: datetime) -> int | None:
+    """Pick the last combined point at/before `since`, else the first after it."""
+    if not timeline:
+        return None
+
+    base_idx = None
+    for idx, (ts, _, _) in enumerate(timeline):
+        if ts <= since:
+            base_idx = idx
+            continue
+        break
+    return base_idx if base_idx is not None else 0
+
+
+def _append_live_equity(
+    timeline: list[tuple[datetime, float, float]],
+    at: datetime,
+    equity_krw: float,
+) -> list[tuple[datetime, float, float]]:
+    """Append the current live total_equity to a snapshot timeline."""
+    if equity_krw <= 0:
+        return timeline
+
+    if not timeline:
+        return [(at, equity_krw, 0.0)]
+
+    last_ts, last_equity, _ = timeline[-1]
+    if at <= last_ts and abs(last_equity - equity_krw) < 0.5:
+        return timeline
+    if abs(last_equity - equity_krw) < 0.5:
+        return timeline
+    return [*timeline, (at, equity_krw, 0.0)]
+
+
 def _build_equity_timeline(
-    us_snapshots: list, kr_snapshots: list, usd_krw: float
+    us_snapshots: list, kr_snapshots: list, usd_krw: float, combined: bool = False
 ) -> list[tuple[datetime, float, float]]:
     """Build a combined equity timeline using carry-forward for mismatched timestamps.
 
@@ -454,17 +613,16 @@ def _build_equity_timeline(
     Returns list of (timestamp, total_equity_krw, cash_flow_krw) sorted by time.
     """
     events: list[tuple[datetime, str, float, float]] = []
+    integrated_combined = combined and bool(us_snapshots) and bool(kr_snapshots)
 
     for s in us_snapshots:
-        # STOCK-58: Use historical exchange rate stored at snapshot time
-        rate = s.usd_krw_rate or usd_krw  # Use saved rate, fall back to current
-        equity = s.total_value_usd * rate
-        cf = (getattr(s, "cash_flow", 0.0) or 0.0) * rate
+        equity = _snapshot_equity_krw(s, usd_krw, combined=integrated_combined)
+        cf = _snapshot_cash_flow_krw(s, usd_krw, combined=integrated_combined)
         events.append((s.recorded_at, "US", equity, cf))
 
     for s in kr_snapshots:
-        equity = s.total_value_usd  # KR stores KRW directly
-        cf = getattr(s, "cash_flow", 0.0) or 0.0
+        equity = _snapshot_equity_krw(s, usd_krw, combined=integrated_combined)
+        cf = _snapshot_cash_flow_krw(s, usd_krw, combined=integrated_combined)
         events.append((s.recorded_at, "KR", equity, cf))
 
     events.sort(key=lambda x: x[0])
@@ -492,17 +650,8 @@ def _build_equity_timeline(
     return timeline
 
 
-def _calculate_twr(us_snapshots: list, kr_snapshots: list, usd_krw: float) -> float:
-    """Calculate TWR (Time-Weighted Return) across a period.
-
-    TWR splits the period at each cash flow event and chains sub-period returns:
-      TWR = prod(1 + Ri) - 1, where Ri = (end_equity - start_equity - cf) / start_equity
-
-    Uses carry-forward per-market equity (via _build_equity_timeline) so that
-    near-simultaneous US and KR snapshots with slightly different timestamps are
-    aggregated correctly rather than being compared against each other directly.
-    """
-    timeline = _build_equity_timeline(us_snapshots, kr_snapshots, usd_krw)
+def _calculate_twr_from_timeline(timeline: list[tuple[datetime, float, float]]) -> float:
+    """Calculate TWR from a pre-built combined timeline."""
     if len(timeline) < 2:
         return 0.0
 
@@ -520,11 +669,29 @@ def _calculate_twr(us_snapshots: list, kr_snapshots: list, usd_krw: float) -> fl
             )
             continue
 
-        # Sub-period return: gain excluding the cash flow
         sub_return = (curr_eq - curr_cf - prev_eq) / prev_eq
         compound *= 1.0 + sub_return
 
     return (compound - 1.0) * 100.0
+
+
+def _calculate_twr(
+    us_snapshots: list,
+    kr_snapshots: list,
+    usd_krw: float,
+    combined: bool = False,
+) -> float:
+    """Calculate TWR (Time-Weighted Return) across a period.
+
+    TWR splits the period at each cash flow event and chains sub-period returns:
+      TWR = prod(1 + Ri) - 1, where Ri = (end_equity - start_equity - cf) / start_equity
+
+    Uses carry-forward per-market equity (via _build_equity_timeline) so that
+    near-simultaneous US and KR snapshots with slightly different timestamps are
+    aggregated correctly rather than being compared against each other directly.
+    """
+    timeline = _build_equity_timeline(us_snapshots, kr_snapshots, usd_krw, combined=combined)
+    return _calculate_twr_from_timeline(timeline)
 
 
 @router.delete("/snapshots")

@@ -1,10 +1,10 @@
 """Tests for portfolio total_equity calculation — STOCK-1 / STOCK-12 / STOCK-59.
 
 Validates:
-- total_equity = kr_tot_evlu_amt + us_tot_asst_amt - shared_deposit (통합증거금)
+- total_equity = kr_tot_evlu_krw + us_position_value_krw (통합증거금)
 - Fallback: krw_total + usd_total * rate
 - No double-counting of shared deposit
-- available_cash = total_equity - total_position_value (current market value)
+- available_cash = KIS 주문가능예수금 (통합증거금) or total_equity - total_position_value
 - Exchange rate fallback chain
 """
 
@@ -33,6 +33,8 @@ def _make_app(
     full_account_usd: float = 0,
     full_available_usd: float = 0,
     kr_tot_evlu_amt: float = 0,
+    us_position_value_krw: float = 0,
+    withdrawable_total_krw: float = 0,
 ) -> FastAPI:
     """Create test app with configurable mock state."""
     app = FastAPI()
@@ -50,6 +52,8 @@ def _make_app(
     us_adapter._last_exchange_rate = last_exchange_rate
     us_adapter._full_account_usd = full_account_usd
     us_adapter._full_available_usd = full_available_usd
+    us_adapter._us_position_value_krw = us_position_value_krw
+    us_adapter._withdrawable_total_krw = withdrawable_total_krw
     us_adapter._fetch_exchange_rate = AsyncMock(return_value=adapter_exchange_rate)
 
     # KR adapter mock
@@ -73,28 +77,33 @@ def _make_app(
 
 
 class TestTotalEquityIntegratedMargin:
-    """통합증거금: total = kr_tot_evlu + us_tot_asst - shared_deposit."""
+    """통합증거금: total = kr_tot_evlu (already includes overseas).
+
+    2026-04-15: Fixed from kr_tot_evlu + us_position_value_krw (double-counted
+    overseas stocks) to kr_tot_evlu alone. KIS KR 총평가금액 already includes
+    예수금 + 국내주식 + 해외주식환산, so adding us_position_value is redundant.
+    """
 
     def test_combined_formula(self):
-        """Primary path: kr_tot_evlu + us_tot_asst - shared_deposit."""
-        # Real-world scenario: deposit 6M in both, KR stocks 2.7M, US stocks ~7.4M
-        kr_tot_evlu = 10_721_738  # deposit + KR stocks + some overseas
-        us_tot_asst = 14_544_921  # deposit + US stocks at broker rate
-        shared_deposit = 6_048_888
+        """Primary path: kr_tot_evlu alone (includes overseas eval)."""
+        kr_total = 8_654_115
+        kr_tot_evlu = 9_602_699
+        us_position_value_krw = 9_561_545
 
         app = _make_app(
-            tot_asst_krw=us_tot_asst,
-            tot_dncl_krw=shared_deposit,
+            kr_balance=Balance(currency="KRW", total=kr_total, available=4_183_180, locked=4_470_935),
             kr_tot_evlu_amt=kr_tot_evlu,
+            us_position_value_krw=us_position_value_krw,
         )
         client = TestClient(app)
         data = client.get("/api/v1/portfolio/summary").json()
 
-        expected = kr_tot_evlu + us_tot_asst - shared_deposit
+        # kr_tot_evlu already includes overseas, so no us_position_value added
+        expected = kr_tot_evlu
         assert abs(data["total_equity"] - expected) < 1.0
 
     def test_no_shared_deposit_skips_dedup(self):
-        """When tot_dncl_krw=0, falls back (no 통합증거금 detection)."""
+        """Without US position KRW value, falls back to prior branch."""
         app = _make_app(
             tot_asst_krw=14_544_921,
             tot_dncl_krw=0,  # no shared deposit info
@@ -108,17 +117,18 @@ class TestTotalEquityIntegratedMargin:
         assert abs(data["total_equity"] - expected) < 1.0
 
     def test_no_kr_tot_evlu_uses_us_plus_kr(self):
-        """When kr_tot_evlu_amt=0, falls to us_tot_asst + kr branch."""
+        """When KR raw total is missing, use KR balance total + US eval."""
         app = _make_app(
             tot_asst_krw=14_544_921,
             tot_dncl_krw=6_048_888,
+            us_position_value_krw=9_561_545,
             kr_tot_evlu_amt=0,  # not available
         )
         client = TestClient(app)
         data = client.get("/api/v1/portfolio/summary").json()
-        # Second branch: krw_total + us_tot_asst
+        # Integrated branch: krw_total + us_position_value_krw
         kr_default_total = 5_000_000
-        expected = kr_default_total + 14_544_921
+        expected = kr_default_total + 9_561_545
         assert abs(data["total_equity"] - expected) < 1.0
 
 
@@ -219,8 +229,21 @@ class TestResponseStructure:
         assert data["market"] == "ALL"
         for key in ["balance", "usd_balance", "exchange_rate", "total_equity",
                      "available_cash", "positions_count", "total_unrealized_pnl",
-                     "total_unrealized_pnl_usd"]:
+                     "total_unrealized_pnl_usd", "equity_breakdown", "cash_breakdown"]:
             assert key in data
+
+    def test_combined_summary_breakdown_fields(self):
+        app = _make_app(
+            kr_balance=Balance(currency="KRW", total=8_654_115, available=4_183_180, locked=4_470_935),
+            kr_tot_evlu_amt=9_602_699,
+            us_position_value_krw=9_561_545,
+            withdrawable_total_krw=4_183_090,
+        )
+        client = TestClient(app)
+        data = client.get("/api/v1/portfolio/summary").json()
+        assert data["equity_breakdown"]["formula"] == "kr_tot_evlu_krw (includes overseas)"
+        assert data["equity_breakdown"]["shared_deposit_krw"] == 0
+        assert data["cash_breakdown"]["combined_cash_krw"] == data["available_cash"]
 
     def test_usd_balance_fields(self):
         us_bal = Balance(currency="USD", total=5000, available=3000, locked=2000)
@@ -268,10 +291,10 @@ class TestResponseStructure:
 
 
 class TestUnifiedMarginAvailableCash:
-    """available_cash = total_equity - total_position_value (current market value)."""
+    """available_cash = KIS 주문가능예수금 (통합증거금) or equity - positions."""
 
     def test_available_cash_equals_equity_minus_positions(self):
-        """No positions → available_cash == total_equity."""
+        """No positions + no integrated raw fields → available_cash == total_equity."""
         kr_bal = Balance(currency="KRW", total=10_000_000, available=8_000_000, locked=2_000_000)
         us_bal = Balance(currency="USD", total=5000, available=3000, locked=2000)
         app = _make_app(
@@ -285,7 +308,7 @@ class TestUnifiedMarginAvailableCash:
         assert data["available_cash"] == data["total_equity"]
 
     def test_positions_reduce_available_cash(self):
-        """Positions at current market value reduce available_cash."""
+        """Fallback path: positions reduce available_cash."""
         kr_bal = Balance(currency="KRW", total=10_000_000, available=6_000_000, locked=4_000_000)
         us_bal = Balance(currency="USD", total=5000, available=3000, locked=2000)
         kr_positions = [
@@ -298,25 +321,33 @@ class TestUnifiedMarginAvailableCash:
                      avg_price=180, current_price=190, unrealized_pnl=50,
                      unrealized_pnl_pct=5.56),
         ]
-        # 통합증거금 path
-        kr_tot_evlu = 10_000_000
-        us_tot_asst = 12_000_000
-        us_tot_dncl = 5_000_000
         app = _make_app(
             kr_balance=kr_bal, us_balance=us_bal,
             kr_positions=kr_positions, us_positions=us_positions,
-            tot_asst_krw=us_tot_asst, tot_dncl_krw=us_tot_dncl,
-            kr_tot_evlu_amt=kr_tot_evlu,
             last_exchange_rate=1400.0,
             full_account_usd=5000, full_available_usd=3000,
         )
         client = TestClient(app)
         data = client.get("/api/v1/portfolio/summary").json()
-        total_equity = kr_tot_evlu + us_tot_asst - us_tot_dncl  # 17,000,000
+        total_equity = 10_000_000 + 5000 * 1400
         kr_pos_val = 10 * 72000  # 720,000
         us_pos_val = 5 * 190  # 950 USD → 950 * 1400 = 1,330,000
         expected = total_equity - kr_pos_val - us_pos_val * 1400
         assert abs(data["available_cash"] - expected) < 1.0
+
+    def test_integrated_margin_available_cash_uses_orderable_cash(self):
+        kr_bal = Balance(currency="KRW", total=8_654_115, available=4_183_180, locked=4_470_935)
+        us_bal = Balance(currency="USD", total=9152.06, available=2653.16, locked=6498.9)
+        app = _make_app(
+            kr_balance=kr_bal,
+            us_balance=us_bal,
+            kr_tot_evlu_amt=9_602_699,
+            us_position_value_krw=9_561_545,
+            withdrawable_total_krw=4_183_090,
+        )
+        client = TestClient(app)
+        data = client.get("/api/v1/portfolio/summary").json()
+        assert data["available_cash"] == 4_183_090
 
     def test_available_cash_never_negative(self):
         """available_cash is floored at 0."""
