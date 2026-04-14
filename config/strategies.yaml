@@ -642,6 +642,13 @@ markets:
       - cross_sectional_momentum
       - pead_drift
       - quality_factor
+      - trend_following
+      - donchian_breakout
+    # 2026-04-14: trend_following + donchian_breakout KR disable.
+    # KR 2y backtest: KR_only_dual_mom (+3.0% PF 1.09) was the only
+    # positive variant. trend_following produces contradictory SELL that
+    # dilutes dual_momentum BUY through the combiner (SK텔레콤 debug에서
+    # buy_norm 0.36 < min_confidence 0.40 → HOLD로 변환된 사례 확인).
     # Cash parking off for KR until validated. KR full-pipeline backtest
     # is currently broken-then-fixed (currency bug, see project memory),
     # so we don't yet have a clean validation run for parking in KR.
