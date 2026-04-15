@@ -197,13 +197,14 @@ async def _combined_summary(request: Request) -> dict:
     )
     shared_deposit_krw = us_tot_dncl
 
-    if kr_deposit_krw > 0 and us_position_value_krw > 0:
-        # 2026-04-15: 통합증거금 정확한 공식 (KIS 앱 확인).
-        # KIS 총자산 = 예수금 + 국내주식평가 + 해외주식평가
-        # kr_tot_evlu_amt는 해외증거금 차감 등이 섞여서 부정확.
-        # 직접 3개 필드 합산이 KIS 앱과 가장 근접 (시차 ~1만원 이내).
-        equity_formula = "kr_deposit + kr_stock_eval + us_position_value"
-        total_equity = kr_deposit_krw + kr_stock_eval_krw + us_position_value_krw
+    if kr_stock_eval_krw > 0 and usd_total > 0:
+        # 2026-04-16: 통합증거금 총자산 = 국내주식평가 + US계좌총액(USD) × 환율.
+        # US balance.total (CTRP6504R)은 예수금 + 해외주식평가를 이미 포함.
+        # 국내주식만 별도 더하면 KIS 앱 총자산과 1% 이내 일치.
+        # 이전 공식들이 실패한 이유: kr_deposit/kr_tot_evlu/us_position 조합은
+        # 통합증거금의 예수금 공유 구조에서 이중계산 또는 누락 발생.
+        equity_formula = "kr_stock_eval + us_total_usd * rate"
+        total_equity = kr_stock_eval_krw + usd_total * _cached_usd_krw
     elif krw_total > 0 and us_position_value_krw > 0:
         equity_formula = "kr_total_krw + us_position_value_krw"
         total_equity = krw_total + us_position_value_krw

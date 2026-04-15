@@ -89,24 +89,26 @@ class TestTotalEquityIntegratedMargin:
     """
 
     def test_combined_formula(self):
-        """Primary: deposit + KR stocks + US position = KIS 총자산."""
-        kr_total = 8_654_115
-        kr_tot_evlu = 9_602_699
-        us_position_value_krw = 9_561_545
-        kr_deposit = 4_183_180
+        """Primary: kr_stock_eval + US_total_USD × rate = KIS 총자산.
+
+        2026-04-16: US balance.total already includes deposit + overseas
+        stocks. Just add domestic stock eval on top.
+        """
         kr_stock_eval = 2_316_380
+        us_total_usd = 10_000.0
+        rate = 1400.0
 
         app = _make_app(
-            kr_balance=Balance(currency="KRW", total=kr_total, available=kr_deposit, locked=4_470_935),
-            kr_tot_evlu_amt=kr_tot_evlu,
-            us_position_value_krw=us_position_value_krw,
-            kr_deposit_krw=kr_deposit,
+            us_balance=Balance(currency="USD", total=us_total_usd, available=3000, locked=7000),
             kr_stock_eval_krw=kr_stock_eval,
+            kr_tot_evlu_amt=9_602_699,
+            us_position_value_krw=9_561_545,
+            last_exchange_rate=rate,
         )
         client = TestClient(app)
         data = client.get("/api/v1/portfolio/summary").json()
 
-        expected = kr_deposit + kr_stock_eval + us_position_value_krw
+        expected = kr_stock_eval + us_total_usd * rate
         assert abs(data["total_equity"] - expected) < 1.0
 
     def test_no_shared_deposit_skips_dedup(self):
@@ -250,7 +252,7 @@ class TestResponseStructure:
         )
         client = TestClient(app)
         data = client.get("/api/v1/portfolio/summary").json()
-        assert data["equity_breakdown"]["formula"] == "kr_deposit + kr_stock_eval + us_position_value"
+        assert data["equity_breakdown"]["formula"] == "kr_stock_eval + us_total_usd * rate"
         assert data["cash_breakdown"]["combined_cash_krw"] == data["available_cash"]
 
     def test_usd_balance_fields(self):
