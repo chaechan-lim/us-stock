@@ -145,10 +145,15 @@ export default function Dashboard() {
               return (
                 <div key={p.symbol} className={`px-4 py-3 ${isActive ? '' : 'opacity-40'}`}>
                   <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-2">
+                    <div className="flex items-center gap-2 min-w-0">
                       <MktTag mkt={mkt} />
-                      <span className="font-semibold text-sm text-gray-900">{p.symbol}</span>
-                      {ext.trailing_active && <span className="text-[10px] font-medium text-amber-600 bg-amber-50 px-1 rounded">T</span>}
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-1">
+                          <span className="font-semibold text-sm text-gray-900">{p.symbol}</span>
+                          {ext.trailing_active && <span className="text-[10px] font-medium text-amber-600 bg-amber-50 px-1 rounded">T</span>}
+                        </div>
+                        {p.name && <div className="text-[11px] text-gray-400 truncate">{p.name}</div>}
+                      </div>
                     </div>
                     <div className="text-right">
                       <div className={`text-sm font-semibold ${pnl >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>

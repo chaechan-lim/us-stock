@@ -601,7 +601,7 @@ markets:
     cash_parking:
       enabled: true
       symbol: SPY
-      threshold: 0.30   # park when cash > 30% of equity
+      threshold: 0.50   # park when cash > 50% (burst용 현금 확보 + 수수료 절약)
       buffer: 0.10      # keep 10% of equity in cash for opportunities
   KR:
     # 2026-04-08 — full KR re-evaluation after the KR-currency bug fix

@@ -550,7 +550,7 @@ async def lifespan(app: FastAPI):
     # without a backend restart. Static-once params (max_sector_pct,
     # min_confidence, min_active_ratio) stay here.
     evaluation_loop.set_max_sector_pct(config.risk.max_sector_pct)
-    evaluation_loop.set_min_confidence(0.30)
+    evaluation_loop.set_min_confidence(0.30)  # lowered from 0.50 — backtest V1: Sharpe 0.95→1.20
     evaluation_loop.set_min_active_ratio(0.0)
     _apply_us_eval_overrides(evaluation_loop, registry.config_loader)
     app.state.apply_us_eval_overrides = lambda: _apply_us_eval_overrides(
