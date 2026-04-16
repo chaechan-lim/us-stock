@@ -275,6 +275,8 @@ class PipelineConfig:
     enable_cash_parking: bool = False   # Park idle cash in SPY
     cash_parking_symbol: str = "SPY"
     cash_parking_threshold: float = 0.30  # Park if cash > 30% of portfolio
+    cash_parking_skip_downtrend: bool = False  # Skip parking in WEAK_DOWNTREND/DOWNTREND
+    cash_parking_sell_on_downtrend: bool = False  # Force-sell SPY parking when regime turns down
 
     # Leveraged ETF allocation
     enable_leveraged_etf: bool = False
@@ -856,7 +858,7 @@ class FullPipelineBacktest:
 
             # 4e4. Cash parking — invest idle cash in SPY
             if cfg.enable_cash_parking:
-                self._manage_cash_parking(stock_data, date_idx, date)
+                self._manage_cash_parking(stock_data, date_idx, date, regime_str)
 
             # 4f. Update equity and snapshot
             equity = self._calculate_equity(stock_data, date_idx)
@@ -912,7 +914,7 @@ class FullPipelineBacktest:
     # ------------------------------------------------------------------
 
     def _manage_cash_parking(
-        self, stock_data: dict, date_idx: int, date,
+        self, stock_data: dict, date_idx: int, date, regime_str: str = "uptrend",
     ) -> None:
         """Park excess cash in SPY to reduce cash drag.
 
@@ -921,9 +923,25 @@ class FullPipelineBacktest:
         """
         cfg = self._config
         parking_sym = cfg.cash_parking_symbol
+        is_down = regime_str in ("weak_downtrend", "downtrend")
+
+        # Sell existing parking on downtrend if configured
+        if (
+            cfg.cash_parking_sell_on_downtrend
+            and is_down
+            and parking_sym in self._positions
+        ):
+            data = stock_data.get(parking_sym)
+            if data and date_idx < len(data.df):
+                price = float(data.df.iloc[date_idx]["close"])
+                self._close_position(parking_sym, price, date, "cash_parking_regime_exit")
 
         # Skip if already holding parking position
         if parking_sym in self._positions:
+            return
+
+        # Skip parking entirely in downtrend if configured
+        if cfg.cash_parking_skip_downtrend and is_down:
             return
 
         data = stock_data.get(parking_sym)
