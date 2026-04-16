@@ -5,22 +5,26 @@ import { usePriceStream } from '../hooks/usePriceStream'
 import { fetchMacroIndicators, fetchMarketState, fetchTradeSummaryPeriods } from '../api/client'
 import type { PeriodReturn } from '../api/client'
 import { formatCurrency } from '../utils/format'
-import { useAccount, hexToRgba } from '../contexts/AccountContext'
+import { useAccount } from '../contexts/AccountContext'
 
 function PnLText({ value, currency }: { value: number; currency: string }) {
-  const color = value >= 0 ? 'text-emerald-500' : 'text-rose-500'
+  const color = value >= 0 ? 'text-emerald-600' : 'text-rose-600'
   const sign = value >= 0 ? '+' : ''
-  return <span className={color}>{sign}{formatCurrency(value, currency)}</span>
+  return <span className={`font-medium ${color}`}>{sign}{formatCurrency(value, currency)}</span>
 }
 
-function PctText({ value }: { value: number }) {
-  const color = value >= 0 ? 'text-emerald-500' : 'text-rose-500'
+function PctBadge({ value }: { value: number }) {
+  const bg = value >= 0 ? 'bg-emerald-50 text-emerald-700' : 'bg-rose-50 text-rose-700'
   const sign = value >= 0 ? '+' : ''
-  return <span className={color}>{sign}{value.toFixed(2)}%</span>
+  return (
+    <span className={`inline-block px-1.5 py-0.5 rounded-md text-[11px] font-semibold ${bg}`}>
+      {sign}{value.toFixed(2)}%
+    </span>
+  )
 }
 
 export default function Dashboard() {
-  const { selectedAccountId, selectedAccount, accountColor } = useAccount()
+  const { selectedAccountId, selectedAccount } = useAccount()
   const { data: summary, isLoading } = usePortfolioSummary('ALL', selectedAccountId)
   const { data: positions } = usePositions('ALL', selectedAccountId)
   const { data: engineStatus } = useEngineStatus()
@@ -35,10 +39,7 @@ export default function Dashboard() {
     queryFn: () => fetchTradeSummaryPeriods('KR', selectedAccountId),
     refetchInterval: 60_000,
   })
-  const symbols = useMemo(
-    () => (positions ?? []).map(p => p.symbol),
-    [positions],
-  )
+  const symbols = useMemo(() => (positions ?? []).map(p => p.symbol), [positions])
   const { prices, connected } = usePriceStream(symbols)
 
   const usPhase = engineStatus?.market_phase ?? 'closed'
@@ -68,31 +69,25 @@ export default function Dashboard() {
     (summary.balance.total + (summary.usd_balance?.total ?? 0) * rate)
 
   return (
-    <div className="space-y-4 pb-8">
-      {/* Market Status Bar */}
-      <div className="flex items-center gap-2 flex-wrap">
+    <div className="min-h-screen bg-gray-50 -mx-4 -mt-4 px-4 pt-4 pb-8 sm:px-6">
+      {/* Header */}
+      <div className="flex flex-wrap items-center gap-2 mb-5">
         <MarketPill label="US" phase={usPhase} />
         <MarketPill label="KR" phase={krPhase} />
         {connected && (
-          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium bg-emerald-500/10 text-emerald-500">
+          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium bg-emerald-100 text-emerald-700">
             <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
             Live
           </span>
         )}
         {selectedAccount && (
-          <span
-            className="ml-auto text-[11px] px-2 py-0.5 rounded-full font-medium"
-            style={{
-              backgroundColor: hexToRgba(accountColor(selectedAccount.account_id), 0.15),
-              color: accountColor(selectedAccount.account_id),
-            }}
-          >
+          <span className="text-[11px] px-2 py-0.5 rounded-full font-medium bg-gray-200 text-gray-600">
             {selectedAccount.name}
           </span>
         )}
       </div>
 
-      {/* Equity Hero */}
+      {/* Equity Hero Card */}
       <EquityCard
         totalEquity={totalEquity}
         hasUsd={!!hasUsd}
@@ -102,31 +97,26 @@ export default function Dashboard() {
         returns={returns}
       />
 
-      {/* Quick Stats Row */}
-      <div className="grid grid-cols-3 gap-3">
-        <MiniCard
-          label="Cash"
-          value={formatCurrency(summary.available_cash ?? summary.balance.available, 'KRW')}
-        />
-        <MiniCard label="Positions" value={String(summary.positions_count)} />
-        <MiniCard
-          label="P&L"
+      {/* Quick Stats */}
+      <div className="grid grid-cols-3 gap-3 mt-4">
+        <StatCard label="Cash" value={formatCurrency(summary.available_cash ?? summary.balance.available, 'KRW')} />
+        <StatCard label="Positions" value={String(summary.positions_count)} />
+        <StatCard
+          label="Unrealized"
           value={
-            <span className={summary.total_unrealized_pnl >= 0 ? 'text-emerald-500' : 'text-rose-500'}>
+            <span className={summary.total_unrealized_pnl >= 0 ? 'text-emerald-600' : 'text-rose-600'}>
               {summary.total_unrealized_pnl >= 0 ? '+' : ''}{formatCurrency(summary.total_unrealized_pnl, 'KRW')}
             </span>
           }
-          sub={summary.total_unrealized_pnl_pct != null
-            ? `${summary.total_unrealized_pnl_pct >= 0 ? '+' : ''}${summary.total_unrealized_pnl_pct.toFixed(1)}%`
-            : undefined
-          }
-          subColor={summary.total_unrealized_pnl_pct != null && summary.total_unrealized_pnl_pct >= 0 ? 'text-emerald-500' : 'text-rose-500'}
+          sub={summary.total_unrealized_pnl_pct != null ? (
+            <PctBadge value={summary.total_unrealized_pnl_pct} />
+          ) : undefined}
         />
       </div>
 
       {/* Realized P&L */}
       {(usTradeSummary || krTradeSummary) && (
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mt-4">
           <PnLCard label="Today" us={usTradeSummary?.today} kr={krTradeSummary?.today} />
           <PnLCard label="Week" us={usTradeSummary?.week} kr={krTradeSummary?.week} />
           <PnLCard label="Month" us={usTradeSummary?.month} kr={krTradeSummary?.month} />
@@ -136,49 +126,43 @@ export default function Dashboard() {
 
       {/* Holdings */}
       {sortedPositions.length > 0 && (
-        <div className="bg-gray-900/60 backdrop-blur rounded-2xl overflow-hidden">
-          <div className="px-4 py-3 border-b border-white/5">
-            <h2 className="text-sm font-semibold text-gray-200">Holdings</h2>
+        <div className="mt-4 bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
+          <div className="px-4 py-3 border-b border-gray-100">
+            <h2 className="text-sm font-semibold text-gray-900">Holdings</h2>
           </div>
 
-          {/* Mobile card view */}
-          <div className="divide-y divide-white/5 md:hidden">
+          {/* Mobile */}
+          <div className="divide-y divide-gray-100 md:hidden">
             {sortedPositions.map(p => {
               const mkt = (p as { market?: string }).market ?? 'US'
               const cur = mkt === 'KR' ? 'KRW' : 'USD'
               const live = prices[p.symbol]
               const currentPrice = live?.price ?? p.current_price
               const pnl = (currentPrice - p.avg_price) * p.quantity
-              const pnlPct = p.avg_price > 0
-                ? ((currentPrice - p.avg_price) / p.avg_price) * 100
-                : 0
+              const pnlPct = p.avg_price > 0 ? ((currentPrice - p.avg_price) / p.avg_price) * 100 : 0
               const isActive = (mkt === 'KR' && krActive) || (mkt === 'US' && usActive)
               const ext = p as { stop_loss_pct?: number; take_profit_pct?: number; trailing_active?: boolean }
               return (
-                <div key={p.symbol} className={`px-4 py-3 ${isActive ? '' : 'opacity-50'}`}>
+                <div key={p.symbol} className={`px-4 py-3 ${isActive ? '' : 'opacity-40'}`}>
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-2">
-                      <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-medium ${
-                        mkt === 'KR' ? 'bg-violet-500/15 text-violet-400' : 'bg-sky-500/15 text-sky-400'
-                      }`}>{mkt}</span>
-                      <span className="font-semibold text-sm text-white">{p.symbol}</span>
-                      {ext.trailing_active && <span className="text-[10px] text-amber-400">T</span>}
+                      <MktTag mkt={mkt} />
+                      <span className="font-semibold text-sm text-gray-900">{p.symbol}</span>
+                      {ext.trailing_active && <span className="text-[10px] font-medium text-amber-600 bg-amber-50 px-1 rounded">T</span>}
                     </div>
                     <div className="text-right">
-                      <div className={`text-sm font-semibold ${pnl >= 0 ? 'text-emerald-500' : 'text-rose-500'}`}>
+                      <div className={`text-sm font-semibold ${pnl >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>
                         {pnl >= 0 ? '+' : ''}{formatCurrency(pnl, cur)}
                       </div>
-                      <div className={`text-[11px] ${pnlPct >= 0 ? 'text-emerald-500/70' : 'text-rose-500/70'}`}>
-                        {pnlPct >= 0 ? '+' : ''}{pnlPct.toFixed(1)}%
-                      </div>
+                      <PctBadge value={pnlPct} />
                     </div>
                   </div>
-                  <div className="flex items-center justify-between mt-1.5 text-[11px] text-gray-500">
-                    <span>{p.quantity}주 @ {formatCurrency(p.avg_price, cur)}</span>
+                  <div className="flex items-center justify-between mt-1 text-[11px] text-gray-400">
+                    <span>{p.quantity}주 · avg {formatCurrency(p.avg_price, cur)}</span>
                     <span>
-                      <span className="text-rose-400/50">SL -{((ext.stop_loss_pct ?? 0.08) * 100).toFixed(0)}%</span>
-                      {' · '}
-                      <span className="text-emerald-400/50">TP +{((ext.take_profit_pct ?? 0.20) * 100).toFixed(0)}%</span>
+                      SL <span className="text-rose-400">-{((ext.stop_loss_pct ?? 0.08) * 100).toFixed(0)}%</span>
+                      {' / '}
+                      TP <span className="text-emerald-400">+{((ext.take_profit_pct ?? 0.20) * 100).toFixed(0)}%</span>
                     </span>
                   </div>
                 </div>
@@ -186,11 +170,11 @@ export default function Dashboard() {
             })}
           </div>
 
-          {/* Desktop table view */}
+          {/* Desktop */}
           <div className="hidden md:block overflow-x-auto">
             <table className="w-full text-sm">
-              <thead className="text-gray-500 text-xs">
-                <tr className="border-b border-white/5">
+              <thead>
+                <tr className="border-b border-gray-100 text-xs text-gray-500">
                   <th className="text-left py-2.5 px-4 font-medium">Symbol</th>
                   <th className="text-center py-2.5 font-medium">Mkt</th>
                   <th className="text-right py-2.5 font-medium">Qty</th>
@@ -208,34 +192,26 @@ export default function Dashboard() {
                   const live = prices[p.symbol]
                   const currentPrice = live?.price ?? p.current_price
                   const pnl = (currentPrice - p.avg_price) * p.quantity
-                  const pnlPct = p.avg_price > 0
-                    ? ((currentPrice - p.avg_price) / p.avg_price) * 100
-                    : 0
+                  const pnlPct = p.avg_price > 0 ? ((currentPrice - p.avg_price) / p.avg_price) * 100 : 0
                   const isActive = (mkt === 'KR' && krActive) || (mkt === 'US' && usActive)
                   const ext = p as { stop_loss_pct?: number; take_profit_pct?: number; trailing_active?: boolean }
-                  const slPct = ext.stop_loss_pct ?? 0.08
-                  const tpPct = ext.take_profit_pct ?? 0.20
                   return (
-                    <tr key={p.symbol} className={`border-b border-white/5 hover:bg-white/[0.02] transition ${isActive ? '' : 'opacity-50'}`}>
+                    <tr key={p.symbol} className={`border-b border-gray-50 hover:bg-gray-50/50 transition ${isActive ? '' : 'opacity-40'}`}>
                       <td className="py-2.5 px-4">
-                        <span className="font-medium">{p.symbol}</span>
-                        {p.name && <span className="text-gray-600 text-xs ml-1.5 hidden lg:inline">{p.name}</span>}
+                        <span className="font-medium text-gray-900">{p.symbol}</span>
+                        {p.name && <span className="text-gray-400 text-xs ml-1.5 hidden lg:inline">{p.name}</span>}
                       </td>
-                      <td className="text-center">
-                        <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-medium ${
-                          mkt === 'KR' ? 'bg-violet-500/15 text-violet-400' : 'bg-sky-500/15 text-sky-400'
-                        }`}>{mkt}</span>
-                      </td>
-                      <td className="text-right tabular-nums">{p.quantity}</td>
-                      <td className="text-right tabular-nums">{formatCurrency(p.avg_price, cur)}</td>
-                      <td className="text-right tabular-nums">{formatCurrency(currentPrice, cur)}</td>
+                      <td className="text-center"><MktTag mkt={mkt} /></td>
+                      <td className="text-right tabular-nums text-gray-700">{p.quantity}</td>
+                      <td className="text-right tabular-nums text-gray-700">{formatCurrency(p.avg_price, cur)}</td>
+                      <td className="text-right tabular-nums text-gray-900 font-medium">{formatCurrency(currentPrice, cur)}</td>
                       <td className="text-right"><PnLText value={pnl} currency={cur} /></td>
-                      <td className="text-right"><PctText value={pnlPct} /></td>
-                      <td className="text-right px-4 text-xs text-gray-600">
-                        <span className="text-rose-400/60">-{(slPct * 100).toFixed(0)}%</span>
+                      <td className="text-right"><PctBadge value={pnlPct} /></td>
+                      <td className="text-right px-4 text-xs text-gray-400">
+                        <span className="text-rose-400">-{((ext.stop_loss_pct ?? 0.08) * 100).toFixed(0)}%</span>
                         {' / '}
-                        <span className="text-emerald-400/60">+{(tpPct * 100).toFixed(0)}%</span>
-                        {ext.trailing_active && <span className="ml-1 text-amber-400/70">T</span>}
+                        <span className="text-emerald-400">+{((ext.take_profit_pct ?? 0.20) * 100).toFixed(0)}%</span>
+                        {ext.trailing_active && <span className="ml-1 text-amber-500 font-medium">T</span>}
                       </td>
                     </tr>
                   )
@@ -247,31 +223,62 @@ export default function Dashboard() {
       )}
 
       {/* Market & Macro */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4">
         <MarketStateCard />
-        <MacroIndicatorsCard />
+        <MacroCard />
       </div>
     </div>
   )
 }
 
-/* ─── Sub-components ─── */
+/* ─── Shared Components ─── */
 
 function MarketPill({ label, phase }: { label: string; phase: string }) {
   const isOpen = phase === 'regular'
   const isPre = phase === 'pre_market'
   const isAfter = phase === 'after_hours'
 
-  const bg = isOpen ? 'bg-emerald-500/10' : isPre ? 'bg-sky-500/10' : isAfter ? 'bg-amber-500/10' : 'bg-gray-800'
-  const text = isOpen ? 'text-emerald-500' : isPre ? 'text-sky-400' : isAfter ? 'text-amber-400' : 'text-gray-500'
-  const dot = isOpen ? 'bg-emerald-500' : isPre ? 'bg-sky-400' : isAfter ? 'bg-amber-400' : 'bg-gray-600'
+  const style = isOpen
+    ? 'bg-emerald-100 text-emerald-700'
+    : isPre
+      ? 'bg-sky-100 text-sky-700'
+      : isAfter
+        ? 'bg-amber-100 text-amber-700'
+        : 'bg-gray-100 text-gray-500'
+
+  const dot = isOpen
+    ? 'bg-emerald-500'
+    : isPre
+      ? 'bg-sky-500'
+      : isAfter
+        ? 'bg-amber-500'
+        : 'bg-gray-400'
+
   const phaseLabel = isOpen ? 'Open' : isPre ? 'Pre' : isAfter ? 'After' : 'Closed'
 
   return (
-    <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-medium ${bg} ${text}`}>
+    <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-semibold ${style}`}>
       <span className={`w-1.5 h-1.5 rounded-full ${dot} ${isOpen ? 'animate-pulse' : ''}`} />
       {label} {phaseLabel}
     </span>
+  )
+}
+
+function MktTag({ mkt }: { mkt: string }) {
+  return (
+    <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-semibold ${
+      mkt === 'KR' ? 'bg-violet-100 text-violet-700' : 'bg-sky-100 text-sky-700'
+    }`}>{mkt}</span>
+  )
+}
+
+function StatCard({ label, value, sub }: { label: string; value: React.ReactNode; sub?: React.ReactNode }) {
+  return (
+    <div className="bg-white rounded-xl shadow-sm border border-gray-100 px-3 py-2.5">
+      <div className="text-[10px] text-gray-400 font-semibold uppercase tracking-wider">{label}</div>
+      <div className="text-sm font-bold text-gray-900 mt-0.5 truncate">{value}</div>
+      {sub && <div className="mt-0.5">{sub}</div>}
+    </div>
   )
 }
 
@@ -288,25 +295,27 @@ function EquityCard({
   const ret = returns?.[period] ?? null
 
   return (
-    <div className="bg-gray-900/60 backdrop-blur rounded-2xl p-5">
-      <div className="text-xs text-gray-500 font-medium mb-1">Total Equity</div>
-      <div className="text-3xl font-bold tracking-tight">{formatCurrency(totalEquity, 'KRW')}</div>
+    <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-5">
+      <div className="text-xs text-gray-400 font-semibold uppercase tracking-wider">Total Equity</div>
+      <div className="text-3xl font-extrabold text-gray-900 tracking-tight mt-1">
+        {formatCurrency(totalEquity, 'KRW')}
+      </div>
       {hasUsd && (
-        <div className="text-xs text-gray-600 mt-0.5">
-          KRW {formatCurrency(krwTotal, 'KRW')} · USD {formatCurrency(usdTotal, 'USD')} · {'\u20A9'}{rate.toFixed(0)}
+        <div className="text-xs text-gray-400 mt-1">
+          KRW {formatCurrency(krwTotal, 'KRW')} · USD {formatCurrency(usdTotal, 'USD')} · ₩{rate.toFixed(0)}
         </div>
       )}
       {returns && (
-        <div className="mt-3 pt-3 border-t border-white/5">
-          <div className="flex items-center gap-1 mb-1.5">
+        <div className="mt-3 pt-3 border-t border-gray-100">
+          <div className="flex items-center gap-1 mb-2">
             {(['daily', 'weekly', 'monthly'] as ReturnPeriod[]).map(p => (
               <button
                 key={p}
                 onClick={() => setPeriod(p)}
-                className={`px-2 py-0.5 text-[11px] rounded-full font-medium transition ${
+                className={`px-2.5 py-1 text-[11px] rounded-full font-semibold transition ${
                   period === p
-                    ? 'bg-white/10 text-white'
-                    : 'text-gray-600 hover:text-gray-400'
+                    ? 'bg-gray-900 text-white'
+                    : 'text-gray-400 hover:bg-gray-100 hover:text-gray-600'
                 }`}
               >
                 {labels[p]}
@@ -315,18 +324,16 @@ function EquityCard({
           </div>
           {ret ? (
             <div className="flex items-baseline gap-2">
-              <span className={`text-lg font-bold ${ret.change >= 0 ? 'text-emerald-500' : 'text-rose-500'}`}>
+              <span className={`text-lg font-bold ${ret.change >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>
                 {ret.change >= 0 ? '+' : ''}{formatCurrency(ret.change, 'KRW')}
               </span>
-              <span className={`text-xs font-medium ${ret.pct >= 0 ? 'text-emerald-500/70' : 'text-rose-500/70'}`}>
-                {ret.pct >= 0 ? '+' : ''}{ret.pct.toFixed(2)}%
-              </span>
+              <PctBadge value={ret.pct} />
               {ret.has_cash_flows && (
-                <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-amber-500/10 text-amber-400 font-medium">TWR</span>
+                <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-amber-50 text-amber-600 font-semibold">TWR</span>
               )}
             </div>
           ) : (
-            <div className="text-xs text-gray-700">No data yet</div>
+            <div className="text-xs text-gray-300">No data yet</div>
           )}
         </div>
       )}
@@ -334,41 +341,31 @@ function EquityCard({
   )
 }
 
-function MiniCard({ label, value, sub, subColor }: { label: string; value: React.ReactNode; sub?: string; subColor?: string }) {
-  return (
-    <div className="bg-gray-900/60 backdrop-blur rounded-xl px-3 py-2.5">
-      <div className="text-[10px] text-gray-500 font-medium uppercase tracking-wider">{label}</div>
-      <div className="text-base font-bold mt-0.5 truncate">{value}</div>
-      {sub && <div className={`text-[10px] mt-0.5 ${subColor ?? 'text-gray-500'}`}>{sub}</div>}
-    </div>
-  )
-}
-
 function MarketStateCard() {
-  const { data: marketState, isLoading } = useQuery({
+  const { data: ms, isLoading } = useQuery({
     queryKey: ['engine', 'market-state'],
     queryFn: fetchMarketState,
     refetchInterval: 60_000,
   })
 
   return (
-    <div className="bg-gray-900/60 backdrop-blur rounded-2xl p-4">
-      <h2 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3">Market State</h2>
-      {isLoading && <p className="text-gray-600 text-sm">Loading...</p>}
-      {marketState && (
-        <div className="space-y-3">
-          <div className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
-            <StatRow label="US Phase" value={marketState.market_phase ?? '-'} color={phaseColor(marketState.market_phase ?? '')} />
-            <StatRow label="Regime" value={marketState.regime ?? '-'} />
-            <StatRow label="SPY" value={marketState.spy_price != null ? `$${Number(marketState.spy_price).toFixed(2)}` : '-'} />
-            <StatRow label="VIX" value={marketState.vix_level != null ? Number(marketState.vix_level).toFixed(1) : '-'} />
+    <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-4">
+      <h2 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3">Market</h2>
+      {isLoading && <p className="text-gray-300 text-sm">Loading...</p>}
+      {ms && (
+        <div className="space-y-3 text-sm">
+          <div className="grid grid-cols-2 gap-x-4 gap-y-1.5">
+            <InfoRow label="US" value={ms.market_phase ?? '-'} color={phaseTextColor(ms.market_phase ?? '')} />
+            <InfoRow label="Regime" value={ms.regime ?? '-'} />
+            <InfoRow label="SPY" value={ms.spy_price != null ? `$${Number(ms.spy_price).toFixed(2)}` : '-'} />
+            <InfoRow label="VIX" value={ms.vix_level != null ? Number(ms.vix_level).toFixed(1) : '-'} />
           </div>
-          <div className="border-t border-white/5 pt-3">
-            <div className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
-              <StatRow label="KR Phase" value={marketState.kr_market_phase ?? '-'} color={phaseColor(marketState.kr_market_phase ?? '')} />
-              <StatRow label="KR Regime" value={marketState.kr_regime ?? '-'} />
-              {marketState.kr_index_price != null && (
-                <StatRow label="KODEX 200" value={`₩${Number(marketState.kr_index_price).toLocaleString()}`} />
+          <div className="border-t border-gray-100 pt-2">
+            <div className="grid grid-cols-2 gap-x-4 gap-y-1.5">
+              <InfoRow label="KR" value={ms.kr_market_phase ?? '-'} color={phaseTextColor(ms.kr_market_phase ?? '')} />
+              <InfoRow label="Regime" value={ms.kr_regime ?? '-'} />
+              {ms.kr_index_price != null && (
+                <InfoRow label="KODEX" value={`₩${Number(ms.kr_index_price).toLocaleString()}`} />
               )}
             </div>
           </div>
@@ -378,44 +375,44 @@ function MarketStateCard() {
   )
 }
 
-function StatRow({ label, value, color }: { label: string; value: string; color?: string }) {
-  return (
-    <div>
-      <div className="text-[10px] text-gray-600">{label}</div>
-      <div className={`font-medium ${color ?? 'text-gray-200'}`}>{value}</div>
-    </div>
-  )
-}
-
-function phaseColor(phase: string) {
-  if (phase === 'regular') return 'text-emerald-400'
-  if (phase === 'pre_market') return 'text-sky-400'
-  if (phase === 'after_hours') return 'text-amber-400'
-  return 'text-gray-500'
-}
-
-function MacroIndicatorsCard() {
-  const { data: macro, isLoading } = useQuery({
+function MacroCard() {
+  const { data: m, isLoading } = useQuery({
     queryKey: ['engine', 'macro'],
     queryFn: fetchMacroIndicators,
     refetchInterval: 60_000,
   })
 
   return (
-    <div className="bg-gray-900/60 backdrop-blur rounded-2xl p-4">
+    <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-4">
       <h2 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3">Macro</h2>
-      {isLoading && <p className="text-gray-600 text-sm">Loading...</p>}
-      {macro && (
-        <div className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
-          <StatRow label="Fed Rate" value={macro.fed_funds_rate != null ? `${Number(macro.fed_funds_rate).toFixed(2)}%` : '-'} />
-          <StatRow label="10Y Yield" value={macro.treasury_10y != null ? `${Number(macro.treasury_10y).toFixed(2)}%` : '-'} />
-          <StatRow label="Spread" value={macro.yield_spread != null ? `${Number(macro.yield_spread).toFixed(2)}%` : '-'} />
-          <StatRow label="CPI YoY" value={macro.cpi_yoy != null ? `${Number(macro.cpi_yoy).toFixed(2)}%` : '-'} />
-          <StatRow label="Unemployment" value={macro.unemployment_rate != null ? `${Number(macro.unemployment_rate).toFixed(1)}%` : '-'} />
+      {isLoading && <p className="text-gray-300 text-sm">Loading...</p>}
+      {m && (
+        <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 text-sm">
+          <InfoRow label="Fed Rate" value={m.fed_funds_rate != null ? `${Number(m.fed_funds_rate).toFixed(2)}%` : '-'} />
+          <InfoRow label="10Y" value={m.treasury_10y != null ? `${Number(m.treasury_10y).toFixed(2)}%` : '-'} />
+          <InfoRow label="Spread" value={m.yield_spread != null ? `${Number(m.yield_spread).toFixed(2)}%` : '-'} />
+          <InfoRow label="CPI" value={m.cpi_yoy != null ? `${Number(m.cpi_yoy).toFixed(2)}%` : '-'} />
+          <InfoRow label="Unemp." value={m.unemployment_rate != null ? `${Number(m.unemployment_rate).toFixed(1)}%` : '-'} />
         </div>
       )}
     </div>
   )
+}
+
+function InfoRow({ label, value, color }: { label: string; value: string; color?: string }) {
+  return (
+    <div className="flex items-baseline justify-between">
+      <span className="text-gray-400 text-xs">{label}</span>
+      <span className={`font-medium ${color ?? 'text-gray-900'}`}>{value}</span>
+    </div>
+  )
+}
+
+function phaseTextColor(phase: string) {
+  if (phase === 'regular') return 'text-emerald-600'
+  if (phase === 'pre_market') return 'text-sky-600'
+  if (phase === 'after_hours') return 'text-amber-600'
+  return 'text-gray-400'
 }
 
 interface PeriodData { pnl: number; pnl_pct: number | null; trades: number; wins: number; losses: number; win_rate: number }
@@ -425,51 +422,36 @@ function PnLCard({ label, us, kr }: { label: string; us?: PeriodData; kr?: Perio
   const hasUs = (us?.trades ?? 0) > 0
 
   return (
-    <div className="bg-gray-900/60 backdrop-blur rounded-xl p-3">
-      <div className="text-[10px] text-gray-500 font-medium uppercase tracking-wider mb-1.5">{label}</div>
+    <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-3">
+      <div className="text-[10px] text-gray-400 font-semibold uppercase tracking-wider mb-1.5">{label}</div>
       {!hasKr && !hasUs ? (
-        <div className="text-sm text-gray-700">—</div>
+        <div className="text-sm text-gray-300">—</div>
       ) : (
         <div className="space-y-1.5">
-          {hasKr && (
-            <PnLLine
-              tag="KR" tagColor="text-violet-400 bg-violet-500/10"
-              pnl={kr!.pnl} pnlPct={kr!.pnl_pct} currency="KRW"
-              trades={kr!.trades} wins={kr!.wins} losses={kr!.losses}
-            />
-          )}
-          {hasUs && (
-            <PnLLine
-              tag="US" tagColor="text-sky-400 bg-sky-500/10"
-              pnl={us!.pnl} pnlPct={us!.pnl_pct} currency="USD"
-              trades={us!.trades} wins={us!.wins} losses={us!.losses}
-            />
-          )}
+          {hasKr && <PnLLine tag="KR" pnl={kr!.pnl} pnlPct={kr!.pnl_pct} currency="KRW" trades={kr!.trades} wins={kr!.wins} losses={kr!.losses} />}
+          {hasUs && <PnLLine tag="US" pnl={us!.pnl} pnlPct={us!.pnl_pct} currency="USD" trades={us!.trades} wins={us!.wins} losses={us!.losses} />}
         </div>
       )}
     </div>
   )
 }
 
-function PnLLine({ tag, tagColor, pnl, pnlPct, currency, trades, wins, losses }: {
-  tag: string; tagColor: string
-  pnl: number; pnlPct?: number | null; currency: string
+function PnLLine({ tag, pnl, pnlPct, currency, trades, wins, losses }: {
+  tag: string; pnl: number; pnlPct?: number | null; currency: string
   trades: number; wins: number; losses: number
 }) {
-  const color = pnl >= 0 ? 'text-emerald-500' : 'text-rose-500'
+  const tagStyle = tag === 'KR' ? 'bg-violet-100 text-violet-700' : 'bg-sky-100 text-sky-700'
   return (
     <div>
       <div className="flex items-center gap-1.5">
-        <span className={`text-[9px] px-1 py-0.5 rounded-full font-medium ${tagColor}`}>{tag}</span>
-        <span className={`text-sm font-bold ${color}`}>
+        <span className={`text-[9px] px-1.5 py-0.5 rounded-full font-semibold ${tagStyle}`}>{tag}</span>
+        <span className={`text-sm font-bold ${pnl >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>
           {pnl >= 0 ? '+' : ''}{formatCurrency(pnl, currency)}
         </span>
-        <span className="text-[10px] text-gray-600 ml-auto">{trades}T {wins}W/{losses}L</span>
+        <span className="text-[10px] text-gray-400 ml-auto">{trades}T {wins}W/{losses}L</span>
       </div>
       {pnlPct != null && (
-        <div className={`text-[10px] ml-6 ${pnlPct >= 0 ? 'text-emerald-500/60' : 'text-rose-500/60'}`}>
-          {pnlPct >= 0 ? '+' : ''}{pnlPct.toFixed(2)}%
-        </div>
+        <div className="ml-7 mt-0.5"><PctBadge value={pnlPct} /></div>
       )}
     </div>
   )
