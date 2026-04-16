@@ -337,14 +337,18 @@ function EquityCard({
             ))}
           </div>
           {ret ? (
-            <div className="flex items-baseline gap-2">
-              <span className={`text-lg font-bold ${ret.change >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>
-                {ret.change >= 0 ? '+' : ''}{formatCurrency(ret.change, 'KRW')}
-              </span>
-              <PctBadge value={ret.pct} />
-              {ret.has_cash_flows && (
-                <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-amber-50 text-amber-600 font-semibold">TWR</span>
-              )}
+            <div>
+              <div className="text-[10px] text-gray-400 mb-0.5">실현 손익 (Realized)</div>
+              <div className="flex items-baseline gap-2 flex-wrap">
+                <span className={`text-lg font-bold ${ret.change >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>
+                  {ret.change >= 0 ? '+' : ''}{formatCurrency(ret.change, 'KRW')}
+                </span>
+                {(ret as any).realized_us != null && (ret as any).realized_us !== 0 && (
+                  <span className="text-[10px] text-gray-400">
+                    KR {formatCurrency((ret as any).realized_kr ?? 0, 'KRW')} · US {(ret as any).realized_us >= 0 ? '+' : ''}${(ret as any).realized_us}
+                  </span>
+                )}
+              </div>
             </div>
           ) : (
             <div className="text-xs text-gray-300">No data yet</div>
