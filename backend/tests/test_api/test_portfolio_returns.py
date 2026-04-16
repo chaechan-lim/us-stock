@@ -1,14 +1,13 @@
-"""Tests for portfolio returns endpoint — STOCK-41.
+"""Tests for /portfolio/returns — realized P&L based (2026-04-17 rewrite).
 
-Validates:
-- /portfolio/returns returns daily, weekly, monthly equity changes
-- Correct change and percentage calculation from snapshots
-- Handles missing snapshots gracefully (returns None)
-- Handles single-market-only snapshots
+Previously: snapshot-equity-diff based, broke whenever the equity formula
+changed or snapshot timing produced phantom swings.
+
+Now: aggregates Order.pnl from filled SELL trades within each window.
+Deterministic — does NOT depend on snapshots, equity formula, or KIS API.
 """
 
 from datetime import datetime, timedelta
-from unittest.mock import AsyncMock, patch
 
 import pytest
 from fastapi import FastAPI
@@ -16,21 +15,19 @@ from fastapi.testclient import TestClient
 
 from api.portfolio import init_portfolio
 from api.router import api_router
-from core.models import Base, PortfolioSnapshot
+from core.models import Base, Order
 
 
 @pytest.fixture
 def _setup_db():
-    """Create async session factory with in-memory SQLite for snapshot tests."""
+    """Create async session factory with in-memory SQLite for trade tests."""
     from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
     from sqlalchemy.orm import sessionmaker
 
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
-
     async_session = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
     import asyncio
-
     loop = asyncio.new_event_loop()
     loop.run_until_complete(_create_tables(engine))
 
@@ -46,34 +43,57 @@ async def _create_tables(engine):
 
 
 def _make_app(session_factory) -> FastAPI:
-    """Create test app with portfolio router and session factory."""
     app = FastAPI()
     app.include_router(api_router, prefix="/api/v1")
     init_portfolio(session_factory)
     return app
 
 
-def _make_snapshot(
+def _make_sell_order(
+    *,
     market: str,
-    total_value_usd: float,
+    pnl: float,
     recorded_at: datetime,
-    cash_usd: float = 0,
-    invested_usd: float = 0,
-) -> PortfolioSnapshot:
-    return PortfolioSnapshot(
+    symbol: str = "TST",
+    is_paper: bool = False,
+    status: str = "filled",
+) -> Order:
+    return Order(
+        kis_order_id=f"O{recorded_at.timestamp()}-{symbol}",
+        symbol=symbol,
         market=market,
-        total_value_usd=total_value_usd,
-        cash_usd=cash_usd,
-        invested_usd=invested_usd,
-        recorded_at=recorded_at,
+        side="SELL",
+        order_type="limit",
+        quantity=1,
+        price=100.0,
+        filled_price=100.0,
+        filled_quantity=1,
+        status=status,
+        strategy_name="test",
+        pnl=pnl,
+        is_paper=is_paper,
+        created_at=recorded_at,
     )
 
 
-class TestPortfolioReturnsNoData:
-    """Returns None for all periods when no snapshots exist."""
+async def _seed_orders(session_factory, orders: list[Order]):
+    async with session_factory() as session:
+        for o in orders:
+            session.add(o)
+        await session.commit()
 
+
+def _run(coro):
+    import asyncio
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
+
+
+class TestPortfolioReturnsNoData:
     def test_returns_none_when_no_session_factory(self):
-        """Returns all None when session factory is not configured."""
         app = FastAPI()
         app.include_router(api_router, prefix="/api/v1")
         init_portfolio(None)
@@ -83,357 +103,109 @@ class TestPortfolioReturnsNoData:
         assert data["weekly"] is None
         assert data["monthly"] is None
 
-    def test_returns_none_when_no_snapshots(self, _setup_db):
-        """Returns None for all periods when DB has no snapshots."""
+    def test_returns_zero_when_no_trades(self, _setup_db):
+        """No trades in window → realized=0 for all periods."""
         session_factory, _ = _setup_db
         app = _make_app(session_factory)
         client = TestClient(app)
         data = client.get("/api/v1/portfolio/returns").json()
-        assert data["daily"] is None
-        assert data["weekly"] is None
-        assert data["monthly"] is None
+        assert data["daily"]["change"] == 0
+        assert data["daily"]["realized_kr"] == 0
+        assert data["daily"]["realized_us"] == 0
 
 
-class TestPortfolioReturnsWithSnapshots:
-    """Correct change/pct calculation from equity snapshots."""
-
-    def test_daily_return_calculated(self, _setup_db):
-        """Daily return shows change from yesterday's equity to today's."""
-        session_factory, engine = _setup_db
-        now = datetime.utcnow()
-
-        import asyncio
-
-        async def _seed():
-            async with session_factory() as session:
-                # US snapshots: old (12h ago) and new (1h ago)
-                session.add(_make_snapshot("US", 10000.0, now - timedelta(hours=12)))
-                session.add(_make_snapshot("US", 10500.0, now - timedelta(hours=1)))
-                await session.commit()
-
-        loop = asyncio.get_event_loop_policy().new_event_loop()
-        loop.run_until_complete(_seed())
-
-        live_total = 10_500 * 1400
-        with (
-            patch("api.portfolio._cached_usd_krw", 1400.0),
-            patch(
-                "api.portfolio._combined_summary",
-                new=AsyncMock(return_value={"total_equity": live_total}),
-            ),
-        ):
-            app = _make_app(session_factory)
-            client = TestClient(app)
-            data = client.get("/api/v1/portfolio/returns").json()
-
-        assert data["daily"] is not None
-        daily = data["daily"]
-        # US equity: old=10000*1400=14_000_000, new=10500*1400=14_700_000
-        expected_change = (10500 - 10000) * 1400
-        assert daily["change"] == expected_change
-        expected_pct = round((500 / 10000) * 100, 2)
-        assert daily["pct"] == expected_pct
-
-        loop.close()
-
-    def test_weekly_return_calculated(self, _setup_db):
-        """Weekly return uses snapshots from up to 7 days ago."""
-        session_factory, engine = _setup_db
-        now = datetime.utcnow()
-
-        import asyncio
-
-        async def _seed():
-            async with session_factory() as session:
-                # US snapshots: 5 days ago and now
-                session.add(_make_snapshot("US", 9000.0, now - timedelta(days=5)))
-                session.add(_make_snapshot("US", 10000.0, now - timedelta(hours=1)))
-                await session.commit()
-
-        loop = asyncio.get_event_loop_policy().new_event_loop()
-        loop.run_until_complete(_seed())
-
-        live_total = 10_000 * 1400
-        with (
-            patch("api.portfolio._cached_usd_krw", 1400.0),
-            patch(
-                "api.portfolio._combined_summary",
-                new=AsyncMock(return_value={"total_equity": live_total}),
-            ),
-        ):
-            app = _make_app(session_factory)
-            client = TestClient(app)
-            data = client.get("/api/v1/portfolio/returns").json()
-
-        assert data["weekly"] is not None
-        weekly = data["weekly"]
-        expected_change = (10000 - 9000) * 1400
-        assert weekly["change"] == expected_change
-        expected_pct = round((1000 / 9000) * 100, 2)
-        assert weekly["pct"] == expected_pct
-
-        loop.close()
-
-    def test_monthly_return_calculated(self, _setup_db):
-        """Monthly return uses snapshots from up to 30 days ago."""
-        session_factory, engine = _setup_db
-        now = datetime.utcnow()
-
-        import asyncio
-
-        async def _seed():
-            async with session_factory() as session:
-                # US snapshots: 20 days ago and now
-                session.add(_make_snapshot("US", 8000.0, now - timedelta(days=20)))
-                session.add(_make_snapshot("US", 10000.0, now - timedelta(hours=1)))
-                await session.commit()
-
-        loop = asyncio.get_event_loop_policy().new_event_loop()
-        loop.run_until_complete(_seed())
-
-        live_total = 10_000 * 1400
-        with (
-            patch("api.portfolio._cached_usd_krw", 1400.0),
-            patch(
-                "api.portfolio._combined_summary",
-                new=AsyncMock(return_value={"total_equity": live_total}),
-            ),
-        ):
-            app = _make_app(session_factory)
-            client = TestClient(app)
-            data = client.get("/api/v1/portfolio/returns").json()
-
-        assert data["monthly"] is not None
-        monthly = data["monthly"]
-        expected_change = (10000 - 8000) * 1400
-        assert monthly["change"] == expected_change
-        expected_pct = round((2000 / 8000) * 100, 2)
-        assert monthly["pct"] == expected_pct
-
-        loop.close()
-
-    def test_dual_market_returns(self, _setup_db):
-        """Returns combine US and KR equity snapshots."""
-        session_factory, engine = _setup_db
-        now = datetime.utcnow()
-
-        import asyncio
-
-        async def _seed():
-            async with session_factory() as session:
-                # US snapshots (value in USD, multiplied by rate)
-                session.add(_make_snapshot("US", 10000.0, now - timedelta(hours=12)))
-                session.add(_make_snapshot("US", 11000.0, now - timedelta(hours=1)))
-                # KR snapshots (total_value_usd stores KRW directly for KR market)
-                session.add(_make_snapshot("KR", 5_000_000.0, now - timedelta(hours=12)))
-                session.add(_make_snapshot("KR", 5_500_000.0, now - timedelta(hours=1)))
-                await session.commit()
-
-        loop = asyncio.get_event_loop_policy().new_event_loop()
-        loop.run_until_complete(_seed())
-
-        live_total = 5_500_000 + 11_000 * 1400
-        with (
-            patch("api.portfolio._cached_usd_krw", 1400.0),
-            patch(
-                "api.portfolio._combined_summary",
-                new=AsyncMock(return_value={"total_equity": live_total}),
-            ),
-        ):
-            app = _make_app(session_factory)
-            client = TestClient(app)
-            data = client.get("/api/v1/portfolio/returns").json()
-
-        assert data["daily"] is not None
-        daily = data["daily"]
-        # old: US 10000*1400 + KR 5_000_000 = 19_000_000
-        # new: US 11000*1400 + KR 5_500_000 = 20_900_000
-        old_equity = 10000 * 1400 + 5_000_000
-        new_equity = 11000 * 1400 + 5_500_000
-        expected_change = new_equity - old_equity
-        assert daily["change"] == expected_change
-
-        loop.close()
-
-    def test_negative_return(self, _setup_db):
-        """Correctly handles negative equity changes."""
-        session_factory, engine = _setup_db
-        now = datetime.utcnow()
-
-        import asyncio
-
-        async def _seed():
-            async with session_factory() as session:
-                session.add(_make_snapshot("US", 10000.0, now - timedelta(hours=12)))
-                session.add(_make_snapshot("US", 9500.0, now - timedelta(hours=1)))
-                await session.commit()
-
-        loop = asyncio.get_event_loop_policy().new_event_loop()
-        loop.run_until_complete(_seed())
-
-        live_total = 9_500 * 1400
-        with (
-            patch("api.portfolio._cached_usd_krw", 1400.0),
-            patch(
-                "api.portfolio._combined_summary",
-                new=AsyncMock(return_value={"total_equity": live_total}),
-            ),
-        ):
-            app = _make_app(session_factory)
-            client = TestClient(app)
-            data = client.get("/api/v1/portfolio/returns").json()
-
-        assert data["daily"] is not None
-        daily = data["daily"]
-        expected_change = (9500 - 10000) * 1400
-        assert daily["change"] == expected_change
-        assert daily["pct"] < 0
-
-        loop.close()
-
-    def test_returns_include_base_equity(self, _setup_db):
-        """Each period result includes base_equity field."""
-        session_factory, engine = _setup_db
-        now = datetime.utcnow()
-
-        import asyncio
-
-        async def _seed():
-            async with session_factory() as session:
-                session.add(_make_snapshot("US", 10000.0, now - timedelta(hours=12)))
-                session.add(_make_snapshot("US", 10500.0, now - timedelta(hours=1)))
-                await session.commit()
-
-        loop = asyncio.get_event_loop_policy().new_event_loop()
-        loop.run_until_complete(_seed())
-
-        live_total = 10_500 * 1400
-        with (
-            patch("api.portfolio._cached_usd_krw", 1400.0),
-            patch(
-                "api.portfolio._combined_summary",
-                new=AsyncMock(return_value={"total_equity": live_total}),
-            ),
-        ):
-            app = _make_app(session_factory)
-            client = TestClient(app)
-            data = client.get("/api/v1/portfolio/returns").json()
-
-        assert data["daily"] is not None
-        assert "base_equity" in data["daily"]
-        assert data["daily"]["base_equity"] == 10000 * 1400
-
-        loop.close()
-
-    def test_daily_uses_snapshot_before_boundary_as_base(self, _setup_db):
-        """Daily uses the last snapshot before the boundary as the base."""
-        session_factory, engine = _setup_db
-        now = datetime.utcnow()
-
-        import asyncio
-
-        async def _seed():
-            async with session_factory() as session:
-                # Old snapshot outside daily window, recent snapshot within
-                session.add(_make_snapshot("US", 10000.0, now - timedelta(days=3)))
-                session.add(_make_snapshot("US", 10500.0, now - timedelta(hours=1)))
-                await session.commit()
-
-        loop = asyncio.get_event_loop_policy().new_event_loop()
-        loop.run_until_complete(_seed())
-
-        live_total = 10_500 * 1400
-        with (
-            patch("api.portfolio._cached_usd_krw", 1400.0),
-            patch(
-                "api.portfolio._combined_summary",
-                new=AsyncMock(return_value={"total_equity": live_total}),
-            ),
-        ):
-            app = _make_app(session_factory)
-            client = TestClient(app)
-            data = client.get("/api/v1/portfolio/returns").json()
-
-        assert data["daily"] is not None
-        expected_change = (10_500 - 10_000) * 1400
-        assert data["daily"]["change"] == expected_change
-        assert data["daily"]["pct"] == pytest.approx(5.0, abs=0.01)
-        assert data["weekly"] is not None
-        assert data["weekly"]["change"] == expected_change
-
-        loop.close()
-
-    def test_dual_market_returns_use_us_position_value_in_combined_mode(self, _setup_db):
-        """Combined returns should use US position value, not US total account value."""
+class TestRealizedAggregation:
+    def test_daily_sum_kr(self, _setup_db):
         session_factory, _ = _setup_db
         now = datetime.utcnow()
-
-        import asyncio
-
-        async def _seed():
-            async with session_factory() as session:
-                session.add(
-                    _make_snapshot(
-                        "US",
-                        10_000.0,
-                        now - timedelta(hours=12),
-                        cash_usd=4_000.0,
-                        invested_usd=6_000.0,
-                    )
-                )
-                session.add(
-                    _make_snapshot(
-                        "US",
-                        11_000.0,
-                        now - timedelta(hours=1),
-                        cash_usd=4_500.0,
-                        invested_usd=6_500.0,
-                    )
-                )
-                session.add(_make_snapshot("KR", 5_000_000.0, now - timedelta(hours=12)))
-                session.add(_make_snapshot("KR", 5_500_000.0, now - timedelta(hours=1)))
-                await session.commit()
-
-        loop = asyncio.get_event_loop_policy().new_event_loop()
-        loop.run_until_complete(_seed())
-
-        live_total = 5_500_000 + (11_000 - 4_500) * 1400
-        with (
-            patch("api.portfolio._cached_usd_krw", 1400.0),
-            patch(
-                "api.portfolio._combined_summary",
-                new=AsyncMock(return_value={"total_equity": live_total}),
-            ),
-        ):
-            app = _make_app(session_factory)
-            client = TestClient(app)
-            data = client.get("/api/v1/portfolio/returns").json()
-
-        daily = data["daily"]
-        assert daily is not None
-        old_equity = 5_000_000 + (10_000 - 4_000) * 1400
-        new_equity = 5_500_000 + (11_000 - 4_500) * 1400
-        assert daily["base_equity"] == old_equity
-        assert daily["change"] == new_equity - old_equity
-
-        loop.close()
-
-    def test_returns_none_when_no_snapshots_for_market(self, _setup_db):
-        """Returns None when no snapshots exist at all."""
-        session_factory, _ = _setup_db
-        app = _make_app(session_factory)
-        client = TestClient(app)
+        _run(_seed_orders(session_factory, [
+            _make_sell_order(market="KR", pnl=5000, recorded_at=now - timedelta(hours=1)),
+            _make_sell_order(market="KR", pnl=3000, recorded_at=now - timedelta(hours=2)),
+        ]))
+        client = TestClient(_make_app(session_factory))
         data = client.get("/api/v1/portfolio/returns").json()
-        assert data["daily"] is None
-        assert data["weekly"] is None
-        assert data["monthly"] is None
+        assert data["daily"]["realized_kr"] == 8000
+        assert data["daily"]["realized_us"] == 0
 
-    def test_response_structure(self, _setup_db):
-        """Response has daily, weekly, monthly keys."""
+    def test_us_pnl_converted_to_krw(self, _setup_db):
         session_factory, _ = _setup_db
-        app = _make_app(session_factory)
-        client = TestClient(app)
+        now = datetime.utcnow()
+        _run(_seed_orders(session_factory, [
+            _make_sell_order(market="US", pnl=100, recorded_at=now - timedelta(hours=1)),
+        ]))
+        client = TestClient(_make_app(session_factory))
         data = client.get("/api/v1/portfolio/returns").json()
-        assert "daily" in data
-        assert "weekly" in data
-        assert "monthly" in data
+        # change = us_pnl × rate (rate >= 1450 fallback)
+        assert data["daily"]["realized_us"] == 100
+        assert data["daily"]["change"] >= 100 * 1450
+
+    def test_combined_kr_and_us(self, _setup_db):
+        session_factory, _ = _setup_db
+        now = datetime.utcnow()
+        _run(_seed_orders(session_factory, [
+            _make_sell_order(market="KR", pnl=10_000, recorded_at=now - timedelta(hours=1)),
+            _make_sell_order(market="US", pnl=50, recorded_at=now - timedelta(hours=2)),
+        ]))
+        client = TestClient(_make_app(session_factory))
+        data = client.get("/api/v1/portfolio/returns").json()
+        assert data["daily"]["realized_kr"] == 10_000
+        assert data["daily"]["realized_us"] == 50
+
+    def test_excludes_old_trades_outside_period(self, _setup_db):
+        session_factory, _ = _setup_db
+        now = datetime.utcnow()
+        _run(_seed_orders(session_factory, [
+            _make_sell_order(market="KR", pnl=999_999, recorded_at=now - timedelta(days=10)),  # outside daily/weekly
+            _make_sell_order(market="KR", pnl=1000, recorded_at=now - timedelta(hours=1)),     # daily only
+        ]))
+        client = TestClient(_make_app(session_factory))
+        data = client.get("/api/v1/portfolio/returns").json()
+        assert data["daily"]["realized_kr"] == 1000
+        assert data["weekly"]["realized_kr"] == 1000  # 10 days ago is excluded
+        assert data["monthly"]["realized_kr"] == 1_000_999  # both included
+
+    def test_excludes_paper_trades(self, _setup_db):
+        session_factory, _ = _setup_db
+        now = datetime.utcnow()
+        _run(_seed_orders(session_factory, [
+            _make_sell_order(market="KR", pnl=5000, recorded_at=now - timedelta(hours=1), is_paper=True),
+            _make_sell_order(market="KR", pnl=2000, recorded_at=now - timedelta(hours=2), is_paper=False),
+        ]))
+        client = TestClient(_make_app(session_factory))
+        data = client.get("/api/v1/portfolio/returns").json()
+        assert data["daily"]["realized_kr"] == 2000
+
+    def test_excludes_unfilled(self, _setup_db):
+        session_factory, _ = _setup_db
+        now = datetime.utcnow()
+        _run(_seed_orders(session_factory, [
+            _make_sell_order(market="KR", pnl=5000, recorded_at=now - timedelta(hours=1), status="cancelled"),
+            _make_sell_order(market="KR", pnl=2000, recorded_at=now - timedelta(hours=2)),
+        ]))
+        client = TestClient(_make_app(session_factory))
+        data = client.get("/api/v1/portfolio/returns").json()
+        assert data["daily"]["realized_kr"] == 2000
+
+    def test_handles_negative_pnl(self, _setup_db):
+        session_factory, _ = _setup_db
+        now = datetime.utcnow()
+        _run(_seed_orders(session_factory, [
+            _make_sell_order(market="KR", pnl=-3000, recorded_at=now - timedelta(hours=1)),
+            _make_sell_order(market="KR", pnl=1000, recorded_at=now - timedelta(hours=2)),
+        ]))
+        client = TestClient(_make_app(session_factory))
+        data = client.get("/api/v1/portfolio/returns").json()
+        assert data["daily"]["realized_kr"] == -2000
+
+
+class TestResponseShape:
+    def test_response_keys(self, _setup_db):
+        session_factory, _ = _setup_db
+        client = TestClient(_make_app(session_factory))
+        data = client.get("/api/v1/portfolio/returns").json()
+        for period in ("daily", "weekly", "monthly"):
+            r = data[period]
+            assert "change" in r
+            assert "realized_kr" in r
+            assert "realized_us" in r
+            assert "pct" in r  # legacy field

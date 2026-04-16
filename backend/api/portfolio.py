@@ -376,14 +376,21 @@ async def enrich_positions(positions, market: str, request: Request) -> list[dic
 
 @router.get("/returns")
 async def portfolio_returns(request: Request):
-    """Get cumulative returns: daily, weekly, monthly (from equity snapshots).
+    """Get realized P&L by period (1d/1w/1m).
 
-    STOCK-46: Uses TWR (Time-Weighted Return) when cash flows are detected,
-    so that deposits/withdrawals don't inflate the return percentage.
-    Returns both `pct` (TWR) and `simple_pct` (old method) for transparency.
+    2026-04-17: Switched from snapshot-based equity diff to realized P&L
+    aggregation. Snapshot-based diffs were unreliable because the equity
+    formula has changed multiple times and snapshot timing creates phantom
+    swings. Realized P&L from the trades table is deterministic.
+
+    Returns combined KRW equivalent. USD trades are converted at the
+    current cached USD/KRW rate (close enough for display).
     """
     if not _session_factory:
         return {"daily": None, "weekly": None, "monthly": None}
+
+    from sqlalchemy import select, func
+    from core.models import Order
 
     now = datetime.utcnow()
     periods = {
@@ -392,62 +399,40 @@ async def portfolio_returns(request: Request):
         "monthly": now - timedelta(days=30),
     }
 
-    current_total_equity = 0.0
-    try:
-        current_total_equity = float((await _combined_summary(request)).get("total_equity") or 0.0)
-    except Exception as e:
-        logger.warning("Failed to fetch live combined equity for returns: %s", e)
+    rate = _cached_usd_krw if _cached_usd_krw > 0 else 1450.0
 
     async with _session_factory() as session:
         result = {}
         for period_name, since in periods.items():
-            us_seed = await _get_latest_snapshot_before_or_at(session, since, "US")
-            kr_seed = await _get_latest_snapshot_before_or_at(session, since, "KR")
-            us_snapshots = _prepend_snapshot(us_seed, await _get_snapshots_in_range(session, since, "US"))
-            kr_snapshots = _prepend_snapshot(kr_seed, await _get_snapshots_in_range(session, since, "KR"))
-
-            timeline = _build_equity_timeline(
-                us_snapshots,
-                kr_snapshots,
-                _cached_usd_krw,
-                combined=True,
+            stmt = (
+                select(Order.market, func.sum(Order.pnl).label("total_pnl"))
+                .where(
+                    Order.side == "SELL",
+                    Order.status == "filled",
+                    Order.pnl.isnot(None),
+                    Order.is_paper == False,  # noqa: E712
+                    Order.created_at >= since,
+                )
+                .group_by(Order.market)
             )
-            if not timeline:
-                result[period_name] = None
-                continue
+            rows = (await session.execute(stmt)).all()
+            us_pnl = 0.0
+            kr_pnl = 0.0
+            for market, total_pnl in rows:
+                if market == "US":
+                    us_pnl = float(total_pnl or 0.0)
+                else:
+                    kr_pnl = float(total_pnl or 0.0)
 
-            base_idx = _find_base_index(timeline, since)
-            if base_idx is None:
-                result[period_name] = None
-                continue
-
-            effective_timeline = _append_live_equity(
-                timeline,
-                at=now,
-                equity_krw=current_total_equity,
-            )
-            period_timeline = effective_timeline[base_idx:]
-            if not period_timeline:
-                result[period_name] = None
-                continue
-
-            old_equity = period_timeline[0][1]
-            new_equity = period_timeline[-1][1]
-            if old_equity <= 0:
-                result[period_name] = None
-                continue
-
-            change = new_equity - old_equity
-            simple_pct = (change / old_equity) * 100
-            has_cf = any((cf or 0.0) != 0.0 for _, _, cf in period_timeline[1:])
-            twr_pct = _calculate_twr_from_timeline(period_timeline) if has_cf else simple_pct
-
+            change_krw = kr_pnl + us_pnl * rate
             result[period_name] = {
-                "change": round(change, 0),
-                "pct": round(twr_pct, 2),
-                "simple_pct": round(simple_pct, 2),
-                "base_equity": round(old_equity, 0),
-                "has_cash_flows": has_cf,
+                "change": round(change_krw, 0),
+                "pct": 0.0,  # not meaningful for realized-only
+                "simple_pct": 0.0,
+                "base_equity": 0,
+                "has_cash_flows": False,
+                "realized_kr": round(kr_pnl, 0),
+                "realized_us": round(us_pnl, 2),
             }
 
         return result
