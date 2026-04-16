@@ -430,6 +430,11 @@ class PositionTracker:
                 self.untrack(symbol)
                 continue
 
+            # Skip SL/TP for system-managed positions (cash_parking, ETF leverage).
+            # These are not strategy trades and should not be auto-exited.
+            if tracked.strategy in ("cash_parking", "etf_leverage", "etf_inverse"):
+                continue
+
             current_price = pos.current_price
             if current_price <= 0:
                 logger.warning(
