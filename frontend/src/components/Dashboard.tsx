@@ -103,14 +103,23 @@ export default function Dashboard() {
         <StatCard label="Positions" value={String(summary.positions_count)} />
         <StatCard
           label="Unrealized"
-          value={
-            <span className={summary.total_unrealized_pnl >= 0 ? 'text-emerald-600' : 'text-rose-600'}>
-              {summary.total_unrealized_pnl >= 0 ? '+' : ''}{formatCurrency(summary.total_unrealized_pnl, 'KRW')}
-            </span>
+          value={(() => {
+            const krw = summary.total_unrealized_pnl ?? 0
+            const usd = summary.total_unrealized_pnl_usd ?? 0
+            const combined = krw + usd * (summary.exchange_rate ?? 1450)
+            const color = combined >= 0 ? 'text-emerald-600' : 'text-rose-600'
+            return <span className={color}>{combined >= 0 ? '+' : ''}{formatCurrency(combined, 'KRW')}</span>
+          })()}
+          sub={
+            <div className="flex items-center gap-1.5 flex-wrap">
+              {summary.total_unrealized_pnl_pct != null && <PctBadge value={summary.total_unrealized_pnl_pct} />}
+              {(summary.total_unrealized_pnl_usd ?? 0) !== 0 && (
+                <span className={`text-[10px] ${(summary.total_unrealized_pnl_usd ?? 0) >= 0 ? 'text-emerald-500' : 'text-rose-500'}`}>
+                  US {(summary.total_unrealized_pnl_usd ?? 0) >= 0 ? '+' : ''}{formatCurrency(summary.total_unrealized_pnl_usd!, 'USD')}
+                </span>
+              )}
+            </div>
           }
-          sub={summary.total_unrealized_pnl_pct != null ? (
-            <PctBadge value={summary.total_unrealized_pnl_pct} />
-          ) : undefined}
         />
       </div>
 
