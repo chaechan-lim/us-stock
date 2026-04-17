@@ -1237,7 +1237,7 @@ async def lifespan(app: FastAPI):
         "rebalance_allocation",
         task_rebalance_allocation,
         interval_sec=86400,
-        phases=[MarketPhase.PRE_MARKET],
+        phases=None,  # 2026-04-17: was PRE_MARKET only → never ran after restarts
     )
     scheduler.add_task(
         "etf_evaluation",
