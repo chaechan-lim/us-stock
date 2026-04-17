@@ -37,6 +37,7 @@ def _make_app(
     withdrawable_total_krw: float = 0,
     kr_deposit_krw: float = 0,
     kr_stock_eval_krw: float = 0,
+    integrated_total_asset: float = 0,
 ) -> FastAPI:
     """Create test app with configurable mock state."""
     app = FastAPI()
@@ -68,6 +69,7 @@ def _make_app(
     kr_adapter._tot_evlu_amt = kr_tot_evlu_amt
     kr_adapter._dnca_tot_amt = kr_deposit_krw
     kr_adapter._scts_evlu_amt = kr_stock_eval_krw
+    kr_adapter._integrated_total_asset = integrated_total_asset
 
     us_rl = RateLimiter(max_per_second=100)
     kr_rl = RateLimiter(max_per_second=100)
@@ -89,27 +91,23 @@ class TestTotalEquityIntegratedMargin:
     """
 
     def test_combined_formula(self):
-        """Primary: kr_stock_eval + US_total_USD × rate = KIS 총자산.
+        """Primary: CTRP6548R tot_asst_amt used directly.
 
-        2026-04-16: US balance.total already includes deposit + overseas
-        stocks. Just add domestic stock eval on top.
+        2026-04-17: No calculation — KIS 통합총자산 API 값 그대로.
         """
-        kr_stock_eval = 2_316_380
-        us_total_usd = 10_000.0
-        rate = 1400.0
-
         app = _make_app(
-            us_balance=Balance(currency="USD", total=us_total_usd, available=3000, locked=7000),
-            kr_stock_eval_krw=kr_stock_eval,
+            integrated_total_asset=17_770_319,
+            us_balance=Balance(currency="USD", total=10_000, available=3000, locked=7000),
+            kr_stock_eval_krw=2_316_380,
             kr_tot_evlu_amt=9_602_699,
             us_position_value_krw=9_561_545,
-            last_exchange_rate=rate,
+            last_exchange_rate=1400.0,
         )
         client = TestClient(app)
         data = client.get("/api/v1/portfolio/summary").json()
 
-        expected = kr_stock_eval + us_total_usd * rate
-        assert abs(data["total_equity"] - expected) < 1.0
+        assert abs(data["total_equity"] - 17_770_319) < 1.0
+        assert "CTRP6548R" in data["equity_breakdown"]["formula"]
 
     def test_no_shared_deposit_skips_dedup(self):
         """Without US position KRW value, falls back to prior branch."""
@@ -249,10 +247,11 @@ class TestResponseStructure:
             withdrawable_total_krw=4_183_090,
             kr_deposit_krw=4_183_180,
             kr_stock_eval_krw=2_316_380,
+            integrated_total_asset=17_770_319,
         )
         client = TestClient(app)
         data = client.get("/api/v1/portfolio/summary").json()
-        assert data["equity_breakdown"]["formula"] == "kr_stock_eval + us_total_usd * rate"
+        assert "CTRP6548R" in data["equity_breakdown"]["formula"]
         assert data["cash_breakdown"]["combined_cash_krw"] == data["available_cash"]
 
     def test_usd_balance_fields(self):

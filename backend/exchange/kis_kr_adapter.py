@@ -73,6 +73,7 @@ TR_ID_KR_LIVE = {
     "CANCEL": "TTTC0803U",
     # Account
     "BALANCE": "TTTC8434R",
+    "ACCOUNT_BALANCE": "CTRP6548R",  # 투자계좌자산현황 (통합 총자산)
     "PENDING_ORDERS": "TTTC8036R",
     "EXECUTED_ORDERS": "TTTC8001R",
     "BUYING_POWER": "TTTC8908R",
@@ -109,6 +110,7 @@ class KISKRAdapter(ExchangeAdapter):
         self._tot_evlu_amt: float = 0.0  # 총평가금액 (통합증거금: KR+overseas)
         self._scts_evlu_amt: float = 0.0  # 국내주식 평가금액
         self._dnca_tot_amt: float = 0.0   # 예수금 총액
+        self._integrated_total_asset: float = 0.0  # CTRP6548R 통합 총자산
 
     async def initialize(self) -> None:
         self._session = aiohttp.ClientSession()
@@ -296,12 +298,55 @@ class KISKRAdapter(ExchangeAdapter):
             deposit, available, stock_eval, total, invested,
         )
 
+        # Fetch integrated total asset (CTRP6548R) — this is the KIS app's
+        # "총자산" number that includes deposit + domestic + overseas stocks.
+        await self._fetch_integrated_total_asset()
+
         return Balance(
             currency="KRW",
             total=total,
             available=available,
             locked=stock_eval or invested,
         )
+
+    async def _fetch_integrated_total_asset(self) -> None:
+        """Fetch 통합 총자산 via CTRP6548R (투자계좌자산현황조회).
+
+        This is the single API that returns the KIS app's "총자산" number:
+        deposit + domestic stocks + overseas stocks in one field.
+        Previously we tried to compute this from VTTC8434R + CTRP6504R
+        but the fields don't add up correctly in 통합증거금 accounts.
+        """
+        try:
+            await self._auth.ensure_valid_token()
+            params = {
+                "CANO": self._config.account_number[:8],
+                "ACNT_PRDT_CD": self._config.account_number[8:] or "01",
+                "INQR_DVSN_1": "",
+                "BSPR_BF_DT_APLY_YN": "",
+            }
+            data = await self._get(
+                "/uapi/domestic-stock/v1/trading/inquire-account-balance",
+                self._tr.get("ACCOUNT_BALANCE", "CTRP6548R"),
+                params,
+            )
+            output2 = data.get("output2", {})
+            if isinstance(output2, list) and output2:
+                output2 = output2[0]
+            elif not isinstance(output2, dict):
+                output2 = {}
+
+            tot_asst = float(output2.get("tot_asst_amt", 0))
+            if tot_asst > 0:
+                self._integrated_total_asset = tot_asst
+                logger.info(
+                    "CTRP6548R 통합총자산: %.0f (해외: %s, 예수금: %s)",
+                    tot_asst,
+                    output2.get("ovrs_stck_evlu_amt1", "-"),
+                    output2.get("tot_dncl_amt", "-"),
+                )
+        except Exception as e:
+            logger.debug("CTRP6548R fetch failed: %s", e)
 
     async def _fetch_orderable_amount(self) -> float | None:
         """Query actual orderable cash via 주문가능조회 API.
