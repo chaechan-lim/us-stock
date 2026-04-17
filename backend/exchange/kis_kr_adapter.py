@@ -320,8 +320,8 @@ class KISKRAdapter(ExchangeAdapter):
         try:
             await self._auth.ensure_valid_token()
             params = {
-                "CANO": self._config.account_number[:8],
-                "ACNT_PRDT_CD": self._config.account_number[8:] or "01",
+                "CANO": self._config.account_no[:8],
+                "ACNT_PRDT_CD": self._config.account_no[8:] or "01",
                 "INQR_DVSN_1": "",
                 "BSPR_BF_DT_APLY_YN": "",
             }
@@ -346,7 +346,7 @@ class KISKRAdapter(ExchangeAdapter):
                     output2.get("tot_dncl_amt", "-"),
                 )
         except Exception as e:
-            logger.debug("CTRP6548R fetch failed: %s", e)
+            logger.warning("CTRP6548R fetch failed: %s", e)
 
     async def _fetch_orderable_amount(self) -> float | None:
         """Query actual orderable cash via 주문가능조회 API.
