@@ -440,6 +440,19 @@ class OrderManager:
             logger.error("Failed to cancel order %s: %s", order_id, e)
             return False
 
+    async def cancel_pending_orders(self, symbol: str, side: str) -> int:
+        """Cancel all pending orders for a symbol+side. Returns count cancelled."""
+        cancelled = 0
+        for oid, o in list(self._active_orders.items()):
+            if o.symbol == symbol and o.side.upper() == side.upper() and o.status in ("pending", "open", "submitted"):
+                try:
+                    success = await self.cancel(oid, symbol)
+                    if success:
+                        cancelled += 1
+                except Exception as e:
+                    logger.warning("Failed to cancel %s for %s: %s", oid, symbol, e)
+        return cancelled
+
     async def sync_order_status(self, order_id: str, symbol: str) -> ManagedOrder | None:
         """Sync order status from exchange."""
         managed = self._active_orders.get(order_id)

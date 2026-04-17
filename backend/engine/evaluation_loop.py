@@ -1752,13 +1752,17 @@ class EvaluationLoop:
                 )
 
         elif signal.signal_type == SignalType.SELL:
-            # STOCK-54: Defense-in-depth — skip if a pending sell order
-            # already exists (e.g. from Phase 0 protective sell that hasn't
-            # filled yet). order_manager.place_sell() also checks this, but
-            # skipping early avoids unnecessary position fetches.
-            if self._order_manager.has_pending_order(symbol, "SELL"):
-                logger.debug("Skipping SELL for %s: pending sell order exists", symbol)
+            # 2026-04-18: Smart sell escalation. If a pending limit SELL
+            # exists from a previous cycle, cancel it and escalate to
+            # market order (US only). This prevents the XLC scenario where
+            # limit SELL at $119.48 was cancelled because price dropped to
+            # $118.52. First attempt is always limit (better price for
+            # liquid stocks), escalation to market only on retry.
+            has_pending = self._order_manager.has_pending_order(symbol, "SELL")
+            if has_pending and self._market != "US":
+                logger.debug("Skipping SELL for %s: pending sell order exists (KR)", symbol)
                 return
+            # US: if pending, we'll cancel + escalate below
 
             positions = await self._market_data.get_positions()
             pos = next((p for p in positions if p.symbol == symbol), None)
@@ -1769,11 +1773,18 @@ class EvaluationLoop:
                 orig_strategy = ""
                 if self._position_tracker:
                     orig_strategy = self._position_tracker.get_buy_strategy(symbol)
+                sell_order_type = "limit"
+                if has_pending and self._market == "US":
+                    logger.info("SELL escalation for %s: pending limit unfilled → cancel + market", symbol)
+                    await self._order_manager.cancel_pending_orders(symbol, "SELL")
+                    sell_order_type = "market"
+
                 sell_order = await self._order_manager.place_sell(
                     symbol=symbol,
                     quantity=int(pos.quantity),
                     price=price,
                     strategy_name=signal.strategy_name,
+                    order_type=sell_order_type,
                     exchange=exchange,
                     entry_price=pos.avg_price,
                     buy_strategy=orig_strategy,
