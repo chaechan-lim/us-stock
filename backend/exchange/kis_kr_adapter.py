@@ -111,6 +111,7 @@ class KISKRAdapter(ExchangeAdapter):
         self._scts_evlu_amt: float = 0.0  # 국내주식 평가금액
         self._dnca_tot_amt: float = 0.0   # 예수금 총액
         self._integrated_total_asset: float = 0.0  # CTRP6548R 통합 총자산
+        self._integrated_total_asset_ts: float = 0.0  # last fetch time
 
     async def initialize(self) -> None:
         self._session = aiohttp.ClientSession()
@@ -317,6 +318,10 @@ class KISKRAdapter(ExchangeAdapter):
         Previously we tried to compute this from VTTC8434R + CTRP6504R
         but the fields don't add up correctly in 통합증거금 accounts.
         """
+        import time as _time
+        # 30-min cache — avoid extra API call on every balance fetch
+        if _time.time() - self._integrated_total_asset_ts < 1800 and self._integrated_total_asset > 0:
+            return
         try:
             await self._auth.ensure_valid_token()
             params = {
@@ -339,6 +344,7 @@ class KISKRAdapter(ExchangeAdapter):
             tot_asst = float(output2.get("tot_asst_amt", 0))
             if tot_asst > 0:
                 self._integrated_total_asset = tot_asst
+                self._integrated_total_asset_ts = _time.time()
                 logger.info(
                     "CTRP6548R 통합총자산: %.0f (해외: %s, 예수금: %s)",
                     tot_asst,

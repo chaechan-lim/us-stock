@@ -6,8 +6,10 @@ from typing import Optional
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, Request
+from sqlalchemy import func, select
 
 from api.accounts import validate_account_id_or_404
+from core.models import Order
 from data.stock_name_service import get_name, resolve_names
 
 router = APIRouter(prefix="/portfolio", tags=["portfolio"])
@@ -392,9 +394,6 @@ async def portfolio_returns(request: Request):
     if not _session_factory:
         return {"daily": None, "weekly": None, "monthly": None}
 
-    from sqlalchemy import select, func
-    from core.models import Order
-
     now = datetime.utcnow()
     periods = {
         "daily": now - timedelta(days=1),
@@ -430,10 +429,7 @@ async def portfolio_returns(request: Request):
             change_krw = kr_pnl + us_pnl * rate
             result[period_name] = {
                 "change": round(change_krw, 0),
-                "pct": 0.0,  # not meaningful for realized-only
-                "simple_pct": 0.0,
-                "base_equity": 0,
-                "has_cash_flows": False,
+                "pct": 0.0,
                 "realized_kr": round(kr_pnl, 0),
                 "realized_us": round(us_pnl, 2),
             }

@@ -343,9 +343,9 @@ function EquityCard({
                 <span className={`text-lg font-bold ${ret.change >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>
                   {ret.change >= 0 ? '+' : ''}{formatCurrency(ret.change, 'KRW')}
                 </span>
-                {(ret as any).realized_us != null && (ret as any).realized_us !== 0 && (
+                {ret.realized_us != null && ret.realized_us !== 0 && (
                   <span className="text-[10px] text-gray-400">
-                    KR {formatCurrency((ret as any).realized_kr ?? 0, 'KRW')} · US {(ret as any).realized_us >= 0 ? '+' : ''}${(ret as any).realized_us}
+                    KR {formatCurrency(ret.realized_kr ?? 0, 'KRW')} · US {formatCurrency(ret.realized_us, 'USD')}
                   </span>
                 )}
               </div>
