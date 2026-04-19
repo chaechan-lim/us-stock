@@ -1,20 +1,16 @@
 import { useState } from 'react'
 import Dashboard from './Dashboard'
-import PositionList from './PositionList'
 import StrategyPanel from './StrategyPanel'
+import StrategyPerformance from './StrategyPerformance'
 import EngineControl from './EngineControl'
 import WatchlistPanel from './WatchlistPanel'
 import ScannerPanel from './ScannerPanel'
 import LogPanel from './LogPanel'
 import TradeHistory from './TradeHistory'
-import StockChart from './StockChart'
-import BacktestPanel from './BacktestPanel'
-import OptimizePanel from './OptimizePanel'
-import PortfolioChart from './PortfolioChart'
-import SectorHeatmap from './SectorHeatmap'
-import StrategyPerformance from './StrategyPerformance'
-import ETFPanel from './ETFPanel'
 import SignalPanel from './SignalPanel'
+import StockChart from './StockChart'
+import SectorHeatmap from './SectorHeatmap'
+import ETFPanel from './ETFPanel'
 import NewsSentiment from './NewsSentiment'
 import EventsCalendar from './EventsCalendar'
 import MarketToggle from './MarketToggle'
@@ -23,28 +19,18 @@ import { AccountProvider } from '../contexts/AccountContext'
 import { useAccounts } from '../hooks/useApi'
 import clsx from 'clsx'
 
-type Tab = 'dashboard' | 'positions' | 'trades' | 'signals' | 'chart' | 'strategies' | 'scanner' | 'watchlist' | 'logs' | 'backtest' | 'optimize' | 'portfolio' | 'sectors' | 'performance' | 'etf' | 'sentiment'
+type Tab = 'dashboard' | 'trades' | 'chart' | 'scanner' | 'market' | 'strategies' | 'logs'
 
 const TABS: { key: Tab; label: string }[] = [
   { key: 'dashboard', label: 'Dashboard' },
-  { key: 'portfolio', label: 'Portfolio' },
-  { key: 'positions', label: 'Positions' },
   { key: 'trades', label: 'Trades' },
-  { key: 'signals', label: 'Signals' },
   { key: 'chart', label: 'Chart' },
-  { key: 'strategies', label: 'Strategies' },
-  { key: 'performance', label: 'Performance' },
-  { key: 'backtest', label: 'Backtest' },
-  { key: 'optimize', label: 'Optimize' },
   { key: 'scanner', label: 'Scanner' },
-  { key: 'sectors', label: 'Sectors' },
-  { key: 'sentiment', label: 'Sentiment' },
-  { key: 'etf', label: 'ETF' },
-  { key: 'watchlist', label: 'Watchlist' },
+  { key: 'market', label: 'Market' },
+  { key: 'strategies', label: 'Strategies' },
   { key: 'logs', label: 'Logs' },
 ]
 
-/** Inner component that has access to useAccounts (requires QueryClientProvider). */
 function AppShell() {
   const [tab, setTab] = useState<Tab>('dashboard')
   const { data: accounts = [] } = useAccounts()
@@ -62,26 +48,28 @@ export default function App() {
 
 function AppContent({ tab, setTab }: { tab: Tab; setTab: (t: Tab) => void }) {
   return (
-    <div className="min-h-screen bg-gray-950">
-      <header className="bg-gray-900 border-b border-gray-800 px-6 py-3 flex items-center justify-between">
-        <h1 className="text-xl font-bold text-white">Trading Engine</h1>
-        <div className="flex items-center gap-3">
+    <div className="min-h-screen bg-gray-50">
+      {/* Header */}
+      <header className="bg-white border-b border-gray-200 px-4 sm:px-6 py-3 flex flex-wrap items-center justify-between gap-2">
+        <h1 className="text-lg font-bold text-gray-900">Trading Engine</h1>
+        <div className="flex items-center gap-2">
           <AccountSelector />
           <EngineControl />
         </div>
       </header>
 
-      <nav className="bg-gray-900 border-b border-gray-800 px-3 sm:px-6 py-1">
-        <div className="flex flex-wrap gap-1">
+      {/* Nav */}
+      <nav className="bg-white border-b border-gray-200 px-4 sm:px-6 py-1">
+        <div className="flex gap-1 overflow-x-auto">
           {TABS.map(t => (
             <button
               key={t.key}
               onClick={() => setTab(t.key)}
               className={clsx(
-                'px-3 py-1.5 text-xs sm:text-sm font-medium rounded-t transition-colors whitespace-nowrap',
+                'px-3 py-2 text-xs sm:text-sm font-semibold rounded-lg transition whitespace-nowrap',
                 tab === t.key
-                  ? 'bg-gray-800 text-white border-b-2 border-blue-500'
-                  : 'text-gray-400 hover:text-white hover:bg-gray-800/50'
+                  ? 'bg-gray-900 text-white'
+                  : 'text-gray-500 hover:bg-gray-100 hover:text-gray-700'
               )}
             >
               {t.label}
@@ -90,22 +78,66 @@ function AppContent({ tab, setTab }: { tab: Tab; setTab: (t: Tab) => void }) {
         </div>
       </nav>
 
+      {/* Content */}
       <main className="p-3 sm:p-6">
         {tab === 'dashboard' && <Dashboard />}
-        {tab === 'positions' && <PositionList />}
-        {tab === 'trades' && <TradeHistory />}
-        {tab === 'signals' && <><div className="flex items-center justify-between mb-4"><h2 className="text-lg font-semibold">Strategy Signals</h2><MarketToggle /></div><SignalPanel /></>}
+
+        {tab === 'trades' && (
+          <div className="space-y-6">
+            <TradeHistory />
+            <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-4">
+              <div className="flex items-center justify-between mb-3">
+                <h2 className="text-sm font-semibold text-gray-900">Strategy Signals</h2>
+                <MarketToggle />
+              </div>
+              <SignalPanel />
+            </div>
+          </div>
+        )}
+
         {tab === 'chart' && <StockChart />}
-        {tab === 'strategies' && <StrategyPanel />}
-        {tab === 'scanner' && <ScannerPanel />}
-        {tab === 'watchlist' && <WatchlistPanel />}
-        {tab === 'backtest' && <BacktestPanel />}
-        {tab === 'optimize' && <OptimizePanel />}
-        {tab === 'portfolio' && <PortfolioChart />}
-        {tab === 'sectors' && <SectorHeatmap />}
-        {tab === 'performance' && <StrategyPerformance />}
-        {tab === 'sentiment' && <><div className="flex items-center justify-between mb-4"><h2 className="text-lg font-semibold">Sentiment & Events</h2><MarketToggle /></div><NewsSentiment /><div className="mt-6"><EventsCalendar /></div></>}
-        {tab === 'etf' && <ETFPanel />}
+
+        {tab === 'scanner' && (
+          <div className="space-y-6">
+            <ScannerPanel />
+            <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-4">
+              <h2 className="text-sm font-semibold text-gray-900 mb-3">Watchlist</h2>
+              <WatchlistPanel />
+            </div>
+          </div>
+        )}
+
+        {tab === 'market' && (
+          <div className="space-y-6">
+            <div className="flex items-center justify-between">
+              <h2 className="text-lg font-semibold text-gray-900">Market Overview</h2>
+              <MarketToggle />
+            </div>
+            <SectorHeatmap />
+            <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-4">
+              <h2 className="text-sm font-semibold text-gray-900 mb-3">ETF Engine</h2>
+              <ETFPanel />
+            </div>
+            <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-4">
+              <h2 className="text-sm font-semibold text-gray-900 mb-3">Sentiment & Events</h2>
+              <NewsSentiment />
+              <div className="mt-4">
+                <EventsCalendar />
+              </div>
+            </div>
+          </div>
+        )}
+
+        {tab === 'strategies' && (
+          <div className="space-y-6">
+            <StrategyPanel />
+            <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-4">
+              <h2 className="text-sm font-semibold text-gray-900 mb-3">Strategy Performance</h2>
+              <StrategyPerformance />
+            </div>
+          </div>
+        )}
+
         {tab === 'logs' && <LogPanel />}
       </main>
     </div>
