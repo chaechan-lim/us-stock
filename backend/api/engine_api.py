@@ -386,3 +386,27 @@ async def signal_quality(request: Request):
         "active": tracker.get_active_strategies(),
         "gated": tracker.get_gated_strategies(),
     }
+
+
+@router.post("/adjust-tp")
+async def adjust_take_profit(request: Request, symbol: str, tp_pct: float):
+    """Adjust take-profit percentage for a tracked position."""
+    tracker = getattr(request.app.state, "kr_position_tracker", None) or \
+              getattr(request.app.state, "position_tracker", None)
+    if not tracker:
+        return {"error": "No position tracker available"}
+    
+    tracked = tracker._tracked.get(symbol)
+    if not tracked:
+        # Try KR tracker if US didn't have it
+        kr_tracker = getattr(request.app.state, "kr_position_tracker", None)
+        if kr_tracker:
+            tracked = kr_tracker._tracked.get(symbol)
+    
+    if not tracked:
+        return {"error": f"Position {symbol} not tracked"}
+    
+    old_tp = tracked.take_profit_pct
+    tracked.take_profit_pct = tp_pct
+    logger.info("Adjusted TP for %s: %.1f%% → %.1f%%", symbol, (old_tp or 0) * 100, tp_pct * 100)
+    return {"symbol": symbol, "old_tp": old_tp, "new_tp": tp_pct}
