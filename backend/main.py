@@ -2026,13 +2026,17 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.error("KR ETF evaluation failed: %s", e)
 
-    scheduler.add_task(
-        "kr_etf_evaluation",
-        task_kr_etf_evaluation,
-        interval_sec=900,
-        phases=[MarketPhase.REGULAR],
-        market="KR",
-    )
+    # 2026-04-20: KR ETF engine disabled — daily rotate of KODEX ETFs
+    # generated high trade volume (+16 orders in 6 days) with minimal PnL
+    # (+23k KRW total, many round-trips). KR dual_momentum alone is more
+    # efficient. Re-enable after ETF allocation cap is implemented.
+    # scheduler.add_task(
+    #     "kr_etf_evaluation",
+    #     task_kr_etf_evaluation,
+    #     interval_sec=900,
+    #     phases=[MarketPhase.REGULAR],
+    #     market="KR",
+    # )
 
     # ── Extended Hours Tasks ─────────────────────────────────────────
     # SL/TP monitoring during pre-market/after-hours (US + KR)
