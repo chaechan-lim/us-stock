@@ -654,8 +654,10 @@ markets:
     # is currently broken-then-fixed (currency bug, see project memory),
     # so we don't yet have a clean validation run for parking in KR.
     # Re-enable after running validate_cash_parking.py with market=KR.
+    # 2026-04-20: KR cash parking enabled — backtest V1: Sharpe 0.03→0.99,
+    # Ret +3.4%→+25.4%. KODEX 200 parking captures index return on idle cash.
     cash_parking:
-      enabled: false
+      enabled: true
       symbol: "069500"  # KODEX 200
       threshold: 0.30
       buffer: 0.10
