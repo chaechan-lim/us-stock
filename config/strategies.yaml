@@ -659,7 +659,7 @@ markets:
     cash_parking:
       enabled: true
       symbol: "069500"  # KODEX 200
-      threshold: 0.50   # 50% — park only when truly idle (matches US)
+      threshold: 0.70   # 70% — backtest V3: PF 1.45 (best), 21 trades (lowest cost)
       buffer: 0.10
     risk:
       kelly_fraction: 0.40       # Conservative (was 1.00, full Kelly too aggressive)

@@ -391,18 +391,14 @@ async def signal_quality(request: Request):
 @router.post("/adjust-tp")
 async def adjust_take_profit(request: Request, symbol: str, tp_pct: float):
     """Adjust take-profit percentage for a tracked position."""
-    tracker = getattr(request.app.state, "kr_position_tracker", None) or \
-              getattr(request.app.state, "position_tracker", None)
-    if not tracker:
-        return {"error": "No position tracker available"}
-    
-    tracked = tracker._tracked.get(symbol)
-    if not tracked:
-        # Try KR tracker if US didn't have it
-        kr_tracker = getattr(request.app.state, "kr_position_tracker", None)
-        if kr_tracker:
-            tracked = kr_tracker._tracked.get(symbol)
-    
+    # Try both US and KR trackers
+    tracked = None
+    for attr in ("position_tracker", "kr_position_tracker"):
+        t = getattr(request.app.state, attr, None)
+        if t and symbol in t._tracked:
+            tracked = t._tracked[symbol]
+            break
+
     if not tracked:
         return {"error": f"Position {symbol} not tracked"}
     
