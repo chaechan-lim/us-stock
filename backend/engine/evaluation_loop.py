@@ -148,6 +148,9 @@ class EvaluationLoop:
         # sit during low-conviction periods). Default disabled; opt-in via
         # markets.<MARKET>.cash_parking.enabled in strategies.yaml.
         self._cash_parking_enabled: bool = False
+        self._cash_parking_enable_unpark: bool = False
+        self._cash_parking_min_hold_days: int = 10  # 2 weeks default
+        self._cash_parking_parked_at: float = 0.0   # timestamp when parked
         self._cash_parking_symbol: str = "SPY" if market == "US" else "069500"
         self._cash_parking_threshold: float = 0.30  # park if cash > 30% of equity
         self._cash_parking_buffer: float = 0.10     # keep 10% cash buffer for opportunities
@@ -167,6 +170,8 @@ class EvaluationLoop:
         symbol: str | None = None,
         threshold: float | None = None,
         buffer: float | None = None,
+        min_hold_days: int | None = None,
+        enable_unpark: bool | None = None,
     ) -> None:
         """Configure cash parking (idle cash → SPY/KODEX 200).
 
@@ -175,6 +180,8 @@ class EvaluationLoop:
             symbol: Parking symbol (default SPY for US, 069500 for KR).
             threshold: Park when cash/equity > threshold (default 0.30).
             buffer: Keep this fraction of equity in cash (default 0.10).
+            min_hold_days: Minimum days before unpark allowed (default 10).
+            enable_unpark: Allow selling parking when BUY needs cash.
         """
         self._cash_parking_enabled = bool(enabled)
         if symbol:
@@ -187,10 +194,16 @@ class EvaluationLoop:
             if not (0.0 <= buffer <= 1.0):
                 raise ValueError(f"cash_parking buffer must be in [0,1], got {buffer}")
             self._cash_parking_buffer = float(buffer)
+        if min_hold_days is not None:
+            self._cash_parking_min_hold_days = int(min_hold_days)
+        if enable_unpark is not None:
+            self._cash_parking_enable_unpark = bool(enable_unpark)
         logger.info(
-            "Market %s: cash_parking enabled=%s symbol=%s threshold=%.2f buffer=%.2f",
+            "Market %s: cash_parking enabled=%s symbol=%s threshold=%.2f buffer=%.2f "
+            "min_hold=%dd unpark=%s",
             self._market, self._cash_parking_enabled, self._cash_parking_symbol,
             self._cash_parking_threshold, self._cash_parking_buffer,
+            self._cash_parking_min_hold_days, self._cash_parking_enable_unpark,
         )
 
     def set_min_confidence(self, value: float | None) -> None:
@@ -1183,8 +1196,65 @@ class EvaluationLoop:
             )
             if order:
                 self._last_park_action = now
+                self._cash_parking_parked_at = now
         except Exception as e:
             logger.warning("Cash parking BUY for %s failed: %s", sym, e)
+
+    async def _unpark_for_buy(self, needed: float, available: float) -> None:
+        """Sell parking position to free cash for a BUY signal.
+
+        Only sells if parking has been held >= min_hold_days (2 weeks default)
+        to ensure round-trip commission is covered by parking gains.
+        """
+        sym = self._cash_parking_symbol
+        min_hold_secs = self._cash_parking_min_hold_days * 86400
+        held_secs = time.time() - self._cash_parking_parked_at
+
+        if held_secs < min_hold_secs:
+            logger.debug(
+                "Unpark skipped for %s: held %.1f days < min %d days",
+                sym, held_secs / 86400, self._cash_parking_min_hold_days,
+            )
+            return
+
+        # Check if parking symbol is actually held
+        try:
+            positions = await self._market_data.get_positions()
+        except Exception:
+            return
+        parked = next((p for p in positions if p.symbol == sym and p.quantity > 0), None)
+        if not parked:
+            return
+
+        try:
+            df = await self._market_data.get_ohlcv(sym, limit=2)
+            if df.empty:
+                return
+            price = float(df["close"].iloc[-1])
+        except Exception:
+            return
+
+        try:
+            exchange = self._exchange_resolver.resolve(sym) if self._exchange_resolver else "NASD"
+        except Exception:
+            exchange = "NASD" if self._market == "US" else "KRX"
+
+        logger.info(
+            "Unpark: selling %d %s @ %.2f (held %.0f days, need %.0f, have %.0f)",
+            int(parked.quantity), sym, price, held_secs / 86400, needed, available,
+        )
+        try:
+            await self._order_manager.place_sell(
+                symbol=sym,
+                price=price,
+                quantity=int(parked.quantity),
+                strategy_name="cash_parking:unpark",
+                order_type="market" if self._market == "US" else "limit",
+                exchange=exchange,
+            )
+            self._cash_parking_parked_at = 0.0  # reset
+        except Exception as e:
+            logger.warning("Unpark SELL for %s failed: %s", sym, e)
 
     @staticmethod
     def _dedup_buy_candidates(
@@ -1696,6 +1766,17 @@ class EvaluationLoop:
                         return
                 except Exception as e:
                     logger.debug("Risk agent pre-trade check error: %s", e)
+
+            # Unpark: if cash is insufficient for this buy but parking is held
+            # long enough (min_hold_days), sell parking to free cash.
+            if (
+                self._cash_parking_enabled
+                and sizing.allocation_usd > balance.available
+                and getattr(self, "_cash_parking_enable_unpark", False)
+            ):
+                await self._unpark_for_buy(sizing.allocation_usd, balance.available)
+                # Refresh balance after unpark
+                balance = await self._market_data.get_balance()
 
             exchange = "KRX" if self._market == "KR" else self._exchange_resolver.resolve(symbol)
             order = await self._order_manager.place_buy(

@@ -127,6 +127,8 @@ def _apply_kr_eval_overrides(
             symbol=kr_park.get("symbol"),
             threshold=kr_park.get("threshold"),
             buffer=kr_park.get("buffer"),
+            min_hold_days=kr_park.get("min_hold_days"),
+            enable_unpark=kr_park.get("enable_unpark"),
         )
 
 
@@ -159,6 +161,8 @@ def _apply_us_eval_overrides(
         symbol=us_park.get("symbol"),
         threshold=us_park.get("threshold"),
         buffer=us_park.get("buffer"),
+        min_hold_days=us_park.get("min_hold_days"),
+        enable_unpark=us_park.get("enable_unpark"),
     )
 
 

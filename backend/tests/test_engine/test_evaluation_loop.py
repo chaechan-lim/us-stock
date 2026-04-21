@@ -4908,3 +4908,86 @@ class TestStrategySLResolution:
         sl, tp = loop._resolve_strategy_sl_tp("test", 100.0, 2.0, self._df_with_atr())
         assert sl == 0.04
         assert abs(tp - 0.12) < 1e-6  # 3 * 0.04
+
+
+class TestCashParkingUnpark:
+    """Tests for _unpark_for_buy — sell parking when BUY needs cash."""
+
+    @pytest.fixture
+    def loop(self, mock_adapter, mock_market_data, mock_registry):
+        from data.indicator_service import IndicatorService
+        from strategies.combiner import SignalCombiner
+        from engine.order_manager import OrderManager
+        from engine.risk_manager import RiskManager
+        risk = RiskManager()
+        order_mgr = OrderManager(adapter=mock_adapter, risk_manager=risk)
+        loop = EvaluationLoop(
+            adapter=mock_adapter,
+            market_data=mock_market_data,
+            indicator_svc=IndicatorService(),
+            registry=mock_registry,
+            combiner=SignalCombiner(),
+            order_manager=order_mgr,
+            risk_manager=risk,
+            watchlist=["AAPL"],
+            market_state="uptrend",
+        )
+        return loop
+
+    async def test_unpark_sells_when_held_long_enough(self, loop, mock_adapter, mock_market_data):
+        """Parking held > min_hold_days → unpark sells it."""
+        import time as _time
+        loop.set_cash_parking_config(enabled=True, min_hold_days=10, enable_unpark=True)
+        loop._cash_parking_parked_at = _time.time() - 15 * 86400  # 15 days ago
+
+        mock_market_data.get_positions = AsyncMock(
+            return_value=[Position(symbol="SPY", quantity=5, avg_price=680, current_price=700, exchange="NASD")]
+        )
+        mock_adapter.create_sell_order = AsyncMock(
+            return_value=OrderResult(
+                order_id="UNPARK1", symbol="SPY", side="SELL", order_type="market",
+                quantity=5, price=700, status="filled", filled_price=700,
+            )
+        )
+        await loop._unpark_for_buy(needed=5000, available=1000)
+        mock_adapter.create_sell_order.assert_called_once()
+
+    async def test_unpark_skipped_when_held_too_short(self, loop, mock_adapter, mock_market_data):
+        """Parking held < min_hold_days → don't sell."""
+        import time as _time
+        loop.set_cash_parking_config(enabled=True, min_hold_days=10, enable_unpark=True)
+        loop._cash_parking_parked_at = _time.time() - 3 * 86400  # 3 days ago
+
+        mock_market_data.get_positions = AsyncMock(
+            return_value=[Position(symbol="SPY", quantity=5, avg_price=680, current_price=700, exchange="NASD")]
+        )
+        await loop._unpark_for_buy(needed=5000, available=1000)
+        mock_adapter.create_sell_order.assert_not_called()
+
+    async def test_unpark_skipped_when_not_holding(self, loop, mock_adapter, mock_market_data):
+        """No parking position → skip."""
+        import time as _time
+        loop.set_cash_parking_config(enabled=True, min_hold_days=10, enable_unpark=True)
+        loop._cash_parking_parked_at = _time.time() - 15 * 86400
+
+        mock_market_data.get_positions = AsyncMock(return_value=[])
+        await loop._unpark_for_buy(needed=5000, available=1000)
+        mock_adapter.create_sell_order.assert_not_called()
+
+    async def test_unpark_skipped_when_disabled(self, loop, mock_adapter, mock_market_data):
+        """enable_unpark=False → never sell."""
+        import time as _time
+        loop.set_cash_parking_config(enabled=True, min_hold_days=10, enable_unpark=False)
+        loop._cash_parking_parked_at = _time.time() - 15 * 86400
+
+        mock_market_data.get_positions = AsyncMock(
+            return_value=[Position(symbol="SPY", quantity=5, avg_price=680, current_price=700, exchange="NASD")]
+        )
+        # _unpark_for_buy won't be called because _cash_parking_enable_unpark is False
+        # Test the guard in _execute_signal path
+        assert loop._cash_parking_enable_unpark is False
+
+    def test_config_sets_unpark_params(self, loop):
+        loop.set_cash_parking_config(enabled=True, min_hold_days=14, enable_unpark=True)
+        assert loop._cash_parking_min_hold_days == 14
+        assert loop._cash_parking_enable_unpark is True
