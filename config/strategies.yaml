@@ -602,7 +602,9 @@ markets:
       enabled: true
       symbol: SPY
       threshold: 0.50   # park when cash > 50% (burst용 현금 확보 + 수수료 절약)
-      buffer: 0.10      # keep 10% of equity in cash for opportunities
+      buffer: 0.10
+      min_hold_days: 10  # 2주 최소 보유 (수수료 회수)
+      enable_unpark: true # BUY 시그널 시 현금 부족하면 parking 매도
   KR:
     # 2026-04-08 — full KR re-evaluation after the KR-currency bug fix
     #   (full_pipeline.py initial_equity now auto-scales to 100M KRW).
@@ -660,6 +662,8 @@ markets:
       enabled: true
       symbol: "069500"  # KODEX 200
       threshold: 0.70   # 70% — backtest V3: PF 1.45 (best), 21 trades (lowest cost)
+      min_hold_days: 10  # 2주 최소 보유 (수수료 회수)
+      enable_unpark: true # BUY 시그널 시 현금 부족하면 parking 매도
       buffer: 0.10
     risk:
       kelly_fraction: 0.40       # Conservative (was 1.00, full Kelly too aggressive)

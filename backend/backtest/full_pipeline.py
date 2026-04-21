@@ -271,12 +271,15 @@ class PipelineConfig:
     # Strategy selection
     disabled_strategies: list[str] = field(default_factory=list)  # Strategies to skip
 
-    # Cash parking: invest idle cash in SPY
-    enable_cash_parking: bool = False   # Park idle cash in SPY
+    # Cash parking: invest idle cash in index ETF
+    enable_cash_parking: bool = False
     cash_parking_symbol: str = "SPY"
-    cash_parking_threshold: float = 0.30  # Park if cash > 30% of portfolio
-    cash_parking_skip_downtrend: bool = False  # Skip parking in WEAK_DOWNTREND/DOWNTREND
-    cash_parking_sell_on_downtrend: bool = False  # Force-sell SPY parking when regime turns down
+    cash_parking_threshold: float = 0.30
+    cash_parking_skip_downtrend: bool = False
+    cash_parking_sell_on_downtrend: bool = False
+    cash_parking_split_ratio: float = 1.0     # 1.0=lump, 0.25=buy 25% per cycle
+    cash_parking_min_hold_days: int = 0       # 0=no minimum, 10=~2 weeks
+    cash_parking_enable_unpark: bool = False   # sell parking when BUY needs cash
 
     # Leveraged ETF allocation
     enable_leveraged_etf: bool = False
@@ -814,17 +817,24 @@ class FullPipelineBacktest:
             # Execute BUYs ranked by confidence (highest first)
             if buy_candidates:
                 buy_candidates.sort(key=lambda x: x[0], reverse=True)
-                # Sell SPY parking to free cash for stock buys
+                # Unpark: sell parking ETF to free cash for stock buys
+                # Only if enable_unpark=True and min_hold_days met
                 parking_sym = cfg.cash_parking_symbol
-                if cfg.enable_cash_parking and parking_sym in self._positions:
-                    data = stock_data.get(parking_sym)
-                    if data and date_idx < len(data.df):
-                        _row = data.df.iloc[date_idx]
-                        price = float(_row["close"])
-                        _vol = float(_row["volume"]) if "volume" in _row.index else 0.0
-                        self._close_position(
-                            parking_sym, price, date, "cash_unpark", volume=_vol,
-                        )
+                if (
+                    cfg.enable_cash_parking
+                    and cfg.cash_parking_enable_unpark
+                    and parking_sym in self._positions
+                ):
+                    pos = self._positions[parking_sym]
+                    held_days = day_count - pos.entry_day_count
+                    if held_days >= cfg.cash_parking_min_hold_days:
+                        data = stock_data.get(parking_sym)
+                        if data and date_idx < len(data.df):
+                            price = float(data.df.iloc[date_idx]["close"])
+                            _vol = float(data.df.iloc[date_idx].get("volume", 0)) if "volume" in data.df.columns else 0.0
+                            self._close_position(
+                                parking_sym, price, date, "cash_unpark", volume=_vol,
+                            )
 
                 # Reset daily buy count on new day
                 date_str = str(date)
@@ -916,10 +926,11 @@ class FullPipelineBacktest:
     def _manage_cash_parking(
         self, stock_data: dict, date_idx: int, date, regime_str: str = "uptrend",
     ) -> None:
-        """Park excess cash in SPY to reduce cash drag.
+        """Park excess cash in index ETF with split-buy + min-hold unpark.
 
-        When cash exceeds threshold, buy SPY with the excess.
-        SPY is sold before stock buys to free up cash.
+        Split buy: buys split_ratio of excess per cycle (default 1.0 = lump).
+        Unpark: when enable_unpark=True and a BUY candidate needs more cash
+                than available, sells parking if held >= min_hold_days.
         """
         cfg = self._config
         parking_sym = cfg.cash_parking_symbol
@@ -936,8 +947,37 @@ class FullPipelineBacktest:
                 price = float(data.df.iloc[date_idx]["close"])
                 self._close_position(parking_sym, price, date, "cash_parking_regime_exit")
 
-        # Skip if already holding parking position
+        # Already holding: check if we should add more (split buy)
         if parking_sym in self._positions:
+            # Only add if split_ratio < 1 (split mode) and cash still above threshold
+            if cfg.cash_parking_split_ratio >= 1.0:
+                return  # lump mode: already fully parked
+            data = stock_data.get(parking_sym)
+            if not data or date_idx >= len(data.df):
+                return
+            equity = self._calculate_equity(stock_data, date_idx)
+            cash_pct = self._cash / equity if equity > 0 else 0
+            if cash_pct < cfg.cash_parking_threshold:
+                return
+            # Add more: split_ratio of remaining excess
+            park_amount = (self._cash - equity * 0.10) * cfg.cash_parking_split_ratio
+            if park_amount <= 0:
+                return
+            price = float(data.df.iloc[date_idx]["close"])
+            if price <= 0:
+                return
+            exec_price = price * (1 + cfg.slippage_pct / 100)
+            add_qty = int(park_amount / exec_price)
+            if add_qty <= 0:
+                return
+            add_cost = add_qty * exec_price + cfg.commission_per_order
+            if add_cost > self._cash:
+                return
+            self._cash -= add_cost
+            pos = self._positions[parking_sym]
+            total_cost = pos.avg_price * pos.quantity + add_qty * exec_price
+            pos.quantity += add_qty
+            pos.avg_price = total_cost / pos.quantity
             return
 
         # Skip parking entirely in downtrend if configured
@@ -951,12 +991,11 @@ class FullPipelineBacktest:
         equity = self._calculate_equity(stock_data, date_idx)
         cash_pct = self._cash / equity if equity > 0 else 0
 
-        # Only park if cash exceeds threshold
         if cash_pct < cfg.cash_parking_threshold:
             return
 
-        # Park the excess cash (keep some buffer for opportunities)
-        park_amount = self._cash - equity * 0.10  # Keep 10% cash buffer
+        # Initial buy: split_ratio of excess
+        park_amount = (self._cash - equity * 0.10) * cfg.cash_parking_split_ratio
         if park_amount <= 0:
             return
 
