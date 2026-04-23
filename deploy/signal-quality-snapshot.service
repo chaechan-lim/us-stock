@@ -1,0 +1,12 @@
+[Unit]
+Description=Snapshot live SignalQualityTracker state from trades DB
+After=usstock-backend.service
+
+[Service]
+Type=oneshot
+User=chans
+WorkingDirectory=/home/chans/us-stock/backend
+EnvironmentFile=/home/chans/us-stock/.env
+ExecStart=/home/chans/us-stock/venv/bin/python scripts/snapshot_signal_quality.py
+StandardOutput=journal
+StandardError=journal

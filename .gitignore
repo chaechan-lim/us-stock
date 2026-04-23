@@ -58,3 +58,7 @@ nohup.out
 .symphony-followup.json
 .symphony-subtasks.json
 .symphony-result.json
+
+# Runtime-generated snapshots (regenerated weekly by
+# signal-quality-snapshot.timer from the live trades DB).
+data/signal_quality_snapshot.json
