@@ -18,6 +18,7 @@ from typing import Any, TYPE_CHECKING
 
 import pandas as pd
 
+from core.constants import USD_KRW_FALLBACK
 from analytics.factor_model import FactorScores, MultiFactorModel
 from analytics.signal_quality import SignalQualityTracker
 from core.enums import SignalType
@@ -88,7 +89,7 @@ class EvaluationLoop:
         self._account_id = account_id
         self._event_calendar = event_calendar
         self._other_market_data: MarketDataService | None = None
-        self._exchange_rate: float = 1450.0  # USD/KRW default
+        self._exchange_rate: float = USD_KRW_FALLBACK
         self._factor_scores: dict[str, FactorScores] = {}
         self._last_classify_time: dict[str, float] = {}
         self._reclassify_interval = 86400  # re-classify every 24h
@@ -154,6 +155,15 @@ class EvaluationLoop:
         self._cash_parking_symbol: str = "SPY" if market == "US" else "069500"
         self._cash_parking_threshold: float = 0.30  # park if cash > 30% of equity
         self._cash_parking_buffer: float = 0.10     # keep 10% cash buffer for opportunities
+        # Per-cycle position cache — set at start of _evaluate_all, cleared after.
+        # Downstream methods use _get_positions() which returns this cache when fresh.
+        self._cycle_positions: list | None = None
+
+    async def _get_positions(self) -> list:
+        """Return cached positions from current eval cycle, or fetch fresh."""
+        if self._cycle_positions is not None:
+            return self._cycle_positions
+        return await self._market_data.get_positions()
 
     def set_disabled_strategies(self, names: list[str]) -> None:
         """Set market-specific disabled strategy names."""
@@ -515,8 +525,13 @@ class EvaluationLoop:
             logger.warning("Failed to load sell cooldowns from Redis: %s", e)
             return 0
 
+    def set_etf_exclusions(self, symbols: set[str]) -> None:
+        """Extend ETF exclusion set (e.g. with KR ETF symbols from config)."""
+        self._etf_exclude = self._ETF_ONLY | frozenset(symbols)
+
     def set_watchlist(self, symbols: list[str]) -> None:
-        self._watchlist = [s for s in symbols if s not in self._ETF_ONLY]
+        exclude = getattr(self, "_etf_exclude", self._ETF_ONLY)
+        self._watchlist = [s for s in symbols if s not in exclude]
 
     def set_market_state(self, state: str) -> None:
         self._prev_market_state = self._market_state
@@ -578,7 +593,7 @@ class EvaluationLoop:
                     signal = await strategy.analyze(df, symbol)
                     signals.append(signal)
                 except Exception as e:
-                    logger.debug("Strategy %s failed on %s: %s", strategy.name, symbol, e)
+                    logger.warning("Strategy %s failed on %s: %s", strategy.name, symbol, e)
 
             # Get per-stock blended weights
             market_weights = self._registry.get_profile_weights(self._market_state)
@@ -810,19 +825,27 @@ class EvaluationLoop:
         # get SELL evaluations even when position_tracker is empty (e.g.
         # after restart before restore_from_exchange completes).
         # Also build position_map for P&L-based exit decisions (STOCK-7).
+        # Cache positions for this cycle so downstream methods don't refetch.
         position_map: dict[str, object] = {}
         try:
             exchange_positions = await self._market_data.get_positions()
+            self._cycle_positions = exchange_positions
             exchange_held = {p.symbol for p in exchange_positions if p.quantity > 0}
             held = held | exchange_held
             position_map = {p.symbol: p for p in exchange_positions if p.quantity > 0}
         except Exception as e:
+            self._cycle_positions = None
             logger.warning(
                 "Exchange position fetch failed, using tracker only: %s", e, exc_info=True
             )
 
         recovery = set(self._recovery_watch.keys()) - held
-        eval_symbols = list(dict.fromkeys(self._watchlist + sorted(held) + sorted(recovery)))
+        # Filter ETF symbols from held + recovery so ETFs managed by
+        # etf_engine don't get evaluated by individual-stock strategies.
+        exclude = getattr(self, "_etf_exclude", self._ETF_ONLY)
+        filtered_held = sorted(s for s in held if s not in exclude)
+        filtered_recovery = sorted(s for s in recovery if s not in exclude)
+        eval_symbols = list(dict.fromkeys(self._watchlist + filtered_held + filtered_recovery))
 
         # Phase 0: Regime-change and sentiment-based protective sells
         sold_in_phase0: set[str] = set()
@@ -877,7 +900,7 @@ class EvaluationLoop:
                     except asyncio.TimeoutError:
                         logger.warning("Strategy %s timed out on %s", strategy.name, symbol)
                     except Exception as e:
-                        logger.debug("Strategy %s failed on %s: %s", strategy.name, symbol, e)
+                        logger.warning("Strategy %s failed on %s: %s", strategy.name, symbol, e)
 
                 market_weights = self._registry.get_profile_weights(self._market_state)
                 weights = self._adaptive.get_weights(symbol, market_weights)
@@ -1092,6 +1115,9 @@ class EvaluationLoop:
         if self._cash_parking_enabled:
             await self._park_excess_cash()
 
+        # Clear per-cycle position cache
+        self._cycle_positions = None
+
     async def _park_excess_cash(self) -> None:
         """Park idle cash in SPY/KODEX 200 — ONCE, then hold.
 
@@ -1120,7 +1146,7 @@ class EvaluationLoop:
 
         # Already holding? skip
         try:
-            positions = await self._market_data.get_positions()
+            positions = await self._get_positions()
             if any(p.symbol == sym and p.quantity > 0 for p in positions):
                 return
         except Exception as e:
@@ -1219,7 +1245,7 @@ class EvaluationLoop:
 
         # Check if parking symbol is actually held
         try:
-            positions = await self._market_data.get_positions()
+            positions = await self._get_positions()
         except Exception:
             return
         parked = next((p for p in positions if p.symbol == sym and p.quantity > 0), None)
@@ -1335,7 +1361,7 @@ class EvaluationLoop:
             return set()
 
         sold_symbols: set[str] = set()
-        positions = await self._market_data.get_positions()
+        positions = await self._get_positions()
         position_map = {p.symbol: p for p in positions}
 
         for symbol in list(held):
@@ -1633,7 +1659,7 @@ class EvaluationLoop:
                     return
 
             balance = await self._market_data.get_balance()
-            positions = await self._market_data.get_positions()
+            positions = await self._get_positions()
 
             # Sector concentration check
             est_cost = price * 10  # Rough estimate; will be refined by Kelly
@@ -1677,6 +1703,17 @@ class EvaluationLoop:
             # Combined portfolio value for integrated margin allocation
             combined_pv = await self._get_combined_portfolio_value(balance.total)
 
+            # STOCK-57: Real per-market invested value. In 통합증거금 accounts
+            # balance.total reflects the whole-account total (not just this
+            # market), so the risk manager cannot infer market-specific invested
+            # from `balance.total - balance.available`. Compute it directly
+            # from this market's position list.
+            market_invested = sum(
+                (getattr(p, "current_price", 0) or 0) * p.quantity
+                for p in positions
+                if p.quantity > 0
+            )
+
             # Get factor score for this stock
             factor = self._factor_scores.get(symbol)
             factor_score = factor.composite if factor else 0.0
@@ -1708,6 +1745,7 @@ class EvaluationLoop:
                 combined_portfolio_value=combined_pv,
                 existing_position_value=existing_value,
                 max_drawdown=metrics.max_drawdown,
+                market_invested=market_invested,
             )
 
             # Macro event sizing reduction (CPI/JOBS day = half size)
@@ -1845,7 +1883,7 @@ class EvaluationLoop:
                 return
             # US: if pending, we'll cancel + escalate below
 
-            positions = await self._market_data.get_positions()
+            positions = await self._get_positions()
             pos = next((p for p in positions if p.symbol == symbol), None)
             if pos and pos.quantity > 0:
                 exchange = (
@@ -1921,7 +1959,7 @@ class EvaluationLoop:
                 strategy=tracked.strategy,
             )
         except Exception as e:
-            logger.debug("Failed to build position context for %s: %s", symbol, e)
+            logger.warning("Failed to build position context for %s: %s", symbol, e)
             return None
 
     def record_trade_result(

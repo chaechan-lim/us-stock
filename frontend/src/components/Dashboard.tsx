@@ -146,7 +146,7 @@ export default function Dashboard() {
               const mkt = (p as { market?: string }).market ?? 'US'
               const cur = mkt === 'KR' ? 'KRW' : 'USD'
               const live = prices[p.symbol]
-              const currentPrice = live?.price ?? p.current_price
+              const currentPrice = (live?.price && live.price > 0) ? live.price : p.current_price
               const pnl = (currentPrice - p.avg_price) * p.quantity
               const pnlPct = p.avg_price > 0 ? ((currentPrice - p.avg_price) / p.avg_price) * 100 : 0
               const isActive = (mkt === 'KR' && krActive) || (mkt === 'US' && usActive)
@@ -204,7 +204,7 @@ export default function Dashboard() {
                   const mkt = (p as { market?: string }).market ?? 'US'
                   const cur = mkt === 'KR' ? 'KRW' : 'USD'
                   const live = prices[p.symbol]
-                  const currentPrice = live?.price ?? p.current_price
+                  const currentPrice = (live?.price && live.price > 0) ? live.price : p.current_price
                   const pnl = (currentPrice - p.avg_price) * p.quantity
                   const pnlPct = p.avg_price > 0 ? ((currentPrice - p.avg_price) / p.avg_price) * 100 : 0
                   const isActive = (mkt === 'KR' && krActive) || (mkt === 'US' && usActive)

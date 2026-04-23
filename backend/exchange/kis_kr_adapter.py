@@ -28,6 +28,7 @@ from exchange.base import (
     Ticker,
 )
 from exchange.kis_auth import KISAuth
+from exchange.utils import safe_float as _safe_float
 
 logger = logging.getLogger(__name__)
 
@@ -47,18 +48,6 @@ class KRRankedStock:
     volume: float = 0.0
     exchange: str = "KRX"  # KRX (KOSPI) or KOSDAQ
     source: str = ""
-
-
-def _safe_float(val: Any) -> float:
-    """Safely convert a KIS API value to float.
-
-    KIS endpoints can return "N/A", "-", or empty strings for
-    fields during trading halts or special states.
-    """
-    try:
-        return float(val or 0)
-    except (ValueError, TypeError):
-        return 0.0
 
 
 # TR_ID mappings for Korean domestic stock operations

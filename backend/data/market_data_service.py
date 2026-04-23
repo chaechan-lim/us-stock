@@ -13,6 +13,8 @@ import asyncio
 import time
 import logging
 from concurrent.futures import ThreadPoolExecutor
+
+from core.constants import USD_KRW_FALLBACK
 from typing import Any
 
 import pandas as pd
@@ -239,7 +241,7 @@ class MarketDataService:
             rate = getattr(self._adapter, "_last_exchange_rate", 0.0)
 
         if rate <= 0:
-            rate = 1450.0  # hard fallback
+            rate = USD_KRW_FALLBACK
 
         self._exchange_rate_cache = (rate, now)
         return rate

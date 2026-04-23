@@ -429,6 +429,69 @@ class TestMarketAllocation:
         assert result.allowed is False
         assert "exposure" in result.reason.lower() or "cash" in result.reason.lower()
 
+    def test_integrated_margin_uses_market_invested(self):
+        """STOCK-57: 통합증거금 accounts — `balance.total` reflects the whole
+        account (shared deposits), so `portfolio_value - cash_available` does
+        NOT equal this market's real invested capital. Previously this caused
+        spurious 100% exposure readings blocking every buy (2026-04-23).
+
+        Incident numbers (US side):
+          portfolio_value = $10,642 (whole-account total, inflated by 통합 deposits)
+          cash_available  = $5,396
+          combined_pv     = $7,888 (positions-only combined, KR+US)
+          real US positions = $3,238
+
+        Without market_invested: invested_inferred = 10642-5396 = 5246.
+        capped_portfolio = 7888*0.5 = 3944. capped_cash = max(0, 3944-5246)=0.
+        Exposure check sees (3944-0)/3944 = 100% → REJECTED.
+
+        With market_invested=3238: capped_cash = max(0, 3944-3238)=706.
+        Exposure check sees (3944-706)/3944 = 82% → allowed.
+        """
+        rm = self._make_rm(us=0.5, kr=0.5)
+        # Without market_invested override (old behavior) → blocked at 100%
+        blocked = rm.calculate_position_size(
+            symbol="AAPL",
+            price=100.0,
+            portfolio_value=10_642,
+            cash_available=5_396,
+            current_positions=0,
+            market="US",
+            combined_portfolio_value=7_888,
+        )
+        assert blocked.allowed is False
+        assert "exposure" in blocked.reason.lower()
+
+        # With explicit market_invested → cap math is correct, buy allowed
+        allowed = rm.calculate_position_size(
+            symbol="AAPL",
+            price=100.0,
+            portfolio_value=10_642,
+            cash_available=5_396,
+            current_positions=0,
+            market="US",
+            combined_portfolio_value=7_888,
+            market_invested=3_238,
+        )
+        assert allowed.allowed is True
+        assert allowed.quantity > 0
+
+    def test_integrated_margin_kelly_uses_market_invested(self):
+        """Kelly sizing path also respects market_invested override."""
+        rm = self._make_rm(us=0.5, kr=0.5)
+        allowed = rm.calculate_kelly_position_size(
+            symbol="AAPL",
+            price=100.0,
+            portfolio_value=10_642,
+            cash_available=5_396,
+            current_positions=0,
+            market="US",
+            combined_portfolio_value=7_888,
+            market_invested=3_238,
+        )
+        assert allowed.allowed is True
+        assert allowed.quantity > 0
+
     def test_exposure_correct_without_combined(self):
         """Without combined_portfolio, exposure still correctly tracks invested."""
         rm = self._make_rm(us=0.5, kr=0.5)

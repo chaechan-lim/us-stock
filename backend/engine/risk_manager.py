@@ -137,6 +137,7 @@ class RiskManager:
         cash_available: float,
         market: str | None = None,
         combined_portfolio_value: float | None = None,
+        market_invested: float | None = None,
     ) -> tuple[float, float]:
         """Apply market-level allocation cap to portfolio_value and cash_available.
 
@@ -147,6 +148,14 @@ class RiskManager:
         When combined_portfolio_value is provided (integrated margin accounts),
         the cap is applied to the combined total instead of the per-market total.
         This ensures 50% means 50% of the whole account, not 50% of one market's view.
+
+        STOCK-57: In 통합증거금 accounts, `portfolio_value` from the adapter
+        already reflects the whole-account total (shared deposits inflate it),
+        so `portfolio_value - cash_available` does NOT equal this market's real
+        invested capital. Pass `market_invested` (sum of this market's position
+        values) explicitly to fix exposure math. Without this override the cap
+        produced spurious 100% exposure readings that blocked every buy
+        (2026-04-23 overnight — zero US trades despite 20+ BUY candidates).
         """
         if not market:
             return portfolio_value, cash_available
@@ -164,7 +173,10 @@ class RiskManager:
             # Single-market mode: cap at this market's own total
             capped_portfolio = min(capped_portfolio, portfolio_value)
         # Preserve actual invested amount so exposure check works correctly.
-        invested = portfolio_value - cash_available
+        if market_invested is not None:
+            invested = market_invested
+        else:
+            invested = portfolio_value - cash_available
         capped_cash = max(0.0, capped_portfolio - invested)
         capped_cash = min(capped_cash, cash_available)  # can't exceed real cash
         return capped_portfolio, capped_cash
@@ -238,6 +250,7 @@ class RiskManager:
         combined_portfolio_value: float | None = None,
         existing_position_value: float = 0.0,
         existing_symbol_exposure: float = 0.0,
+        market_invested: float | None = None,
     ) -> PositionSizeResult:
         """Calculate allowed position size given risk constraints.
 
@@ -262,6 +275,7 @@ class RiskManager:
             cash_available,
             market,
             combined_portfolio_value,
+            market_invested,
         )
 
         # STOCK-26 + STOCK-30: Per-symbol concentration check
@@ -364,6 +378,7 @@ class RiskManager:
         existing_position_value: float = 0.0,
         existing_symbol_exposure: float = 0.0,
         max_drawdown: float = 0.0,
+        market_invested: float | None = None,
     ) -> PositionSizeResult:
         """Kelly-enhanced position sizing.
 
@@ -385,6 +400,7 @@ class RiskManager:
             cash_available,
             market,
             combined_portfolio_value,
+            market_invested,
         )
 
         # STOCK-26 + STOCK-30: Per-symbol concentration check (shared helper)
@@ -616,6 +632,7 @@ class RiskManager:
         combined_portfolio_value: float | None = None,
         existing_position_value: float = 0.0,
         existing_symbol_exposure: float = 0.0,
+        market_invested: float | None = None,
     ) -> PositionSizeResult:
         """Conservative position sizing for extended hours trading.
 
@@ -641,6 +658,7 @@ class RiskManager:
             cash_available,
             market,
             combined_portfolio_value,
+            market_invested,
         )
 
         # STOCK-32: Per-symbol concentration check (shared helper)

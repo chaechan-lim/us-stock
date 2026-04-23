@@ -130,6 +130,8 @@ def _apply_kr_eval_overrides(
             min_hold_days=kr_park.get("min_hold_days"),
             enable_unpark=kr_park.get("enable_unpark"),
         )
+    else:
+        kr_loop.set_cash_parking_config(enabled=False)
 
 
 def _apply_us_eval_overrides(
@@ -1753,6 +1755,12 @@ async def lifespan(app: FastAPI):
     kr_evaluation_loop._hard_sl_pct = registry.config_loader.get_hard_sl_pct()
     kr_evaluation_loop.set_cache(cache)
     kr_position_tracker.register_on_sell(kr_evaluation_loop.register_sell_cooldown)
+
+    # Exclude KR ETF symbols from evaluation loop's watchlist.
+    # Without this, ETF symbols from KIS ranking APIs that leaked into the
+    # DB watchlist would be traded by individual-stock strategies (e.g.
+    # dual_momentum bought KODEX 은행 091170 as if it were a bank stock).
+    kr_evaluation_loop.set_etf_exclusions(set(kr_etf_universe.all_etf_symbols))
 
     # STOCK-65: Apply KR market-specific overrides (eval loop + disabled strategies)
     # from strategies.yaml. Also stored on app.state so hot-reload can re-apply.

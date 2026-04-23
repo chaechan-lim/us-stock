@@ -26,7 +26,9 @@ from exchange.base import (
     Position,
     Ticker,
 )
+from core.constants import USD_KRW_FALLBACK
 from exchange.kis_auth import KISAuth
+from exchange.utils import safe_float as _safe_float
 
 
 @dataclass
@@ -109,7 +111,7 @@ class KISAdapter(ExchangeAdapter):
         self._session: aiohttp.ClientSession | None = None
         self._is_paper = "vts" in config.base_url
         self._tr = TR_ID_PAPER if self._is_paper else TR_ID_LIVE
-        self._last_exchange_rate: float = 1450.0  # USD/KRW
+        self._last_exchange_rate: float = USD_KRW_FALLBACK
         self._usd_deposit_krw: float = 0.0  # 달러예수금 (KRW equivalent)
         self._tot_asst_krw: float = 0.0  # CTRP6504R tot_asst_amt (해외자산+예수금)
         self._tot_dncl_krw: float = 0.0  # CTRP6504R tot_dncl_amt (예수금, 통합증거금 공유)
@@ -147,9 +149,9 @@ class KISAdapter(ExchangeAdapter):
         output = data.get("output", {})
         return Ticker(
             symbol=symbol,
-            price=float(output.get("last", 0)),
-            change_pct=float(output.get("rate", 0)),
-            volume=float(output.get("tvol", 0)),
+            price=_safe_float(output.get("last", 0)),
+            change_pct=_safe_float(output.get("rate", 0)),
+            volume=_safe_float(output.get("tvol", 0)),
         )
 
     async def fetch_ohlcv(
@@ -184,11 +186,11 @@ class KISAdapter(ExchangeAdapter):
                 candles.append(
                     Candle(
                         timestamp=int(item.get("xymd", "0")),
-                        open=float(item.get("open", 0)),
-                        high=float(item.get("high", 0)),
-                        low=float(item.get("low", 0)),
-                        close=float(item.get("clos", 0)),
-                        volume=float(item.get("tvol", 0)),
+                        open=_safe_float(item.get("open", 0)),
+                        high=_safe_float(item.get("high", 0)),
+                        low=_safe_float(item.get("low", 0)),
+                        close=_safe_float(item.get("clos", 0)),
+                        volume=_safe_float(item.get("tvol", 0)),
                     )
                 )
             except (ValueError, KeyError):
@@ -216,10 +218,10 @@ class KISAdapter(ExchangeAdapter):
         bids = []
         asks = []
         for i in range(1, min(limit, 11)):
-            bp = float(output.get(f"bidp{i}", 0))
-            bq = float(output.get(f"bidq{i}", 0))
-            ap = float(output.get(f"askp{i}", 0))
-            aq = float(output.get(f"askq{i}", 0))
+            bp = _safe_float(output.get(f"bidp{i}", 0))
+            bq = _safe_float(output.get(f"bidq{i}", 0))
+            ap = _safe_float(output.get(f"askp{i}", 0))
+            aq = _safe_float(output.get(f"askq{i}", 0))
             if bp > 0:
                 bids.append((bp, bq))
             if ap > 0:
@@ -251,11 +253,11 @@ class KISAdapter(ExchangeAdapter):
             pb_o3 = pb_o3[0]
 
         # Get exchange rate and total KRW deposits
-        exrt = float(pb_o3.get("frst_bltn_exrt", 0)) if pb_o3 else 0
+        exrt = _safe_float(pb_o3.get("frst_bltn_exrt", 0)) if pb_o3 else 0
         if exrt <= 0:
-            exrt = 1450.0  # fallback
-        tot_asst_krw = float(pb_o3.get("tot_asst_amt", 0)) if pb_o3 else 0
-        tot_dncl_krw = float(pb_o3.get("tot_dncl_amt", 0)) if pb_o3 else 0
+            exrt = USD_KRW_FALLBACK
+        tot_asst_krw = _safe_float(pb_o3.get("tot_asst_amt", 0)) if pb_o3 else 0
+        tot_dncl_krw = _safe_float(pb_o3.get("tot_dncl_amt", 0)) if pb_o3 else 0
 
         # 2. Position value from inquire-balance (more accurate per-position data)
         bal_params = {
@@ -273,8 +275,8 @@ class KISAdapter(ExchangeAdapter):
         )
         position_value = 0.0
         for item in data.get("output1", []):
-            qty = float(item.get("ovrs_cblc_qty", 0))
-            cur_price = float(item.get("now_pric2", 0))
+            qty = _safe_float(item.get("ovrs_cblc_qty", 0))
+            cur_price = _safe_float(item.get("now_pric2", 0))
             if qty > 0 and cur_price > 0:
                 position_value += qty * cur_price
 
@@ -294,9 +296,9 @@ class KISAdapter(ExchangeAdapter):
         bp_output = bp_data.get("output", {})
 
         # Use frcr_ord_psbl_amt1 (includes KRW auto-conversion) as available
-        available = float(bp_output.get("frcr_ord_psbl_amt1", 0))
+        available = _safe_float(bp_output.get("frcr_ord_psbl_amt1", 0))
         if available <= 0:
-            available = float(bp_output.get("ord_psbl_frcr_amt", 0))
+            available = _safe_float(bp_output.get("ord_psbl_frcr_amt", 0))
         if available <= 0:
             available = await self._estimate_usd_from_krw()
 
@@ -304,11 +306,11 @@ class KISAdapter(ExchangeAdapter):
         self._last_exchange_rate = exrt
         self._tot_asst_krw = tot_asst_krw  # 해외자산 + 예수금 (KR stocks 미포함)
         self._tot_dncl_krw = tot_dncl_krw  # 예수금 (통합증거금 공유)
-        self._usd_deposit_krw = float(pb_o3.get("frcr_evlu_tota", 0)) if pb_o3 else 0
-        self._us_position_value_krw = float(
+        self._usd_deposit_krw = _safe_float(pb_o3.get("frcr_evlu_tota", 0)) if pb_o3 else 0
+        self._us_position_value_krw = _safe_float(
             pb_o3.get("evlu_amt_smtl", 0) or pb_o3.get("evlu_amt_smtl_amt", 0) or 0
         ) if pb_o3 else 0
-        self._withdrawable_total_krw = float(
+        self._withdrawable_total_krw = _safe_float(
             pb_o3.get("wdrw_psbl_tot_amt", 0) or 0
         ) if pb_o3 else 0
         # STOCK-53: Store uncapped buying power + positions for total_equity calc.
@@ -430,7 +432,7 @@ class KISAdapter(ExchangeAdapter):
             )
             output = data.get("output", {})
             # t_rate = today's exchange rate
-            rate = float(output.get("t_rate", 0))
+            rate = _safe_float(output.get("t_rate", 0))
             if rate > 0:
                 logger.debug("Exchange rate from KIS: %.2f", rate)
                 return rate
@@ -455,12 +457,12 @@ class KISAdapter(ExchangeAdapter):
         )
         positions = []
         for item in data.get("output1", []):
-            qty = float(item.get("ovrs_cblc_qty", 0))
+            qty = _safe_float(item.get("ovrs_cblc_qty", 0))
             if qty <= 0:
                 continue
-            avg_price = float(item.get("pchs_avg_pric", 0))
-            cur_price = float(item.get("now_pric2", 0))
-            pnl = float(item.get("frcr_evlu_pfls_amt", 0))
+            avg_price = _safe_float(item.get("pchs_avg_pric", 0))
+            cur_price = _safe_float(item.get("now_pric2", 0))
+            pnl = _safe_float(item.get("frcr_evlu_pfls_amt", 0))
             positions.append(
                 Position(
                     symbol=item.get("ovrs_pdno", ""),
@@ -596,9 +598,9 @@ class KISAdapter(ExchangeAdapter):
         )
         results = []
         for item in data.get("output", []):
-            total_qty = float(item.get("ft_ord_qty", 0))
-            filled_qty = float(item.get("ft_ccld_qty", 0))
-            filled_price = float(item.get("ft_ccld_unpr3", 0)) or None
+            total_qty = _safe_float(item.get("ft_ord_qty", 0))
+            filled_qty = _safe_float(item.get("ft_ccld_qty", 0))
+            filled_price = _safe_float(item.get("ft_ccld_unpr3", 0)) or None
             if filled_qty <= 0:
                 continue
             results.append(
@@ -608,7 +610,7 @@ class KISAdapter(ExchangeAdapter):
                     side="buy" if item.get("sll_buy_dvsn_cd") == "02" else "sell",
                     order_type="limit",
                     quantity=total_qty,
-                    price=float(item.get("ft_ord_unpr3", 0)),
+                    price=_safe_float(item.get("ft_ord_unpr3", 0)),
                     filled_quantity=filled_qty,
                     filled_price=filled_price,
                     status="filled" if filled_qty >= total_qty else "partial",
@@ -639,9 +641,9 @@ class KISAdapter(ExchangeAdapter):
                     symbol=item.get("pdno", ""),
                     side="buy" if item.get("sll_buy_dvsn_cd") == "02" else "sell",
                     order_type="limit",
-                    quantity=float(item.get("ft_ord_qty", 0)),
-                    price=float(item.get("ft_ord_unpr3", 0)),
-                    filled_quantity=float(item.get("ft_ccld_qty", 0)),
+                    quantity=_safe_float(item.get("ft_ord_qty", 0)),
+                    price=_safe_float(item.get("ft_ord_unpr3", 0)),
+                    filled_quantity=_safe_float(item.get("ft_ccld_qty", 0)),
                     status="open",
                 )
             )
@@ -750,9 +752,9 @@ class KISAdapter(ExchangeAdapter):
                     RankedStock(
                         symbol=symbol,
                         name=item.get("name", item.get("hts_kor_isnm", "")),
-                        price=float(item.get("last", item.get("stck_prpr", 0)) or 0),
-                        change_pct=float(item.get("rate", item.get("prdy_ctrt", 0)) or 0),
-                        volume=float(item.get("tvol", item.get("acml_vol", 0)) or 0),
+                        price=_safe_float(item.get("last", item.get("stck_prpr", 0)) or 0),
+                        change_pct=_safe_float(item.get("rate", item.get("prdy_ctrt", 0)) or 0),
+                        volume=_safe_float(item.get("tvol", item.get("acml_vol", 0)) or 0),
                         source=source,
                     )
                 )

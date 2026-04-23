@@ -1,5 +1,6 @@
 """Portfolio API endpoints."""
 
+import asyncio
 import logging
 from datetime import date, datetime, timedelta
 from typing import Optional
@@ -9,6 +10,7 @@ from fastapi import APIRouter, Depends, Request
 from sqlalchemy import func, select
 
 from api.accounts import validate_account_id_or_404
+from core.constants import USD_KRW_FALLBACK
 from core.models import Order
 from data.stock_name_service import get_name, resolve_names
 
@@ -16,7 +18,7 @@ router = APIRouter(prefix="/portfolio", tags=["portfolio"])
 logger = logging.getLogger(__name__)
 
 # Cached exchange rate (refreshed via summary calls)
-_cached_usd_krw: float = 1450.0  # sensible default
+_cached_usd_krw: float = USD_KRW_FALLBACK
 
 # Session factory (set from main.py init)
 _session_factory = None
@@ -140,18 +142,25 @@ async def _combined_summary(request: Request) -> dict:
     kr_positions = []
     us_positions = []
 
-    if kr_md:
-        try:
-            kr_balance = await kr_md.get_balance()
-            kr_positions = await kr_md.get_positions()
-        except Exception as e:
-            logger.warning("KR balance/positions fetch failed: %s", e)
-    if us_md:
-        try:
-            us_balance = await us_md.get_balance()
-            us_positions = await us_md.get_positions()
-        except Exception as e:
-            logger.warning("US balance/positions fetch failed: %s", e)
+    async def _fetch_kr():
+        nonlocal kr_balance, kr_positions
+        if kr_md:
+            try:
+                kr_balance = await kr_md.get_balance()
+                kr_positions = await kr_md.get_positions()
+            except Exception as e:
+                logger.warning("KR balance/positions fetch failed: %s", e)
+
+    async def _fetch_us():
+        nonlocal us_balance, us_positions
+        if us_md:
+            try:
+                us_balance = await us_md.get_balance()
+                us_positions = await us_md.get_positions()
+            except Exception as e:
+                logger.warning("US balance/positions fetch failed: %s", e)
+
+    await asyncio.gather(_fetch_kr(), _fetch_us())
 
     krw_total = kr_balance.total if kr_balance else 0
     krw_available = kr_balance.available if kr_balance else 0
@@ -171,7 +180,7 @@ async def _combined_summary(request: Request) -> dict:
     elif adapter:
         _cached_usd_krw = getattr(adapter, "_last_exchange_rate", _cached_usd_krw)
     if _cached_usd_krw <= 0:
-        _cached_usd_krw = 1450.0
+        _cached_usd_krw = USD_KRW_FALLBACK
 
     # Total equity — combine KR and US totals, avoiding deposit double-count.
     # In 통합증거금 accounts, the KRW deposit (예수금) appears in BOTH:
@@ -401,7 +410,7 @@ async def portfolio_returns(request: Request):
         "monthly": now - timedelta(days=30),
     }
 
-    rate = _cached_usd_krw if _cached_usd_krw > 0 else 1450.0
+    rate = _cached_usd_krw if _cached_usd_krw > 0 else USD_KRW_FALLBACK
 
     async with _session_factory() as session:
         result = {}
