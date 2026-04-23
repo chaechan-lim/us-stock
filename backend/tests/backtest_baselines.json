@@ -1,0 +1,18 @@
+{
+  "KR": {
+    "ret": 6.82,
+    "sharpe": 0.32,
+    "mdd": -6.63,
+    "pf": 1.14,
+    "trades": 432,
+    "elapsed_sec": 23.8
+  },
+  "US": {
+    "ret": 4.54,
+    "sharpe": 0.1,
+    "mdd": -6.95,
+    "pf": 1.11,
+    "trades": 400,
+    "elapsed_sec": 32.1
+  }
+}
