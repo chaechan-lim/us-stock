@@ -40,6 +40,7 @@ for n in ("yfinance", "peewee", "urllib3", "httpx", "scanner", "data",
     logging.getLogger(n).setLevel(logging.WARNING)
 
 from backtest.full_pipeline import FullPipelineBacktest, PipelineConfig  # noqa
+from backtest.gate import THRESHOLDS, compare  # noqa
 from strategies.config_loader import StrategyConfigLoader  # noqa
 
 BASELINE_PATH = Path(__file__).parent.parent / "tests" / "backtest_baselines.json"
@@ -82,14 +83,6 @@ def _us_config(disabled: list[str]) -> dict:
         disabled_strategies=disabled,
     )
 
-THRESHOLDS = dict(
-    sharpe_drop=0.30,
-    pf_drop=0.20,
-    mdd_worsen_pp=5.0,
-    trades_drop_pct=50.0,
-)
-
-
 async def _run(market: str) -> dict:
     loader = StrategyConfigLoader()
     disabled = loader.get_market_disabled_strategies(market)
@@ -123,43 +116,6 @@ def _save_baseline(data: dict) -> None:
     BASELINE_PATH.write_text(json.dumps(data, indent=2) + "\n")
 
 
-def _compare(baseline: dict, current: dict, market: str) -> list[str]:
-    """Return list of regression messages (empty = OK)."""
-    failures: list[str] = []
-    if not baseline:
-        return [f"{market}: no baseline stored (run with --update-baseline first)"]
-    # Sharpe
-    drop_sharpe = baseline["sharpe"] - current["sharpe"]
-    if drop_sharpe > THRESHOLDS["sharpe_drop"]:
-        failures.append(
-            f"{market}: Sharpe {baseline['sharpe']:.2f} → {current['sharpe']:.2f} "
-            f"(Δ -{drop_sharpe:.2f}, threshold -{THRESHOLDS['sharpe_drop']})"
-        )
-    # Profit factor
-    drop_pf = baseline["pf"] - current["pf"]
-    if drop_pf > THRESHOLDS["pf_drop"]:
-        failures.append(
-            f"{market}: PF {baseline['pf']:.2f} → {current['pf']:.2f} "
-            f"(Δ -{drop_pf:.2f}, threshold -{THRESHOLDS['pf_drop']})"
-        )
-    # MDD worsens (more negative = worse; use abs delta)
-    worsen_mdd = abs(current["mdd"]) - abs(baseline["mdd"])
-    if worsen_mdd > THRESHOLDS["mdd_worsen_pp"]:
-        failures.append(
-            f"{market}: MDD {baseline['mdd']:.1f}% → {current['mdd']:.1f}% "
-            f"(worsened +{worsen_mdd:.1f}pp, threshold +{THRESHOLDS['mdd_worsen_pp']}pp)"
-        )
-    # Trade count collapse (detect silent disable bugs)
-    if baseline["trades"] > 0:
-        drop_pct = (baseline["trades"] - current["trades"]) / baseline["trades"] * 100
-        if drop_pct > THRESHOLDS["trades_drop_pct"]:
-            failures.append(
-                f"{market}: trades {baseline['trades']} → {current['trades']} "
-                f"(Δ -{drop_pct:.0f}%, threshold -{THRESHOLDS['trades_drop_pct']:.0f}%)"
-            )
-    return failures
-
-
 async def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--update-baseline", action="store_true",
@@ -186,7 +142,7 @@ async def main():
     all_failures: list[str] = []
     for market, current in results.items():
         baseline_market = baseline.get(market, {})
-        failures = _compare(baseline_market, current, market)
+        failures = compare(baseline_market, current, market)
         all_failures.extend(failures)
 
     print("\n" + "=" * 72)
