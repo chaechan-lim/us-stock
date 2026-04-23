@@ -62,3 +62,6 @@ nohup.out
 # Runtime-generated snapshots (regenerated weekly by
 # signal-quality-snapshot.timer from the live trades DB).
 data/signal_quality_snapshot.json
+
+# Claude worktrees (local only)
+.claude/worktrees/
