@@ -32,24 +32,19 @@ from strategies.config_loader import StrategyConfigLoader
 # Helpers
 # ---------------------------------------------------------------------------
 
+# 2026-04-23 Option A: 14 strategies disabled globally (strategy-level
+# `enabled: false`) after KR backtest D/E/F/G/H showed that only
+# dual_momentum + supertrend consistently add alpha; everything else is
+# noise or a net loss. Only the 3 globally-enabled strategies are listed.
 _ALL_STRATEGIES = [
-    "trend_following", "donchian_breakout", "supertrend", "macd_histogram",
-    "dual_momentum", "rsi_divergence", "bollinger_squeeze", "volume_profile",
-    "regime_switch", "sector_rotation", "cis_momentum", "larry_williams",
-    "bnf_deviation", "volume_surge", "cross_sectional_momentum", "quality_factor",
-    "pead_drift",
+    "trend_following", "supertrend", "dual_momentum",
 ]
 
 _US_ENABLED = {
-    # 2026-04-08: donchian_breakout removed — fresh 2y pipeline backtest
-    # showed 77 trades, WR 43%, PnL -$1,856 (single largest US loser).
-    # 2026-04-09: dual_momentum removed — 9d live data 10 trades 3W/7L,
-    # avg -2.28%, 3 of 5 SMALL_WIN_BIG_LOSS cases (FANG/CVE/XOM).
-    # Backtest 2y -$3,865 contribution. See docs/IMPROVEMENT_PLAN.md §1.
-    "volume_surge", "trend_following",
-    "supertrend", "macd_histogram", "rsi_divergence", "regime_switch",
-    "sector_rotation", "cross_sectional_momentum", "quality_factor",
-    "pead_drift",
+    # US keeps trend_following + supertrend. dual_momentum stays US-disabled
+    # per 2026-04-09 live data (10 trades 3W/7L avg -2.28%) + backtest
+    # -$3,865 contribution. See markets.US comment in strategies.yaml.
+    "trend_following", "supertrend",
 }
 
 
@@ -139,18 +134,23 @@ class TestUSConfigLoader:
         disabled = loader.get_market_disabled_strategies("US")
         assert "volume_surge" not in disabled
 
-    def test_volume_profile_disabled(self):
+    def test_volume_profile_globally_disabled(self):
+        """2026-04-23 Option A: volume_profile disabled globally via
+        `enabled: false` rather than per-market disabled_strategies.
+        """
         loader = StrategyConfigLoader()
-        disabled = loader.get_market_disabled_strategies("US")
-        assert "volume_profile" in disabled
+        assert loader.is_enabled("volume_profile") is False
 
-    def test_bollinger_squeeze_disabled(self):
+    def test_bollinger_squeeze_globally_disabled(self):
+        """2026-04-23 Option A: bollinger_squeeze disabled globally."""
         loader = StrategyConfigLoader()
-        disabled = loader.get_market_disabled_strategies("US")
-        assert "bollinger_squeeze" in disabled
+        assert loader.is_enabled("bollinger_squeeze") is False
 
     def test_us_enabled_set_matches_walk_forward_validated(self):
-        """Walk-forward validated strategies survive the disabled filter."""
+        """2026-04-23 Option A: Only 3 strategies loaded globally
+        (trend_following, supertrend, dual_momentum). US disables
+        dual_momentum, leaving trend_following + supertrend active.
+        """
         loader = StrategyConfigLoader()
         disabled = set(loader.get_market_disabled_strategies("US"))
         enabled = {s for s in _ALL_STRATEGIES if s not in disabled}
@@ -188,12 +188,16 @@ class TestUSEvaluationLoop:
         assert "dual_momentum" not in active_names
 
     def test_volume_profile_is_inactive(self):
+        """2026-04-23 Option A: volume_profile not loaded globally so
+        can't be in active set regardless of per-market disable list.
+        """
         loader = StrategyConfigLoader()
         loop = _make_loop(disabled=loader.get_market_disabled_strategies("US"))
         active_names = {s.name for s in loop._get_active_strategies()}
         assert "volume_profile" not in active_names
 
     def test_bollinger_squeeze_is_inactive(self):
+        """2026-04-23 Option A: bollinger_squeeze not loaded globally."""
         loader = StrategyConfigLoader()
         loop = _make_loop(disabled=loader.get_market_disabled_strategies("US"))
         active_names = {s.name for s in loop._get_active_strategies()}

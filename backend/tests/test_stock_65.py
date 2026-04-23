@@ -254,33 +254,23 @@ class TestStrategyConfigLoaderMarketMethods:
         assert len(disabled) > 0
 
     def test_get_market_disabled_strategies_kr(self):
+        """2026-04-23 Option A: 14 strategies disabled globally (enabled: false
+        at strategy level). Per-market list only overrides the 3 globally-enabled
+        strategies. KR keeps dual_momentum (vol_filter=false) only.
+        """
         loader = StrategyConfigLoader()
         disabled = loader.get_market_disabled_strategies("KR")
         assert isinstance(disabled, list)
-        assert len(disabled) > 0
-        # dual_momentum, trend_following, donchian_breakout enabled for KR
+        assert set(disabled) == {"supertrend", "trend_following"}
         assert "dual_momentum" not in disabled
-        assert "trend_following" not in disabled
-        assert "donchian_breakout" not in disabled
-        # supertrend disabled (walk-forward: -110K KR loss driver)
-        assert "supertrend" in disabled
-        assert "macd_histogram" in disabled
-        assert "rsi_divergence" in disabled
-        assert "bollinger_squeeze" in disabled
-        assert "volume_profile" in disabled
-        assert "regime_switch" in disabled
-        assert "sector_rotation" in disabled
-        assert "cis_momentum" in disabled
-        assert "larry_williams" in disabled
-        assert "bnf_deviation" in disabled
-        assert "volume_surge" in disabled
 
     def test_get_market_risk_config_kr(self):
         loader = StrategyConfigLoader()
         risk_cfg = loader.get_market_risk_config("KR")
         assert isinstance(risk_cfg, dict)
         assert risk_cfg.get("kelly_fraction") == pytest.approx(0.40)
-        assert risk_cfg.get("max_position_pct") == pytest.approx(0.10)
+        # 2026-04-17: 10→20% (KR backtest V4: Sharpe 0.56→1.05)
+        assert risk_cfg.get("max_position_pct") == pytest.approx(0.20)
         assert risk_cfg.get("min_position_pct") == pytest.approx(0.04)
         assert risk_cfg.get("max_positions") == 12
         assert risk_cfg.get("default_stop_loss_pct") == pytest.approx(0.12)
@@ -291,25 +281,24 @@ class TestStrategyConfigLoaderMarketMethods:
         loader = StrategyConfigLoader()
         eval_cfg = loader.get_market_evaluation_loop_config("KR")
         assert isinstance(eval_cfg, dict)
-        assert eval_cfg.get("min_confidence") == pytest.approx(0.40)
+        # 2026-04-17: 0.40→0.30 (backtest V3/V4 slight improvement)
+        assert eval_cfg.get("min_confidence") == pytest.approx(0.30)
         assert eval_cfg.get("min_active_ratio") is None  # null in YAML = no override
         assert eval_cfg.get("sell_cooldown_days") == 1
         assert eval_cfg.get("whipsaw_max_losses") == 2
         assert eval_cfg.get("min_hold_days") == 1
 
     def test_get_market_config_us(self):
+        """2026-04-23 Option A: US keeps trend_following + supertrend.
+        dual_momentum stays US-disabled (live bleeder, -2.28% avg 10 trades +
+        backtest -$3,865 — see markets.US comment in strategies.yaml).
+        """
         loader = StrategyConfigLoader()
         us_disabled = loader.get_market_disabled_strategies("US")
         assert isinstance(us_disabled, list)
-        assert len(us_disabled) > 0
-        # Walk-forward validated strategies must NOT be in disabled list
-        assert "dual_momentum" not in us_disabled
-        assert "volume_surge" not in us_disabled
+        assert us_disabled == ["dual_momentum"]
         assert "trend_following" not in us_disabled
-        assert "sector_rotation" not in us_disabled
-        # Overfit strategies remain disabled
-        assert "volume_profile" in us_disabled
-        assert "bollinger_squeeze" in us_disabled
+        assert "supertrend" not in us_disabled
         # US has no risk or evaluation_loop overrides (those remain code defaults)
         assert loader.get_market_risk_config("US") == {}
         assert loader.get_market_evaluation_loop_config("US") == {}
@@ -691,16 +680,20 @@ class TestYAMLKRSection:
         assert "min_hold_days" in ev
 
     def test_yaml_kr_disabled_count(self):
-        """11 strategies disabled (17 total - 6 enabled = 11)."""
+        """2026-04-23 (Option A redesign): Global enabled=false applied to 14
+        strategies; KR per-market only needs to override the remaining 3
+        globally-enabled strategies. KR keeps dual_momentum only →
+        disabled_strategies = [supertrend, trend_following]."""
         loader = StrategyConfigLoader()
         disabled = loader._config["markets"]["KR"]["disabled_strategies"]
-        assert len(disabled) == 11
+        assert set(disabled) == {"supertrend", "trend_following"}
 
     def test_yaml_kr_risk_values(self):
         loader = StrategyConfigLoader()
         risk = loader._config["markets"]["KR"]["risk"]
         assert risk["kelly_fraction"] == pytest.approx(0.40)
-        assert risk["max_position_pct"] == pytest.approx(0.10)
+        # 2026-04-17: 10→20% (KR backtest V4: Sharpe 0.56→1.05)
+        assert risk["max_position_pct"] == pytest.approx(0.20)
         assert risk["min_position_pct"] == pytest.approx(0.04)
         assert risk["max_positions"] == 12
         assert risk["default_stop_loss_pct"] == pytest.approx(0.12)
@@ -710,7 +703,8 @@ class TestYAMLKRSection:
     def test_yaml_kr_eval_loop_values(self):
         loader = StrategyConfigLoader()
         ev = loader._config["markets"]["KR"]["evaluation_loop"]
-        assert ev["min_confidence"] == pytest.approx(0.40)
+        # 2026-04-17: 0.40→0.30 (backtest V3/V4 slight improvement)
+        assert ev["min_confidence"] == pytest.approx(0.30)
         # null in YAML → None in Python; means 'no override, use per-call defaults'
         assert ev["min_active_ratio"] is None
         assert ev["sell_cooldown_days"] == 1
@@ -747,6 +741,19 @@ class TestApplyKrEvalOverrides:
             market="KR",
         )
 
+    def _make_loader(self):
+        """MagicMock loader preconfigured to skip cash_parking branch.
+
+        Without this, MagicMock auto-returns a MagicMock for
+        get_market_cash_parking_config(), which makes .get("enabled")
+        truthy and funnels MagicMock threshold into set_cash_parking_config,
+        raising TypeError on the 0.0<=threshold<=1.0 check.
+        """
+        from unittest.mock import MagicMock
+        loader = MagicMock()
+        loader.get_market_cash_parking_config.return_value = {"enabled": False}
+        return loader
+
     def test_sell_cooldown_days_converted_to_secs(self):
         from unittest.mock import MagicMock
 
@@ -754,6 +761,7 @@ class TestApplyKrEvalOverrides:
 
         loop = self._make_loop()
         loader = MagicMock()
+        loader.get_market_cash_parking_config.return_value = {"enabled": False}
         loader.get_market_evaluation_loop_config.return_value = {
             "sell_cooldown_days": 2,
         }
@@ -768,6 +776,7 @@ class TestApplyKrEvalOverrides:
 
         loop = self._make_loop()
         loader = MagicMock()
+        loader.get_market_cash_parking_config.return_value = {"enabled": False}
         loader.get_market_evaluation_loop_config.return_value = {
             "min_hold_days": 1,
         }
@@ -782,6 +791,7 @@ class TestApplyKrEvalOverrides:
 
         loop = self._make_loop()
         loader = MagicMock()
+        loader.get_market_cash_parking_config.return_value = {"enabled": False}
         loader.get_market_evaluation_loop_config.return_value = {
             "whipsaw_max_losses": 3,
         }
@@ -796,6 +806,7 @@ class TestApplyKrEvalOverrides:
 
         loop = self._make_loop()
         loader = MagicMock()
+        loader.get_market_cash_parking_config.return_value = {"enabled": False}
         loader.get_market_evaluation_loop_config.return_value = {}
         loader.get_market_disabled_strategies.return_value = [
             "trend_following",
@@ -812,6 +823,7 @@ class TestApplyKrEvalOverrides:
 
         loop = self._make_loop()
         loader = MagicMock()
+        loader.get_market_cash_parking_config.return_value = {"enabled": False}
         loader.get_market_evaluation_loop_config.return_value = {
             "min_confidence": 0.30,
         }
@@ -827,6 +839,7 @@ class TestApplyKrEvalOverrides:
 
         loop = self._make_loop()
         loader = MagicMock()
+        loader.get_market_cash_parking_config.return_value = {"enabled": False}
 
         # First reload — sets the override
         loader.get_market_evaluation_loop_config.return_value = {"min_confidence": 0.30}
@@ -847,6 +860,7 @@ class TestApplyKrEvalOverrides:
 
         loop = self._make_loop()
         loader = MagicMock()
+        loader.get_market_cash_parking_config.return_value = {"enabled": False}
         loader.get_market_evaluation_loop_config.return_value = {
             "min_active_ratio": None,
         }
@@ -863,6 +877,7 @@ class TestApplyKrEvalOverrides:
         loop = self._make_loop()
         original = loop._sell_cooldown_secs
         loader = MagicMock()
+        loader.get_market_cash_parking_config.return_value = {"enabled": False}
         loader.get_market_evaluation_loop_config.return_value = {"sell_cooldown_days": None}
         loader.get_market_disabled_strategies.return_value = []
         _apply_kr_eval_overrides(loop, loader)  # must not raise
@@ -877,6 +892,7 @@ class TestApplyKrEvalOverrides:
         loop = self._make_loop()
         original = loop._max_loss_sells
         loader = MagicMock()
+        loader.get_market_cash_parking_config.return_value = {"enabled": False}
         loader.get_market_evaluation_loop_config.return_value = {"whipsaw_max_losses": None}
         loader.get_market_disabled_strategies.return_value = []
         _apply_kr_eval_overrides(loop, loader)  # must not raise
@@ -891,6 +907,7 @@ class TestApplyKrEvalOverrides:
         loop = self._make_loop()
         original = loop._min_hold_secs
         loader = MagicMock()
+        loader.get_market_cash_parking_config.return_value = {"enabled": False}
         loader.get_market_evaluation_loop_config.return_value = {"min_hold_days": None}
         loader.get_market_disabled_strategies.return_value = []
         _apply_kr_eval_overrides(loop, loader)  # must not raise
@@ -904,6 +921,7 @@ class TestApplyKrEvalOverrides:
 
         loop = self._make_loop()
         loader = MagicMock()
+        loader.get_market_cash_parking_config.return_value = {"enabled": False}
         loader.get_market_disabled_strategies.return_value = []
 
         # First reload — set to 2 days
@@ -924,6 +942,7 @@ class TestApplyKrEvalOverrides:
 
         loop = self._make_loop()
         loader = MagicMock()
+        loader.get_market_cash_parking_config.return_value = {"enabled": False}
         loader.get_market_disabled_strategies.return_value = []
 
         loader.get_market_evaluation_loop_config.return_value = {"whipsaw_max_losses": 5}
@@ -942,6 +961,7 @@ class TestApplyKrEvalOverrides:
 
         loop = self._make_loop()
         loader = MagicMock()
+        loader.get_market_cash_parking_config.return_value = {"enabled": False}
         loader.get_market_disabled_strategies.return_value = []
 
         loader.get_market_evaluation_loop_config.return_value = {"min_hold_days": 3}
@@ -988,6 +1008,7 @@ class TestHotReloadAppliesKrOverrides:
 
         loop = self._make_loop()
         config_loader = MagicMock()
+        config_loader.get_market_cash_parking_config.return_value = {"enabled": False}
         config_loader.get_market_evaluation_loop_config.return_value = {
             "min_confidence": 0.30,
             "sell_cooldown_days": 1,
@@ -1011,6 +1032,7 @@ class TestHotReloadAppliesKrOverrides:
 
         loop = self._make_loop()
         config_loader = MagicMock()
+        config_loader.get_market_cash_parking_config.return_value = {"enabled": False}
         config_loader.get_market_evaluation_loop_config.return_value = {
             "min_confidence": 0.30,
             "sell_cooldown_days": 1,
@@ -1083,6 +1105,7 @@ class TestApplyKrEvalOverridesDisabledWarning:
 
         loop = self._make_loop()
         loader = MagicMock()
+        loader.get_market_cash_parking_config.return_value = {"enabled": False}
         loader.get_market_evaluation_loop_config.return_value = {}
         loader.get_market_disabled_strategies.return_value = []
 
@@ -1104,6 +1127,7 @@ class TestApplyKrEvalOverridesDisabledWarning:
 
         loop = self._make_loop()
         loader = MagicMock()
+        loader.get_market_cash_parking_config.return_value = {"enabled": False}
         loader.get_market_evaluation_loop_config.return_value = {}
         loader.get_market_disabled_strategies.return_value = ["trend_following"]
 

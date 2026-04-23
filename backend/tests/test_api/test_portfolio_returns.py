@@ -18,6 +18,21 @@ from api.router import api_router
 from core.models import Base, Order
 
 
+@pytest.fixture(autouse=True)
+def _reset_usd_krw_cache():
+    """Reset api.portfolio._cached_usd_krw to the USD_KRW_FALLBACK default
+    before every test in this module. Other test files (e.g. test_stock_58)
+    mutate this module-level cache to simulate rate drift; without a reset
+    the leaked value makes `test_us_pnl_converted_to_krw`'s `change >= 145000`
+    assertion non-deterministic across full-suite runs.
+    """
+    import api.portfolio as _p
+    from core.constants import USD_KRW_FALLBACK
+    _p._cached_usd_krw = USD_KRW_FALLBACK
+    yield
+    _p._cached_usd_krw = USD_KRW_FALLBACK
+
+
 @pytest.fixture
 def _setup_db():
     """Create async session factory with in-memory SQLite for trade tests."""
