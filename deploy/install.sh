@@ -12,6 +12,8 @@ echo "Installing us-stock systemd services..."
 # Copy service files
 sudo cp "$SCRIPT_DIR/usstock-backend.service" /etc/systemd/system/
 sudo cp "$SCRIPT_DIR/usstock-frontend.service" /etc/systemd/system/
+sudo cp "$SCRIPT_DIR/signal-quality-snapshot.service" /etc/systemd/system/
+sudo cp "$SCRIPT_DIR/signal-quality-snapshot.timer" /etc/systemd/system/
 
 # Reload systemd
 sudo systemctl daemon-reload
@@ -19,6 +21,9 @@ sudo systemctl daemon-reload
 # Enable services (start on boot)
 sudo systemctl enable usstock-backend.service
 sudo systemctl enable usstock-frontend.service
+# Weekly SignalQualityTracker snapshot (Mon 07:00 KST) — feeds backtests
+# so they mirror the live tracker's gating + Kelly inputs.
+sudo systemctl enable --now signal-quality-snapshot.timer
 
 # Install nginx config (if nginx is installed)
 if command -v nginx &> /dev/null; then
