@@ -280,12 +280,21 @@ strategies:
       rebalance_day: 1
       min_absolute_return: 0.0
       cash_etf: "SHY"
+      # 2026-04-23: vol_filter disabled per KR backtest variant C.
+      # 2y result: Ret +1.8%→+6.8%, Sharpe -0.17→+0.32, PF 1.06→1.14
+      # (baseline A vs C in compare_kr_strategy_mix_2026_04.py).
+      # Effect: allows entries on high-vol semi/power stocks user wants
+      # to catch. MDD moved -7.0%→-6.6% (still well under 15% floor).
+      volatility_filter: false
     stop_loss:
       type: fixed_pct
       max_pct: 0.10
 
   donchian_breakout:
-    enabled: true
+    # 2026-04-23: disabled globally (Option A redesign).
+    # US backtest: PnL -$1,856 single largest loser (verify_donchian_disable.py).
+    # KR backtest: KR_no_donchian marginally better.
+    enabled: false
     timeframe: "1D"
     params:
       entry_period: 15       # walk-forward: 20 -> 15
@@ -318,7 +327,8 @@ strategies:
       trail_pct: 0.05
 
   macd_histogram:
-    enabled: true
+    # 2026-04-23: disabled (Option A).
+    enabled: false
     timeframe: "1D"
     params:
       fast_period: 8         # optimized: 12 -> 8
@@ -331,7 +341,8 @@ strategies:
       max_pct: 0.05
 
   rsi_divergence:
-    enabled: true
+    # 2026-04-23: disabled (Option A).
+    enabled: false
     timeframe: "1D"
     params:
       rsi_period: 10         # optimized: 14 -> 10
@@ -344,7 +355,8 @@ strategies:
       max_pct: 0.04
 
   bollinger_squeeze:
-    enabled: true
+    # 2026-04-23: disabled (Option A).
+    enabled: false
     timeframe: "1D"
     params:
       bb_period: 20
@@ -357,7 +369,8 @@ strategies:
       atr_multiplier: 1.5
 
   volume_profile:
-    enabled: true
+    # 2026-04-23: disabled (Option A).
+    enabled: false
     timeframe: "1D"
     params:
       lookback_days: 40          # optimized: 60 -> 40
@@ -368,7 +381,8 @@ strategies:
       max_pct: 0.05
 
   regime_switch:
-    enabled: true
+    # 2026-04-23: disabled (Option A). ETF regime switching happens via ETF Engine.
+    enabled: false
     timeframe: "1D"
     params:
       spy_sma_period: 200
@@ -382,7 +396,8 @@ strategies:
       neutral: [QQQ, SOXX, SPY, XLK]
 
   cis_momentum:
-    enabled: true
+    # 2026-04-23: disabled (Option A). KR backtest D: -3.7M loss.
+    enabled: false
     timeframe: "1D"
     params:
       roc_short: 5           # optimized (unchanged)
@@ -409,7 +424,8 @@ strategies:
       trail_pct: 0.04
 
   larry_williams:
-    enabled: true
+    # 2026-04-23: disabled (Option A).
+    enabled: false
     timeframe: "1D"
     params:
       k: 1.0                # optimized: 0.5 -> 1.0
@@ -427,7 +443,8 @@ strategies:
       trail_pct: 0.025
 
   bnf_deviation:
-    enabled: true
+    # 2026-04-23: disabled (Option A).
+    enabled: false
     timeframe: "1D"
     params:
       sma_period: 20         # optimized: 25 -> 20
@@ -439,7 +456,8 @@ strategies:
       max_pct: 0.05
 
   volume_surge:
-    enabled: true
+    # 2026-04-23: disabled (Option A). Scanner "volume_surge" type unrelated.
+    enabled: false
     timeframe: "1D"
     params:
       volume_threshold: 1.8     # min volume ratio vs 20-day avg
@@ -455,7 +473,8 @@ strategies:
       trail_pct: 0.02
 
   sector_rotation:
-    enabled: true
+    # 2026-04-23: disabled (Option A). ETF sector rotation handled by ETF Engine.
+    enabled: false
     timeframe: "1M"
     params:
       top_sectors: 2         # optimized: 3 -> 2
@@ -476,7 +495,8 @@ strategies:
       Communications: [XLC]
 
   cross_sectional_momentum:
-    enabled: true
+    # 2026-04-23: disabled (Option A). KR backtest -5.5M loss.
+    enabled: false
     timeframe: "1D"
     params:
       lookback_days: 252       # 12-month lookback
@@ -500,7 +520,8 @@ strategies:
       trail_pct: 0.04
 
   quality_factor:
-    enabled: true
+    # 2026-04-23: disabled (Option A).
+    enabled: false
     timeframe: "1D"
     params:
       lookback_days: 126       # 6-month quality assessment
@@ -523,7 +544,8 @@ strategies:
       trail_pct: 0.04
 
   pead_drift:
-    enabled: true
+    # 2026-04-23: disabled (Option A). KR backtest -1.7M loss.
+    enabled: false
     timeframe: "1D"
     params:
       gap_threshold: 0.03       # 3% min gap to qualify as earnings-like
@@ -573,15 +595,12 @@ markets:
     #   Backtest 2y: -$3,865 contribution
     # Strategy thesis (12-18mo lookback) doesn't fit user's burst-catching
     # goal — see docs/STRATEGY_REDESIGN.md §2.
+    # 2026-04-23: 14 strategies disabled globally (Option A redesign).
+    # This per-market list now only needs to override the 3 globally-enabled
+    # strategies. US keeps trend_following + supertrend; dual_momentum stays
+    # US-disabled (live bleeder, -2.28% avg 10 trades + backtest -$3,865).
     disabled_strategies:
-      - bollinger_squeeze
-      - volume_profile
-      - cis_momentum
-      - larry_williams
-      - bnf_deviation
-      - donchian_breakout
       - dual_momentum
-      - quality_factor
     # Cash parking — recovers ~13pp alpha by parking idle cash in SPY
     # instead of letting it sit through low-conviction periods.
     # Source: backend/scripts/validate_cash_parking.py V1_park_30 (US 2y, wide universe).
@@ -630,23 +649,14 @@ markets:
     # 4-07 newly-added 3 strategies disabled. trend_following + donchian
     # remain enabled because removing them BOTH (KR_no_tf_no_donchian)
     # only marginally helps and KR_only_dual_mom is the cleaner choice.
+    # 2026-04-23: Of the 3 globally-enabled strategies, KR keeps
+    # dual_momentum only (with vol_filter=false per variant C backtest).
+    # supertrend + trend_following both dilute dual_momentum signals
+    # through the combiner in KR (contradictory SELL → HOLD conversion
+    # reduces trade count without alpha gain; see KR backtest E+H).
     disabled_strategies:
       - supertrend
-      - macd_histogram
-      - rsi_divergence
-      - bollinger_squeeze
-      - volume_profile
-      - regime_switch
-      - sector_rotation
-      - cis_momentum
-      - larry_williams
-      - bnf_deviation
-      - volume_surge
-      - cross_sectional_momentum
-      - pead_drift
-      - quality_factor
       - trend_following
-      - donchian_breakout
     # 2026-04-14: trend_following + donchian_breakout KR disable.
     # KR 2y backtest: KR_only_dual_mom (+3.0% PF 1.09) was the only
     # positive variant. trend_following produces contradictory SELL that
@@ -658,8 +668,12 @@ markets:
     # Re-enable after running validate_cash_parking.py with market=KR.
     # 2026-04-20: KR cash parking enabled — backtest V1: Sharpe 0.03→0.99,
     # Ret +3.4%→+25.4%. KODEX 200 parking captures index return on idle cash.
+    # 2026-04-22: Disabled — KR은 dual_momentum 1개만 활성 상태에서 파킹이
+    # 현금을 먹어버려 개별주 매수 기회를 차단. ETF 5개 수동매도 후에도
+    # 파킹이 즉시 재매수(069500 42주)하며 Max exposure 100%로 개별주 BUY reject.
+    # KR 전략이 2개 이상 활성화되어 매수 빈도가 올라가면 재활성화 검토.
     cash_parking:
-      enabled: true
+      enabled: false
       symbol: "069500"  # KODEX 200
       threshold: 0.70   # 70% — backtest V3: PF 1.45 (best), 21 trades (lowest cost)
       min_hold_days: 10  # 2주 최소 보유 (수수료 회수)

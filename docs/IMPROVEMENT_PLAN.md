@@ -1,7 +1,8 @@
 # Strategy Layer Improvement Plan
 
 **작성일**: 2026-04-09  
-**상태**: Phase 1 진행 중  
+**최종 갱신**: 2026-04-21  
+**상태**: Phase 1+2.5 완료, Phase 2.1 보류 (현재 수준 양호), Phase 3 대기  
 **근거**: 9일치 라이브 거래 데이터 패턴 분석 + 백테스트 신뢰도 회복 작업 결과
 
 ---
@@ -192,7 +193,35 @@ KIS US 수수료 0.25%/건 → round trip 0.50%. **수익 0.50% 이하 거래는
 
 ---
 
-## 5. 알려진 한계 / 미해결
+## 5. Phase 2 검증 결과 (2026-04-21)
+
+**기간**: 2026-04-09 ~ 04-21 (12일, 60 round-trips)
+
+### 패턴 비교
+| 패턴 | Phase 0 (39 RT) | Phase 1 (60 RT) | 변화 |
+|---|---|---|---|
+| CAUGHT_BURST | 12.8% (+31.6%) | **36.7%** (+191.6%) | **+23.9pp** |
+| SMALL_WIN_BIG_LOSS | 12.8% (-39.7%) | **6.7%** (-26.0%) | **-6.1pp** |
+| GAVE_BACK | 20.5% (-0.3%) | **11.7%** (-0.1%) | **-8.8pp** |
+| EARLY_EXIT | 10.3% (+9.8%) | 3.3% (+4.5%) | -7.0pp |
+| FLAT_NOISE | 17.9% (-3.4%) | 26.7% (-1.3%) | +8.8pp |
+
+### 전략별
+| 전략 | Phase 0 avg | Phase 1 avg | Phase 1 W/L |
+|---|---|---|---|
+| supertrend | +1.41% | **+8.8%** | **11/1** |
+| dual_momentum | -2.28% | +3.2% | 8/2 (KR만 활성) |
+| etf_engine_sector | +0.31% | +8.5% | 4/0 (KR 비활성화 전) |
+
+### 판단
+- SL 버그 픽스 + dual_momentum US disable 효과 확실 (burst 3배, big loss 절반)
+- trailing stop 현행 유지 (GAVE_BACK 11.7%는 대부분 ETF/parking noise)
+- KR ETF 문제는 별도 수정 완료 (Phase 2.6)
+- **다음 리뷰**: 2026-05-05 (2주 후)
+
+---
+
+## 6. 알려진 한계 / 미해결 (갱신 2026-04-21)
 
 1. **백테스트 universe ≠ 라이브 universe** — `WIDE_UNIVERSE` 추가했지만 동적 discovery 못 replicate. 절대 alpha 추정 부정확
 2. **데이터 9일치만** — 작은 표본. Phase 1 적용 후 4주 누적 후 재분석 필요
@@ -200,12 +229,13 @@ KIS US 수수료 0.25%/건 → round trip 0.50%. **수익 0.50% 이하 거래는
 4. **dual_momentum disable 후 거래량 급감** — 의도된 변화지만 사용자 perception 주의
 5. **etf_engine_sector** — 18건 noise지만 KR ETF rotation 자체는 의미 있음. trailing 조정으로 살릴지 disable할지 1주일 모니터링 후 결정
 6. **min_hold 4시간** — burst trading에 너무 김. Phase 3 per-strategy lifecycle에서 해소
-7. **수수료 무시** — 시스템 전체가 commission-blind. Phase 2.5에서 해결 예정 (위 참조)
-8. **cash_parking churn** (2026-04-09~10) — 93회 SPY round-trip으로 ~860k KRW 수수료 발생. 4-11 rewrite로 park-once-hold로 전환 + 1시간 cooldown 추가. 추가 재발 시 cash_parking 자체를 삭제
+7. ~~수수료 무시~~ — **해결됨** (Phase 2.5, 2026-04-13). commission guard + park-once-hold
+8. ~~cash_parking churn~~ — **해결됨** (2026-04-11). park-once-hold + 1hr cooldown + min_hold_days
+9. ~~KR ETF 과매수~~ — **해결됨** (Phase 2.6, 2026-04-21). kr_etf_evaluation 비활성화 + ETF 심볼 필터
 
 ---
 
-## 6. 결정 history (왜 이렇게 했는지)
+## 7. 결정 history (왜 이렇게 했는지)
 
 | 날짜 | 결정 | 이유 |
 |---|---|---|
@@ -216,38 +246,59 @@ KIS US 수수료 0.25%/건 → round trip 0.50%. **수익 0.50% 이하 거래는
 | 2026-04-09 | supertrend 유지 결정 | 라이브 8/3 win, best +10.43%, 최악 케이스는 SL 버그 |
 | 2026-04-09 | SL 버그 픽스가 1번 우선순위 | 5건 SMALL_WIN_BIG_LOSS 중 2건 직접 원인 (펄어비스, 삼성전기), 나머지 3건도 비슷한 메커니즘 (SL 너무 넓음) |
 | 2026-04-09 | trailing 조정은 Phase 2로 미룸 | EARLY_EXIT vs GAVE_BACK trade-off — Phase 1 적용 후 데이터 재수집 후 결정 |
+| 2026-04-13 | 수수료 가드 추가 (Phase 2.5) | cash_parking 93회 churn ~860k 수수료 사건 후, 시스템 전체 commission-blind 발견 |
+| 2026-04-21 | KR ETF 엔진 비활성화 + ETF 필터 추가 | dual_momentum이 KODEX 은행을 개별주 취급, etf_engine_sector가 KODEX ETF만 매수 |
+| 2026-04-21 | trailing stop 변경 보류 | 60 RT 분석 결과 GAVE_BACK 11.7% (목표 10% 근접), 7건 중 5건 ETF/parking noise |
+| 2026-04-21 | Phase 3 착수 보류 | supertrend 11/12 승률 양호, per-strategy lifecycle 불필요한 시점 |
 
 ---
 
-## 7. 다음 액션 (체크리스트)
+## 8. 다음 액션 (체크리스트)
 
-### Phase 1 (오늘)
-- [ ] **1.1** SL config 버그 픽스 (코드 + 테스트)
-  - `evaluation_loop.py` SL 분기 추가
-  - `position_tracker.py` 필요 시 supertrend type 지원
-  - 단위 테스트: type별 SL 적용 검증
-  - 회귀 테스트: 기존 SL/TP 동작 보존
-- [ ] **1.2** dual_momentum US disable (yaml)
-  - `markets.US.disabled_strategies`에 추가
-  - 변경 사유 주석 (라이브 데이터 인용)
-- [ ] **1.3** commit + push
-- [ ] **1.4** `reload_strategies` MCP 호출 (yaml 부분만 즉시 라이브 반영)
-- [ ] **1.5** 백엔드 재시작 (코드 변경 적용 위해) — **사용자 승인 필요**
+### Phase 1 (완료 2026-04-09)
+- [x] **1.1** SL config 버그 픽스 (코드 + 테스트)
+- [x] **1.2** dual_momentum US disable (yaml)
+- [x] **1.3** commit + push
+- [x] **1.4** `reload_strategies` MCP 호출
+- [x] **1.5** 백엔드 재시작
 
-### Phase 2 (Phase 1 후 1주일)
-- [ ] 패턴 분석 재실행 (`analyze_trade_patterns.py`)
-- [ ] SMALL_WIN_BIG_LOSS / GAVE_BACK / EARLY_EXIT 비중 변화 확인
-- [ ] trailing stop 조정 안 1 vs 안 2 백테스트 비교
-- [ ] yaml 적용 + reload
+### Phase 2 — trailing stop (보류, 2026-04-21 판단)
+- [x] 패턴 분석 재실행 (60 round-trips, 4/9~4/21)
+- [x] SMALL_WIN_BIG_LOSS 12.8% → **6.7%** (-6.1pp)
+- [x] GAVE_BACK 20.5% → **11.7%** (-8.8pp)
+- [x] CAUGHT_BURST 12.8% → **36.7%** (+23.9pp)
+- **결정: trailing 파라미터 변경 보류**
+  - GAVE_BACK 7건 중 5건이 ETF/parking noise, 핵심 전략 문제 아님
+  - trailing 좁히면 EARLY_EXIT 증가 리스크 > GAVE_BACK 감소 이득
+  - 현행 activation 8% / trail 4% 유지, 2주 후 재검토 (2026-05-05)
 
-### Phase 3 (2~4주 후)
+### Phase 2.5 — 수수료 반영 (완료 2026-04-13)
+- [x] evaluation_loop + position_tracker commission guard
+- [x] cash_parking park-once-hold 전환
+- [x] min_hold_days + enable_unpark 구현
+
+### Phase 2.6 — KR ETF 과매수 수정 (완료 2026-04-21)
+- [x] `kr_etf_evaluation` 스케줄 비활성화 (KR ETF 신규매수 차단)
+- [x] `_ETF_ONLY`에 KR ETF 심볼 추가 (`set_etf_exclusions` via kr_etf_universe)
+- [x] dual_momentum이 KODEX 은행(091170) 같은 ETF 매수 방지
+- 기존 KR ETF 포지션은 SL/TP로 자연 청산 대기
+
+### Phase 2.7 — 코드 품질 리뷰 수정 (완료 2026-04-21)
+- [x] USD_KRW_FALLBACK 상수 추출 (7곳 → `core/constants.py`)
+- [x] `safe_float` 공유 유틸 (`exchange/utils.py`, US adapter 35+ 곳 적용)
+- [x] 전략 실패 로그 debug → warning 승격
+- [x] `_combined_summary` US/KR 병렬 fetch (`asyncio.gather`)
+- [x] evaluation loop 사이클 내 `get_positions()` 중복 호출 캐싱
+
+### Phase 3 (대기 — 필요 시 착수)
 - [ ] per-strategy lifecycle YAML 스키마 설계
 - [ ] 코드 작성 (PR 별도)
 - [ ] time-based exit 룰 추가
+- **착수 조건**: supertrend 승률 하락 또는 GAVE_BACK 15% 초과 시
 
 ---
 
-## 8. 참조
+## 9. 참조
 
 - **분석 스크립트**: `backend/scripts/analyze_trade_patterns.py`
 - **백테스트 검증 스크립트**: `backend/scripts/validate_cash_parking.py`, `validate_new_strategy.py`, `verify_donchian_disable.py`, `verify_kr_no_trend_following.py`, `compare_strategy_count.py`, `compare_thesis.py`
