@@ -21,6 +21,20 @@ REDIS_TOKEN_KEY = "kis:access_token"
 REDIS_APPROVAL_KEY = "kis:approval_key"
 
 
+def is_token_error(resp_data: dict) -> bool:
+    """Detect KIS server-side token invalidation responses.
+
+    Covers cases `_should_refresh()`'s local clock-only check misses
+    (server expired the token early / cross-device auth rotation).
+    만료 and 유효하지 않은 phrases are the two visible msg1 forms.
+    """
+    msg = resp_data.get("msg1", "")
+    if "만료된 token" in msg or "유효하지 않은 token" in msg:
+        return True
+    msg_cd = resp_data.get("msg_cd", "")
+    return msg_cd in ("EGW00121", "EGW00122", "EGW00123", "EGW00124", "EGW00125")
+
+
 class KISAuth:
     def __init__(
         self,
@@ -91,6 +105,19 @@ class KISAuth:
         if self._should_refresh():
             logger.info("KIS token approaching expiry, refreshing...")
             await self._issue_token()
+
+    async def force_refresh(self) -> None:
+        """Force re-issuance regardless of local expiry clock.
+
+        Called by adapters when the server returns "expired/invalid token"
+        even though our local clock still thinks the token is valid — the
+        KIS server can invalidate tokens early (e.g. cross-device auth,
+        server-side expiry mismatch). Without this, `_should_refresh()`
+        would never trigger and the backend would keep failing silently
+        until a restart.
+        """
+        logger.info("KIS token server-rejected, forcing re-issue...")
+        await self._issue_token()
 
     async def get_approval_key(self) -> str:
         """Get WebSocket approval key."""

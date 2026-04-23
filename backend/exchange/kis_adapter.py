@@ -27,7 +27,7 @@ from exchange.base import (
     Ticker,
 )
 from core.constants import USD_KRW_FALLBACK
-from exchange.kis_auth import KISAuth
+from exchange.kis_auth import KISAuth, is_token_error
 from exchange.utils import safe_float as _safe_float
 
 
@@ -937,6 +937,9 @@ class KISAdapter(ExchangeAdapter):
                     if msg_cd == "EGW00201" and attempt < max_retries - 1:
                         await asyncio.sleep(1.0 * (attempt + 1))
                         continue
+                    if is_token_error(data) and attempt < max_retries - 1:
+                        await self._auth.force_refresh()
+                        continue
                     if attempt < max_retries - 1:
                         await asyncio.sleep(0.3 * (attempt + 1))
                         continue
@@ -951,6 +954,9 @@ class KISAdapter(ExchangeAdapter):
             msg_cd = data.get("msg_cd", "")
             if msg_cd == "EGW00201" and attempt < max_retries - 1:
                 await asyncio.sleep(0.3 * (attempt + 1))
+                continue
+            if is_token_error(data) and attempt < max_retries - 1:
+                await self._auth.force_refresh()
                 continue
             logger.warning("KIS API error: %s %s", msg_cd, data.get("msg1"))
             return data
@@ -983,6 +989,11 @@ class KISAdapter(ExchangeAdapter):
                     if msg_cd == "EGW00201" and attempt < max_retries - 1:
                         await asyncio.sleep(1.0 * (attempt + 1))
                         continue
+                    # Token errors on POST (orders): refresh + retry is safe
+                    # because the server rejected the request before processing.
+                    if is_token_error(data) and attempt < max_retries - 1:
+                        await self._auth.force_refresh()
+                        continue
                     # Non-rate-limit HTTP errors: return immediately without retry
                     # to prevent duplicate orders (server may have processed the request)
                     return data
@@ -996,6 +1007,9 @@ class KISAdapter(ExchangeAdapter):
             msg_cd = data.get("msg_cd", "")
             if msg_cd == "EGW00201" and attempt < max_retries - 1:
                 await asyncio.sleep(0.3 * (attempt + 1))
+                continue
+            if is_token_error(data) and attempt < max_retries - 1:
+                await self._auth.force_refresh()
                 continue
             logger.warning("KIS API error: %s %s", msg_cd, data.get("msg1"))
             return data

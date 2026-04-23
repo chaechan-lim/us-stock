@@ -7,7 +7,7 @@ import pytest
 import pytest_asyncio
 from aioresponses import aioresponses
 
-from exchange.kis_auth import KISAuth, TOKEN_VALIDITY_SEC
+from exchange.kis_auth import KISAuth, TOKEN_VALIDITY_SEC, is_token_error
 
 
 BASE_URL = "https://openapivts.koreainvestment.com:29443"
@@ -121,3 +121,49 @@ async def test_should_refresh_before_expiry(auth):
 async def test_access_token_before_init_raises(auth):
     with pytest.raises(RuntimeError, match="not initialized"):
         _ = auth.access_token
+
+
+class TestIsTokenError:
+    """STOCK-??: is_token_error detects server-rejected tokens — without
+    this, `_should_refresh()`'s clock-only check lets the backend run
+    against a server-invalidated token until someone restarts it.
+    See 2026-04-23 dashboard-empty incident.
+    """
+
+    def test_expired_msg(self):
+        assert is_token_error({"msg1": "기간이 만료된 token 입니다."}) is True
+
+    def test_invalid_msg(self):
+        assert is_token_error({"msg1": "유효하지 않은 token 입니다."}) is True
+
+    def test_invalid_msg_cd(self):
+        assert is_token_error({"msg_cd": "EGW00121", "msg1": "any"}) is True
+
+    def test_rate_limit_not_token_error(self):
+        assert is_token_error(
+            {"msg_cd": "EGW00201", "msg1": "초당 거래건수를 초과하였습니다."}
+        ) is False
+
+    def test_success_not_token_error(self):
+        assert is_token_error({"rt_cd": "0", "msg1": "정상처리 되었습니다."}) is False
+
+    def test_empty_dict(self):
+        assert is_token_error({}) is False
+
+
+@pytest.mark.asyncio
+async def test_force_refresh_reissues(auth):
+    """force_refresh bypasses the clock check and gets a new token."""
+    with aioresponses() as m:
+        m.post(f"{BASE_URL}/oauth2/tokenP", payload={"access_token": "tok1"})
+        await auth.initialize()
+    assert auth.access_token == "tok1"
+
+    # Clock still thinks token is valid — but server rejected it.
+    assert auth._should_refresh() is False
+
+    with aioresponses() as m:
+        m.post(f"{BASE_URL}/oauth2/tokenP", payload={"access_token": "tok2"})
+        await auth.force_refresh()
+
+    assert auth.access_token == "tok2"
