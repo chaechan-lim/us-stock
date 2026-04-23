@@ -21,6 +21,20 @@ from analytics.ml_factor_selector import (
     MIN_STOCKS,
 )
 
+try:
+    import lightgbm  # noqa: F401
+    _HAS_LIGHTGBM = True
+except ImportError:
+    _HAS_LIGHTGBM = False
+
+# Tests that actually train a model require LightGBM. Skip them in environments
+# where it isn't installed (CI runs pip install -r requirements.txt which
+# doesn't pin lightgbm — the production code degrades gracefully via try/except,
+# so tests must do the same).
+pytestmark_lgbm = pytest.mark.skipif(
+    not _HAS_LIGHTGBM, reason="LightGBM not installed"
+)
+
 
 def _make_stock_df(
     n: int = 300,
@@ -136,6 +150,7 @@ class TestFeatureExtraction:
         assert features[8] == pytest.approx(0.25, abs=0.01)
 
 
+@pytestmark_lgbm
 class TestModelTraining:
     def test_training_succeeds(self, selector, universe):
         result = selector.select_factors(universe)
@@ -170,12 +185,14 @@ class TestModelTraining:
 
 
 class TestFactorWeightMapping:
+    @pytestmark_lgbm
     def test_to_factor_weights_sums_to_one(self, selector, universe):
         result = selector.select_factors(universe)
         weights = result.to_factor_weights()
         total = sum(weights.values())
         assert total == pytest.approx(1.0, abs=0.01)
 
+    @pytestmark_lgbm
     def test_to_factor_weights_keys(self, selector, universe):
         result = selector.select_factors(universe)
         weights = result.to_factor_weights()
@@ -191,6 +208,7 @@ class TestFactorWeightMapping:
                            "garp": 0.20, "momentum": 0.15}
 
 
+@pytestmark_lgbm
 class TestWithFundamentals:
     def test_fundamentals_improve_dataset(self, selector, universe):
         fund = {
@@ -212,6 +230,7 @@ class TestWithFundamentals:
         assert any(f.importance > 0 for f in fund_features)
 
 
+@pytestmark_lgbm
 class TestCustomParams:
     def test_custom_forward_days(self):
         selector = MLFactorSelector(forward_days=5, n_estimators=10, max_depth=3)
@@ -243,6 +262,7 @@ class TestEdgeCases:
         # May or may not succeed, but should not crash
         assert isinstance(result, FactorSelectionResult)
 
+    @pytestmark_lgbm
     def test_mixed_length_data(self, selector):
         """Stocks with different history lengths."""
         universe = {}
