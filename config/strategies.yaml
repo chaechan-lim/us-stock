@@ -633,6 +633,11 @@ markets:
       # 1.11 → 1.19, MDD unchanged at 5.6%. See scripts/compare_entry_and_
       # sector_boost.py for the per-market sweep.
       sector_boost_weight: 0.2
+      # 2026-04-24: skip BUY in the first 30 minutes after 09:30 ET. Live
+      # pattern showed ~60% of US fills land at open and lose -5~-7% in
+      # 4h (ALM/AMPX whipsaw). SELL still passes; position_tracker SL/TP
+      # runs on its own schedule, so risk exits aren't blocked.
+      opening_avoidance_minutes: 30
   KR:
     # 2026-04-08 — full KR re-evaluation after the KR-currency bug fix
     #   (full_pipeline.py initial_equity now auto-scales to 100M KRW).
@@ -706,6 +711,9 @@ markets:
       # Ret +6.8% Sharpe 0.32 → weight=0.3 gives Ret +9.2% Sharpe 0.48, PF
       # 1.14 → 1.18. KR sector coverage 85% (35/41 symbols mapped).
       sector_boost_weight: 0.3
+      # 2026-04-24: skip BUY in the first 30 minutes after 09:00 KST open
+      # (44% of fills land at open, same whipsaw pattern as US).
+      opening_avoidance_minutes: 30
 
 # Screening pipeline settings
 screening:

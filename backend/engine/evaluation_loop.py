@@ -140,6 +140,10 @@ class EvaluationLoop:
         # gave the cleanest 4-axis improvement vs baseline.
         self._sector_boost_weight: float = 0.0
         self._sector_scores: dict[str, float] = {}  # sector_name -> strength 0-100
+        # 2026-04-24: skip BUY during the first N minutes after market open.
+        # 0 = off. SELL signals still pass (position_tracker SL/TP also runs
+        # on its own schedule, so risk exits aren't blocked).
+        self._opening_avoidance_minutes: int = 0
 
         # Commission rate per order (one-way). Used to filter out trades
         # where expected PnL < round-trip commission. KIS US = 0.25%,
@@ -280,6 +284,17 @@ class EvaluationLoop:
         """Update sector strength scores (0-100), typically called from
         the ETF evaluation task that already fetches sector performance."""
         self._sector_scores = dict(scores)
+
+    def set_opening_avoidance_minutes(self, minutes: int) -> None:
+        """Skip BUY eval during the first N minutes after regular open.
+        0 disables. SELL still passes; position_tracker SL/TP unaffected."""
+        if minutes < 0:
+            raise ValueError(f"opening_avoidance_minutes must be >= 0, got {minutes}")
+        self._opening_avoidance_minutes = int(minutes)
+        logger.info(
+            "Market %s: opening_avoidance_minutes=%d",
+            self._market, self._opening_avoidance_minutes,
+        )
 
     def _get_sector(self, symbol: str) -> str:
         """Look up sector for a symbol (cached)."""
@@ -1573,6 +1588,20 @@ class EvaluationLoop:
             price = float(df.iloc[-1]["close"])
 
         if signal.signal_type == SignalType.BUY:
+            # 2026-04-24: skip BUY during the first N minutes after market open.
+            # Live BUY pattern showed ~60% of fills land in the opening 30 min
+            # and lose ~5% within 4h (ALM/AMPX whipsaw). SELL signals pass
+            # through so held positions can still exit — position_tracker also
+            # runs SL/TP via task_position_check independently of this loop.
+            if self._opening_avoidance_minutes > 0:
+                from engine.scheduler import is_opening_minutes
+                if is_opening_minutes(self._market, self._opening_avoidance_minutes):
+                    logger.debug(
+                        "Skipping BUY for %s: within %dmin post-open avoidance window",
+                        symbol, self._opening_avoidance_minutes,
+                    )
+                    return
+
             # Daily buy budget with dynamic confidence escalation
             # As more slots are used, require higher confidence to preserve
             # remaining slots for stronger opportunities later in the day.

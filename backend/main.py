@@ -119,6 +119,11 @@ def _apply_kr_eval_overrides(
     v = kr_eval_cfg.get("sector_boost_weight")
     kr_loop.set_sector_boost_weight(float(v) if v is not None else 0.0)
 
+    # Opening-minute BUY avoidance (2026-04-24): suppress BUY in first N min
+    # post-open; SELL passes through so exits aren't blocked.
+    v = kr_eval_cfg.get("opening_avoidance_minutes")
+    kr_loop.set_opening_avoidance_minutes(int(v) if v is not None else 0)
+
     kr_disabled = config_loader.get_market_disabled_strategies("KR")
     _warn_if_disabled_empty("KR", kr_disabled)
     kr_loop.set_disabled_strategies(kr_disabled)
@@ -175,6 +180,10 @@ def _apply_us_eval_overrides(
     us_eval_cfg = config_loader.get_market_evaluation_loop_config("US")
     v = us_eval_cfg.get("sector_boost_weight")
     us_loop.set_sector_boost_weight(float(v) if v is not None else 0.0)
+
+    # Opening-minute BUY avoidance (2026-04-24).
+    v = us_eval_cfg.get("opening_avoidance_minutes")
+    us_loop.set_opening_avoidance_minutes(int(v) if v is not None else 0)
 
 
 @asynccontextmanager
