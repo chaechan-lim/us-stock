@@ -292,6 +292,8 @@ class TestStrategyConfigLoaderMarketMethods:
         """2026-04-23 Option A: US keeps trend_following + supertrend.
         dual_momentum stays US-disabled (live bleeder, -2.28% avg 10 trades +
         backtest -$3,865 — see markets.US comment in strategies.yaml).
+        2026-04-24 D1: markets.US.evaluation_loop now carries sector_boost_weight;
+        everything else still uses code defaults.
         """
         loader = StrategyConfigLoader()
         us_disabled = loader.get_market_disabled_strategies("US")
@@ -299,9 +301,11 @@ class TestStrategyConfigLoaderMarketMethods:
         assert us_disabled == ["dual_momentum"]
         assert "trend_following" not in us_disabled
         assert "supertrend" not in us_disabled
-        # US has no risk or evaluation_loop overrides (those remain code defaults)
+        # US has no risk overrides (code defaults)
         assert loader.get_market_risk_config("US") == {}
-        assert loader.get_market_evaluation_loop_config("US") == {}
+        us_eval = loader.get_market_evaluation_loop_config("US")
+        assert set(us_eval.keys()) == {"sector_boost_weight"}
+        assert us_eval["sector_boost_weight"] == pytest.approx(0.2)
 
     def test_get_market_disabled_strategies_unknown_market(self):
         loader = StrategyConfigLoader()

@@ -31,6 +31,11 @@ class SupertrendStrategy(BaseStrategy):
         self._confirmation_bars = p.get("confirmation_bars", 2)
         self._rsi_overbought = p.get("rsi_overbought", 75)
         self._adx_lookback = p.get("adx_lookback", 3)
+        # E2 (2026-04-24): optional 20d daily-return std filter to suppress
+        # BUY on high-vol whipsaw-prone symbols like ALM (vol 0.97 annualised
+        # → daily std ~6%, routinely -5% in 4h → position_cleanup churn).
+        self._volatility_filter = p.get("volatility_filter", False)
+        self._max_volatility_pct = p.get("max_volatility_pct", 3.0)
 
     async def analyze(
         self, df: pd.DataFrame, symbol: str
@@ -86,6 +91,14 @@ class SupertrendStrategy(BaseStrategy):
             and confirmed_bull
             and price > supertrend
         ):
+            # E2 volatility filter: suppress BUY on high-vol whipsaw symbols
+            if self._volatility_filter:
+                vol_pct = self._calc_volatility(df)
+                if vol_pct > self._max_volatility_pct:
+                    return self._hold(
+                        f"High volatility ({vol_pct:.1f}% > {self._max_volatility_pct}%)"
+                    )
+
             confidence = self._calc_confidence(
                 adx, rsi, price, supertrend
             )
@@ -208,6 +221,19 @@ class SupertrendStrategy(BaseStrategy):
         )
 
         return max(0.3, min(base, 0.95))
+
+    def _calc_volatility(self, df: pd.DataFrame) -> float:
+        """20d daily-return std as a percentage (mirrors dual_momentum).
+
+        Used by the optional volatility_filter to suppress BUY signals on
+        high-vol, whipsaw-prone symbols (ALM, AMPX, CIFR — vol 0.6+).
+        """
+        if len(df) < 21:
+            return 0.0
+        returns = df["close"].iloc[-21:].pct_change().dropna()
+        if len(returns) < 5:
+            return 0.0
+        return float(returns.std() * 100)
 
     def _calc_adx_gradient(
         self, df: pd.DataFrame

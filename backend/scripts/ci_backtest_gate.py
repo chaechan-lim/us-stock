@@ -87,6 +87,13 @@ async def _run(market: str) -> dict:
     loader = StrategyConfigLoader()
     disabled = loader.get_market_disabled_strategies(market)
     kw = _kr_config(disabled) if market == "KR" else _us_config(disabled)
+    # Read per-market sector_boost_weight from yaml so the baseline
+    # mirrors live eval-loop config. Without this the gate silently ran
+    # with weight=0 even after D1 was wired into live (2026-04-24).
+    eval_cfg = loader.get_market_evaluation_loop_config(market)
+    weight = eval_cfg.get("sector_boost_weight")
+    if weight is not None:
+        kw["sector_boost_weight"] = float(weight)
     cfg = PipelineConfig(**kw)
     eng = FullPipelineBacktest(cfg)
     t0 = time.time()

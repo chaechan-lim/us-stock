@@ -620,10 +620,19 @@ markets:
     cash_parking:
       enabled: true
       symbol: SPY
-      threshold: 0.50   # park when cash > 50% (burst용 현금 확보 + 수수료 절약)
+      # 2026-04-24: 0.50 → 0.70. Option A 후 US 매수 빈도 낮아져 SPY 파킹이
+      # US 포지션의 57% 차지 (개별주 14%). threshold 70%로 올려 더 많은
+      # 현금이 쌓여야만 파킹 트리거 — 기존 SPY는 BUY unpark로 자연 감소.
+      threshold: 0.70
       buffer: 0.10
       min_hold_days: 10  # 2주 최소 보유 (수수료 회수)
       enable_unpark: true # BUY 시그널 시 현금 부족하면 parking 매도
+    evaluation_loop:
+      # D1 sector strength boost on BUY (2026-04-24 sweep): US 2y baseline
+      # Ret +4.6% Sharpe 0.10 → weight=0.2 gives Ret +8.0% Sharpe 0.44, PF
+      # 1.11 → 1.19, MDD unchanged at 5.6%. See scripts/compare_entry_and_
+      # sector_boost.py for the per-market sweep.
+      sector_boost_weight: 0.2
   KR:
     # 2026-04-08 — full KR re-evaluation after the KR-currency bug fix
     #   (full_pipeline.py initial_equity now auto-scales to 100M KRW).
@@ -693,6 +702,10 @@ markets:
       sell_cooldown_days: 1
       whipsaw_max_losses: 2
       min_hold_days: 1
+      # D1 sector strength boost on BUY (2026-04-24 sweep): KR 2y baseline
+      # Ret +6.8% Sharpe 0.32 → weight=0.3 gives Ret +9.2% Sharpe 0.48, PF
+      # 1.14 → 1.18. KR sector coverage 85% (35/41 symbols mapped).
+      sector_boost_weight: 0.3
 
 # Screening pipeline settings
 screening:

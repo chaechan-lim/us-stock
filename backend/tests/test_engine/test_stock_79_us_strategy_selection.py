@@ -161,10 +161,13 @@ class TestUSConfigLoader:
         loader = StrategyConfigLoader()
         assert loader.get_market_risk_config("US") == {}
 
-    def test_us_no_eval_loop_overrides(self):
-        """US evaluation_loop params are not overridden in config."""
+    def test_us_eval_loop_has_sector_boost_only(self):
+        """2026-04-24: D1 added sector_boost_weight under markets.US.evaluation_loop.
+        Everything else still uses code defaults — no other eval-loop overrides."""
         loader = StrategyConfigLoader()
-        assert loader.get_market_evaluation_loop_config("US") == {}
+        cfg = loader.get_market_evaluation_loop_config("US")
+        assert set(cfg.keys()) == {"sector_boost_weight"}
+        assert cfg["sector_boost_weight"] == pytest.approx(0.2)
 
 
 # ---------------------------------------------------------------------------
