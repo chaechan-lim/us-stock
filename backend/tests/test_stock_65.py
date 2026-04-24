@@ -304,8 +304,10 @@ class TestStrategyConfigLoaderMarketMethods:
         # US has no risk overrides (code defaults)
         assert loader.get_market_risk_config("US") == {}
         us_eval = loader.get_market_evaluation_loop_config("US")
-        assert set(us_eval.keys()) == {"sector_boost_weight"}
+        # 2026-04-24: sector_boost_weight (D1) + opening_avoidance_minutes
+        assert set(us_eval.keys()) == {"sector_boost_weight", "opening_avoidance_minutes"}
         assert us_eval["sector_boost_weight"] == pytest.approx(0.2)
+        assert us_eval["opening_avoidance_minutes"] == 30
 
     def test_get_market_disabled_strategies_unknown_market(self):
         loader = StrategyConfigLoader()
