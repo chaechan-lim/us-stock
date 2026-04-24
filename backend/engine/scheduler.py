@@ -94,6 +94,36 @@ def is_market_open(now: datetime | None = None) -> bool:
     return get_market_phase(now) == MarketPhase.REGULAR
 
 
+def is_opening_minutes(
+    market: str = "US",
+    minutes: int = 30,
+    now: datetime | None = None,
+) -> bool:
+    """True during the first N minutes after REGULAR open for `market`.
+
+    Used to suppress BUY evaluation during the opening auction / high-vol
+    first minutes — historically ~60% of live fills land in the first 30
+    minutes and lose ~5% within 4h (ALM / AMPX whipsaw pattern,
+    2026-04-24 post-mortem).
+    """
+    if market == "KR":
+        now = now or datetime.now(KST)
+        now_tz = now.astimezone(KST)
+        phase = get_kr_market_phase(now_tz)
+        open_t = time(9, 0)
+    else:
+        now = now or datetime.now(ET)
+        now_tz = now.astimezone(ET)
+        phase = get_market_phase(now_tz)
+        open_t = time(9, 30)
+
+    if phase != MarketPhase.REGULAR:
+        return False
+    t = now_tz.time()
+    delta_min = (t.hour - open_t.hour) * 60 + (t.minute - open_t.minute)
+    return 0 <= delta_min < minutes
+
+
 class TaskEntry:
     """A scheduled task with phase and interval."""
 
