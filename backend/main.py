@@ -115,6 +115,10 @@ def _apply_kr_eval_overrides(
     v = kr_eval_cfg.get("min_active_ratio")
     kr_loop.set_min_active_ratio(float(v) if v is not None else None)
 
+    # D1 sector-strength boost on BUY.
+    v = kr_eval_cfg.get("sector_boost_weight")
+    kr_loop.set_sector_boost_weight(float(v) if v is not None else 0.0)
+
     kr_disabled = config_loader.get_market_disabled_strategies("KR")
     _warn_if_disabled_empty("KR", kr_disabled)
     kr_loop.set_disabled_strategies(kr_disabled)
@@ -166,6 +170,11 @@ def _apply_us_eval_overrides(
         min_hold_days=us_park.get("min_hold_days"),
         enable_unpark=us_park.get("enable_unpark"),
     )
+
+    # D1 sector-strength boost on BUY (yaml-driven, hot-reloadable).
+    us_eval_cfg = config_loader.get_market_evaluation_loop_config("US")
+    v = us_eval_cfg.get("sector_boost_weight")
+    us_loop.set_sector_boost_weight(float(v) if v is not None else 0.0)
 
 
 @asynccontextmanager
@@ -940,6 +949,15 @@ async def lifespan(app: FastAPI):
                 sector_data=sector_data,
             )
 
+            # D1: share sector strength scores with the US eval loop for
+            # BUY-confidence boost (matches backtest sector_boost_weight).
+            if sector_data:
+                sector_scores = {
+                    s.name: s.strength_score
+                    for s in sector_analyzer.analyze(sector_data)
+                }
+                evaluation_loop.set_sector_scores(sector_scores)
+
             total = sum(len(v) for v in actions.values())
             if total > 0:
                 logger.info(
@@ -975,6 +993,11 @@ async def lifespan(app: FastAPI):
             sector_data = await external_data.get_sector_performance()
             if sector_data:
                 scores = sector_analyzer.analyze(sector_data)
+                # D1: feed US eval loop so it can boost BUY confidence on
+                # stocks in strong sectors. No-op when sector_boost_weight=0.
+                evaluation_loop.set_sector_scores(
+                    {s.name: s.strength_score for s in scores}
+                )
                 top = sector_analyzer.get_top_sectors(scores)
                 logger.info(
                     "Sector analysis: top=%s",
@@ -1995,6 +2018,16 @@ async def lifespan(app: FastAPI):
                     state.regime.value,
                     state.spy_price,
                     state.spy_sma200,
+                )
+
+            # D1: feed KR sector strength scores to the KR eval loop for
+            # BUY-confidence boost. KR ETF engine is disabled, so we do the
+            # sector analysis inline here instead of a separate task.
+            kr_sector_data = await external_data.get_kr_sector_performance()
+            if kr_sector_data:
+                scores = sector_analyzer.analyze(kr_sector_data)
+                kr_evaluation_loop.set_sector_scores(
+                    {s.name: s.strength_score for s in scores}
                 )
         except Exception as e:
             logger.error("KR market state update failed: %s", e)

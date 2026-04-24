@@ -135,6 +135,11 @@ class EvaluationLoop:
         # Sector concentration limit (blocks BUY if sector > max_sector_pct of portfolio)
         self._max_sector_pct: float = 0.40
         self._sector_cache: dict[str, str] = {}  # symbol -> sector name
+        # D1 sector strength boost on BUY: multiplier applied to signal.confidence
+        # before sizing. 0.0 = off. Backtest sweep (2026-04-24): KR 0.3, US 0.2
+        # gave the cleanest 4-axis improvement vs baseline.
+        self._sector_boost_weight: float = 0.0
+        self._sector_scores: dict[str, float] = {}  # sector_name -> strength 0-100
 
         # Commission rate per order (one-way). Used to filter out trades
         # where expected PnL < round-trip commission. KIS US = 0.25%,
@@ -261,6 +266,20 @@ class EvaluationLoop:
     def set_sector_cache(self, cache: dict[str, str]) -> None:
         """Set symbol → sector mapping for sector concentration checks."""
         self._sector_cache = cache
+
+    def set_sector_boost_weight(self, weight: float) -> None:
+        """Enable sector strength boost on BUY confidence. 0.0 = off."""
+        if weight < 0:
+            raise ValueError(f"sector_boost_weight must be >= 0, got {weight}")
+        self._sector_boost_weight = float(weight)
+        logger.info(
+            "Market %s: sector_boost_weight=%.2f", self._market, self._sector_boost_weight,
+        )
+
+    def set_sector_scores(self, scores: dict[str, float]) -> None:
+        """Update sector strength scores (0-100), typically called from
+        the ETF evaluation task that already fetches sector performance."""
+        self._sector_scores = dict(scores)
 
     def _get_sector(self, symbol: str) -> str:
         """Look up sector for a symbol (cached)."""
@@ -1723,6 +1742,20 @@ class EvaluationLoop:
             if self._event_calendar:
                 confidence += self._event_calendar.get_confidence_adjustment(symbol)
                 confidence = max(0.0, min(1.0, confidence))
+
+            # D1 sector strength boost: multiply confidence by a factor derived
+            # from the symbol's sector's 1w/1m/3m strength score. Neutral when
+            # weight=0 or sector is Unknown / not scored yet. See
+            # scripts/compare_entry_and_sector_boost.py for 2y sweep evidence.
+            if self._sector_boost_weight > 0 and self._sector_scores:
+                sector = self._sector_cache.get(symbol, "Unknown")
+                strength = self._sector_scores.get(sector)
+                if strength is not None:
+                    # multiplier = 1 + w * (strength - 50) / 50
+                    # strength=100, w=0.3 → 1.30 ; strength=0 → 0.70
+                    mult = max(0.1, 1.0 + self._sector_boost_weight * (strength - 50) / 50)
+                    boosted = confidence * mult
+                    confidence = max(0.0, min(1.0, boosted))
 
             # Get strategy quality metrics for Kelly inputs
             strategy_name = signal.strategy_name

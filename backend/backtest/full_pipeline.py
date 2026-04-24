@@ -185,6 +185,12 @@ class PipelineConfig:
     # diverge from live behavior because the tracker has no trade history.
     signal_quality_seed_path: str | None = None
 
+    # Sector-strength boost on BUY (D1). 0 = off. Recommended 0.1-0.3.
+    # multiplier = 1 + weight * (strength - 50) / 50
+    # strength comes from SectorAnalyzer over the 11 US SPDRs / 7 KODEX KR ETFs.
+    # Unknown-sector symbols get a neutral multiplier (1.0, no effect).
+    sector_boost_weight: float = 0.0
+
     # Simulation
     # initial_equity uses raw price units (no FX conversion). For US (USD prices)
     # the default is 100_000 = $100k. For KR (KRW prices, e.g. 470,000원/share),
@@ -456,6 +462,10 @@ class FullPipelineBacktest:
         # Sector concentration tracking
         self._sector_cache: dict[str, str] = {}  # symbol → sector
 
+        # D1 sector-boost: historical sector strength, built once at run() start
+        # when sector_boost_weight > 0.
+        self._sector_history = None
+
     def _load_signal_quality_seed(self, cfg: "PipelineConfig") -> None:
         """Optionally seed self._signal_quality from a JSON snapshot.
 
@@ -583,6 +593,19 @@ class FullPipelineBacktest:
 
         if not stock_data:
             raise ValueError("No stock data loaded")
+
+        # D1: sector-strength history for boosting BUY confidence on symbols
+        # whose sector is outperforming. Only loaded when enabled — the 11 US
+        # sector ETFs (or 7 KR sector ETFs) add ~1s to data load.
+        if cfg.sector_boost_weight > 0:
+            from backtest.sector_data import build_sector_history
+            self._sector_history = build_sector_history(
+                self._data_loader, cfg.market, period=period,
+            )
+            logger.info(
+                "Sector boost enabled: weight=%.2f, %d bars of sector scores",
+                cfg.sector_boost_weight, len(self._sector_history.dates),
+            )
 
         logger.info(
             "Data loaded: %d stocks, %d ~ %d bars",
@@ -1661,6 +1684,18 @@ class FullPipelineBacktest:
         # Get momentum factor score for this stock
         factor_score = self._factor_scores.get(symbol, 0.0)
 
+        # D1: sector-strength boost — multiply confidence by a factor based
+        # on the symbol's sector's relative strength. Neutral (×1.0) when
+        # the sector is at rank ~50, boosts up for strong sectors, suppresses
+        # for weak ones. Unknown sectors get ×1.0 (no effect).
+        boosted_confidence = signal.confidence
+        if self._sector_history is not None:
+            from backtest.sector_data import confidence_multiplier
+            sector = self._sector_history.sector_for(symbol)
+            strength = self._sector_history.score_at(date).get(sector)
+            mult = confidence_multiplier(strength, cfg.sector_boost_weight)
+            boosted_confidence = max(0.0, min(1.0, signal.confidence * mult))
+
         # Count only stock positions (exclude parking, ETF)
         system_strategies = {"cash_parking", "etf_leverage", "etf_inverse"}
         active_positions = sum(
@@ -1677,7 +1712,7 @@ class FullPipelineBacktest:
             win_rate=win_rate,
             avg_win=avg_win,
             avg_loss=avg_loss,
-            signal_confidence=signal.confidence,
+            signal_confidence=boosted_confidence,
             factor_score=factor_score,
         )
 
