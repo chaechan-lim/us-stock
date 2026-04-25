@@ -1709,8 +1709,19 @@ class EvaluationLoop:
             balance = await self._market_data.get_balance()
             positions = await self._get_positions()
 
-            # Sector concentration check
-            est_cost = price * 10  # Rough estimate; will be refined by Kelly
+            # Sector concentration check.
+            # est_cost approximates the largest plausible BUY for this symbol
+            # so the sector pre-filter can reject before Kelly sizing is run.
+            # 2026-04-25: changed from a fixed `price × 10` to the per-symbol
+            # cap (max_position_pct × portfolio_value). The old fixed quantity
+            # rejected expensive stocks (EQIX $800 × 10 = $8000 → inflated
+            # sector concentration to 126% of a $6.5k US portfolio) even when
+            # Kelly would have sized the actual order at 1 share.
+            est_cost = (
+                self._max_per_symbol_pct * balance.total
+                if balance.total > 0
+                else price
+            )
             if not self._check_sector_limit(symbol, est_cost, positions, balance.total):
                 return
 
