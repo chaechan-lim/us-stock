@@ -1845,12 +1845,55 @@ class EvaluationLoop:
                     )
 
             if not sizing.allowed:
-                logger.info(
-                    "Buy rejected for %s: %s",
-                    symbol,
-                    sizing.reason,
+                # 2026-04-28: when sizing rejects with "Max exposure reached",
+                # the original unpark logic below never fires (it required
+                # sizing.allowed=True first). That left the system deadlocked:
+                # SPY parking ate the exposure cap, every BUY was rejected,
+                # SPY never sold because BUY never reached the unpark branch.
+                # Detect exposure rejection here and try unparking once.
+                is_exposure_reject = "exposure" in (sizing.reason or "").lower()
+                parking_eligible = (
+                    is_exposure_reject
+                    and self._cash_parking_enabled
+                    and getattr(self, "_cash_parking_enable_unpark", False)
                 )
-                return
+                if parking_eligible:
+                    logger.info(
+                        "Buy %s exposure-blocked (%s) — attempting parking unpark",
+                        symbol, sizing.reason,
+                    )
+                    await self._unpark_for_buy(0.0, 0.0)
+                    # Re-fetch state and retry sizing once
+                    balance = await self._market_data.get_balance()
+                    positions = await self._get_positions()
+                    market_invested = sum(
+                        (getattr(p, "current_price", 0) or 0) * p.quantity
+                        for p in positions if p.quantity > 0
+                    )
+                    sizing = self._risk_manager.calculate_kelly_position_size(
+                        symbol=symbol,
+                        price=price,
+                        portfolio_value=balance.total,
+                        cash_available=balance.available,
+                        current_positions=len(positions),
+                        win_rate=win_rate,
+                        avg_win=avg_win,
+                        avg_loss=avg_loss,
+                        signal_confidence=confidence,
+                        factor_score=factor_score,
+                        market=self._market,
+                        combined_portfolio_value=combined_pv,
+                        existing_position_value=existing_value,
+                        max_drawdown=metrics.max_drawdown,
+                        market_invested=market_invested,
+                    )
+                if not sizing.allowed:
+                    logger.info(
+                        "Buy rejected for %s: %s",
+                        symbol,
+                        sizing.reason,
+                    )
+                    return
 
             # AI pre-trade risk check (non-blocking: failures default to approved)
             if self._risk_agent:
