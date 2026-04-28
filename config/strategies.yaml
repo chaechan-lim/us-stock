@@ -618,15 +618,20 @@ markets:
     #   - Pending-order check prevents duplicate BUY orders
     #   - SPY position is sold only by strategy signals or manual action
     cash_parking:
-      enabled: true
+      # 2026-04-28: disabled outright. SPY parking ate US exposure cap
+      # (~57% of US positions), every BUY rejected with "Max exposure 86%",
+      # 0 fills on 4/24 + 4/27 US sessions. PR #118 (unpark on exposure
+      # rejection) reintroduced the 4/11 churn pattern (parking → unpark
+      # → repark loop, 1-hour cooldown only). Cleanest exit: stop parking,
+      # accept idle-cash drag (~13pp alpha per validate_cash_parking V1)
+      # over predictable trading. Re-enable after parking_max_pct cap is
+      # designed (parking can't exceed e.g. 25% of US allocation).
+      enabled: false
       symbol: SPY
-      # 2026-04-24: 0.50 → 0.70. Option A 후 US 매수 빈도 낮아져 SPY 파킹이
-      # US 포지션의 57% 차지 (개별주 14%). threshold 70%로 올려 더 많은
-      # 현금이 쌓여야만 파킹 트리거 — 기존 SPY는 BUY unpark로 자연 감소.
       threshold: 0.70
       buffer: 0.10
-      min_hold_days: 10  # 2주 최소 보유 (수수료 회수)
-      enable_unpark: true # BUY 시그널 시 현금 부족하면 parking 매도
+      min_hold_days: 10
+      enable_unpark: true
     evaluation_loop:
       # D1 sector strength boost on BUY (2026-04-24 sweep): US 2y baseline
       # Ret +4.6% Sharpe 0.10 → weight=0.2 gives Ret +8.0% Sharpe 0.44, PF
