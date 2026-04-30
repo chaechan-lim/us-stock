@@ -126,10 +126,27 @@ def _save_baseline(data: dict) -> None:
 async def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--update-baseline", action="store_true",
-                        help="Run backtest and save results as new baseline.")
+                        help="Run backtest and save results as new baseline. "
+                             "Implies --refresh-cache.")
+    parser.add_argument("--refresh-cache", action="store_true",
+                        help="Force fresh yfinance fetch + rewrite the OHLCV "
+                             "cache files. The default uses the cache for "
+                             "deterministic results across CI runs.")
     parser.add_argument("--markets", nargs="+", default=["KR", "US"],
                         help="Markets to run (default: KR US).")
     args = parser.parse_args()
+
+    # Updating the baseline implies the cache also needs to refresh —
+    # otherwise the new baseline reflects yfinance state from whenever the
+    # cache was last refreshed, not now.
+    refresh = args.refresh_cache or args.update_baseline
+    if refresh:
+        # The first eng.run() inside _run() will hit the cache — we force a
+        # fresh fetch by setting BACKTEST_CACHE_DISABLE before the run, then
+        # the cache writer rewrites with the fresh data.
+        import os as _os
+        _os.environ["BACKTEST_CACHE_DISABLE"] = "1"
+        print("(cache refresh — fetching fresh OHLCV from yfinance)")
 
     results: dict[str, dict] = {}
     for market in args.markets:
