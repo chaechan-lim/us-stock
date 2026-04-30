@@ -103,6 +103,45 @@ class TestSupertrend:
         assert params["adx_lookback"] == 5
 
 
+class TestEntryOffset:
+    """G1 limit-at-line entry suggestion (2026-04-30)."""
+
+    async def test_default_no_offset_uses_market_price(self):
+        strategy = SupertrendStrategy()
+        df = _make_df(direction=1.0, close=150.0, supertrend=140.0)
+        signal = await strategy.analyze(df, "AAPL")
+        assert signal.signal_type == SignalType.BUY
+        assert signal.suggested_price == 150.0  # current close
+
+    async def test_offset_set_close_above_target_returns_limit(self):
+        # close 150, line 140 → line × 1.02 = 142.8 < 150 → use limit
+        strategy = SupertrendStrategy(params={"entry_offset_pct": 0.02})
+        df = _make_df(direction=1.0, close=150.0, supertrend=140.0)
+        signal = await strategy.analyze(df, "AAPL")
+        assert signal.signal_type == SignalType.BUY
+        assert signal.suggested_price == 142.8  # 140 × 1.02
+
+    async def test_offset_set_close_at_target_uses_market(self):
+        # close 142, line 140 → limit 142.8, but 142.8 >= 142 means we
+        # don't override. Use market (close).
+        strategy = SupertrendStrategy(params={"entry_offset_pct": 0.02})
+        df = _make_df(direction=1.0, close=142.0, supertrend=140.0)
+        signal = await strategy.analyze(df, "AAPL")
+        assert signal.suggested_price == 142.0
+
+    async def test_offset_zero_disables(self):
+        strategy = SupertrendStrategy(params={"entry_offset_pct": None})
+        df = _make_df(direction=1.0, close=150.0, supertrend=140.0)
+        signal = await strategy.analyze(df, "AAPL")
+        assert signal.suggested_price == 150.0
+
+    async def test_offset_reason_string_marks_limit(self):
+        strategy = SupertrendStrategy(params={"entry_offset_pct": 0.02})
+        df = _make_df(direction=1.0, close=150.0, supertrend=140.0)
+        signal = await strategy.analyze(df, "AAPL")
+        assert "limit @" in signal.reason
+
+
 class TestDynamicSellConfidence:
     """Test dynamic sell confidence scaling."""
 

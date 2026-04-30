@@ -36,6 +36,20 @@ class SupertrendStrategy(BaseStrategy):
         # → daily std ~6%, routinely -5% in 4h → position_cleanup churn).
         self._volatility_filter = p.get("volatility_filter", False)
         self._max_volatility_pct = p.get("max_volatility_pct", 3.0)
+        # F2 (2026-04-30): pullback filter — only BUY when close is within
+        # `pullback_max_pct` above the supertrend line. The line acts as
+        # support; entries far above it (fresh breakout extension) are the
+        # ones that whipsaw down 5-7% in 4h. None disables.
+        # Live observation: ALM/CRML/247540/028260 all bought at 6%+ above
+        # the supertrend line, then immediately pulled back.
+        self._pullback_max_pct: float | None = p.get("pullback_max_pct")
+        # G1 (2026-04-30): when set, signal.suggested_price = line × (1+offset)
+        # instead of current close → live order_manager places LIMIT order at
+        # that price. Order sits in the book; if price never pulls back, no
+        # fill happens (signal naturally expires when supertrend turns
+        # bearish). Daily-bar backtest can't validate this (intraday spike
+        # invisible) so this is a live-only experimental knob.
+        self._entry_offset_pct: float | None = p.get("entry_offset_pct")
 
     async def analyze(
         self, df: pd.DataFrame, symbol: str
@@ -99,6 +113,22 @@ class SupertrendStrategy(BaseStrategy):
                         f"High volatility ({vol_pct:.1f}% > {self._max_volatility_pct}%)"
                     )
 
+            # F2 pullback filter: only BUY when close is reasonably close to
+            # the supertrend line. Entries 6-10%+ above the line have shown
+            # high whipsaw rate (live ALM/CRML/247540 all bought extended).
+            if (
+                self._pullback_max_pct is not None
+                and supertrend
+                and not pd.isna(supertrend)
+                and float(supertrend) > 0
+            ):
+                extension = (price - float(supertrend)) / float(supertrend)
+                if extension > self._pullback_max_pct:
+                    return self._hold(
+                        f"Too extended above supertrend line "
+                        f"({extension:.1%} > {self._pullback_max_pct:.1%})"
+                    )
+
             confidence = self._calc_confidence(
                 adx, rsi, price, supertrend
             )
@@ -117,12 +147,30 @@ class SupertrendStrategy(BaseStrategy):
 
             confidence = max(0.1, min(confidence, 0.95))
 
+            # G1: limit-at-line entry. When entry_offset_pct is set and
+            # current close is above (line × (1+offset)), suggest the
+            # lower limit price so the order_manager places a limit order
+            # there instead of a market order at the spike. If close is
+            # already at/below the limit, market entry is fine.
+            entry_price = price
+            if (
+                self._entry_offset_pct is not None
+                and supertrend
+                and not pd.isna(supertrend)
+                and float(supertrend) > 0
+            ):
+                line = float(supertrend)
+                limit_price = line * (1 + self._entry_offset_pct)
+                if limit_price < price:
+                    entry_price = limit_price
+                    reason += f" (limit @ line+{self._entry_offset_pct:.0%})"
+
             return Signal(
                 signal_type=SignalType.BUY,
                 confidence=confidence,
                 strategy_name=self.name,
                 reason=reason,
-                suggested_price=price,
+                suggested_price=entry_price,
                 indicators=indicators,
             )
 

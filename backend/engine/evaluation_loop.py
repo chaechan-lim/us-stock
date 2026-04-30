@@ -1890,9 +1890,23 @@ class EvaluationLoop:
                 balance = await self._market_data.get_balance()
 
             exchange = "KRX" if self._market == "KR" else self._exchange_resolver.resolve(symbol)
+            # G1: honour signal.suggested_price as a LIMIT below the market.
+            # Strategies (currently supertrend with entry_offset_pct) use this
+            # to anchor entry near support, refusing to chase intraday spikes.
+            # If the strategy didn't set a lower limit, falls through to the
+            # market price as before.
+            order_price = price
+            sp = getattr(signal, "suggested_price", None)
+            if sp and sp > 0 and sp < price:
+                order_price = float(sp)
+                logger.info(
+                    "Limit-at-line BUY %s @ $%.2f (vs market $%.2f, gap %.1f%%)",
+                    symbol, order_price, price, (price - order_price) / price * 100,
+                )
+
             order = await self._order_manager.place_buy(
                 symbol=symbol,
-                price=price,
+                price=order_price,
                 portfolio_value=balance.total,
                 cash_available=balance.available,
                 current_positions=len(positions),
