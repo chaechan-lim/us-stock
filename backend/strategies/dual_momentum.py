@@ -26,6 +26,12 @@ class DualMomentumStrategy(BaseStrategy):
         self._max_volatility_pct = p.get("max_volatility_pct", 3.0)
         self._gradient_sell = p.get("gradient_sell", True)
         self._gradient_threshold = p.get("gradient_threshold", -0.30)
+        # F2 (2026-04-30): anti-overbought filter — skip BUY when the
+        # symbol has rallied more than `max_5d_gain` in the last 5 trading
+        # days (already pulled into a vertical move, high pullback risk).
+        # Live whipsaw cases (247540, 028260) showed +20-30% over 5d
+        # right before the system bought, then -5% in 1-3 days. None disables.
+        self._max_5d_gain: float | None = p.get("max_5d_gain")
 
     async def analyze(self, df: pd.DataFrame, symbol: str) -> Signal:
         if len(df) < self.min_candles_required:
@@ -104,6 +110,18 @@ class DualMomentumStrategy(BaseStrategy):
                 return self._hold(
                     f"High volatility ({volatility_pct:.1f}%) — buy suppressed"
                 )
+
+            # F2 anti-overbought: refuse to chase symbols that already
+            # rallied hard over the last 5 days. The exhausted-momentum
+            # entry is the source of most whipsaw losses.
+            if self._max_5d_gain is not None and len(df) >= 6:
+                p_5d = float(df.iloc[-6]["close"])
+                if p_5d > 0:
+                    gain_5d = (price - p_5d) / p_5d
+                    if gain_5d > self._max_5d_gain:
+                        return self._hold(
+                            f"Overbought 5d ({gain_5d:.1%} > {self._max_5d_gain:.1%})"
+                        )
 
             confidence = 0.5
             if absolute_return > 0.15:

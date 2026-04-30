@@ -319,6 +319,12 @@ strategies:
       atr_period: 7          # optimized + walk-forward confirmed
       multiplier: 2.0        # optimized + walk-forward confirmed
       confirmation_bars: 1   # walk-forward: 3 -> 1 (more robust)
+      # G1 (2026-04-30): place LIMIT at supertrend_line × 1.02 instead of
+      # market BUY when current close is above that. Refuses to chase
+      # intraday spikes — live ALM/CRML/247540/028260 whipsaw root cause.
+      # Daily-bar backtest can't validate (intraday spike invisible);
+      # live-only experiment, observe 1-2 weeks.
+      entry_offset_pct: 0.02
     stop_loss:
       type: supertrend
     trailing_stop:
