@@ -5,7 +5,7 @@
     "mdd": -12.32,
     "pf": 1.07,
     "trades": 414,
-    "elapsed_sec": 40.1
+    "elapsed_sec": 38.5
   },
   "US": {
     "ret": 8.31,
@@ -13,6 +13,6 @@
     "mdd": -7.11,
     "pf": 1.18,
     "trades": 437,
-    "elapsed_sec": 58.8
+    "elapsed_sec": 57.9
   }
 }
