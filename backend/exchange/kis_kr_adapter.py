@@ -12,6 +12,7 @@ Shares the same KISAuth (OAuth token) as the US adapter.
 import json
 import logging
 from dataclasses import dataclass
+from datetime import date
 from typing import Any
 
 import aiohttp
@@ -70,6 +71,8 @@ TR_ID_KR_LIVE = {
     "KR_VOLUME_SURGE": "FHPST01720000",   # 거래량 급등
     "KR_UPDOWN_RATE": "FHPST01700000",    # 등락률 순위
     "KR_NEW_HIGHLOW": "FHPST01600000",    # 신고가/신저가
+    # Holiday calendar (국내휴장일조회)
+    "KR_HOLIDAY": "CTCA0903R",
 }
 
 TR_ID_KR_PAPER = {
@@ -819,6 +822,70 @@ class KISKRAdapter(ExchangeAdapter):
         return self._parse_kr_ranked(
             data, "kr_new_high" if high else "kr_new_low", limit, exchange,
         )
+
+    async def fetch_kr_holidays(
+        self,
+        bass_date: str | None = None,
+        max_pages: int = 13,
+    ) -> list[date]:
+        """Fetch KR market holidays via KIS 국내휴장일조회 (TR CTCA0903R).
+
+        Returns dates with `opnd_yn == 'N'` (장 휴장). KIS pages ~30 days at
+        a time using CTX_AREA_FK/NK continuation keys; we walk up to
+        `max_pages` pages (≈13 months) so a single call covers the year.
+
+        Args:
+            bass_date: starting date YYYYMMDD; defaults to today.
+            max_pages: continuation cap so a buggy server can't loop forever.
+        """
+        from datetime import datetime as _dt
+
+        await self._auth.ensure_valid_token()
+        if bass_date is None:
+            bass_date = _dt.now().strftime("%Y%m%d")
+
+        holidays: list[date] = []
+        ctx_fk = ""
+        ctx_nk = ""
+        path = "/uapi/domestic-stock/v1/quotations/chk-holiday"
+        tr_id = self._tr["KR_HOLIDAY"]
+
+        for _ in range(max_pages):
+            params = {
+                "BASS_DT": bass_date,
+                "CTX_AREA_NK": ctx_nk,
+                "CTX_AREA_FK": ctx_fk,
+            }
+            data = await self._get(path, tr_id, params)
+            if data.get("rt_cd") != "0":
+                logger.warning(
+                    "KR holiday API non-OK rt_cd=%s msg=%s",
+                    data.get("rt_cd"), data.get("msg1"),
+                )
+                break
+
+            for item in data.get("output", []) or []:
+                if not isinstance(item, dict):
+                    continue
+                if item.get("opnd_yn", "").upper() != "N":
+                    continue
+                bd = item.get("bass_dt", "").strip()
+                if len(bd) != 8 or not bd.isdigit():
+                    continue
+                try:
+                    holidays.append(date(int(bd[:4]), int(bd[4:6]), int(bd[6:])))
+                except ValueError:
+                    continue
+
+            ctx_fk_next = (data.get("ctx_area_fk") or "").strip()
+            ctx_nk_next = (data.get("ctx_area_nk") or "").strip()
+            # Empty continuation key = last page
+            if not ctx_nk_next or (ctx_fk_next == ctx_fk and ctx_nk_next == ctx_nk):
+                break
+            ctx_fk = ctx_fk_next
+            ctx_nk = ctx_nk_next
+
+        return holidays
 
     def _parse_kr_ranked(
         self,

@@ -118,6 +118,31 @@ def test_kr_market_phase_weekend():
     assert get_kr_market_phase(dt) == MarketPhase.CLOSED
 
 
+def test_kr_market_phase_holiday_labor_day():
+    # 2026-05-01 (Fri) — 근로자의 날, weekday=4 but market closed.
+    dt = datetime(2026, 5, 1, 12, 0, tzinfo=KST)
+    assert dt.weekday() == 4  # sanity: Friday
+    assert get_kr_market_phase(dt) == MarketPhase.CLOSED
+
+
+def test_kr_market_phase_holiday_lunar_new_year():
+    # 2026-02-17 (Tue) — 설날, regular weekday but market closed.
+    dt = datetime(2026, 2, 17, 10, 0, tzinfo=KST)
+    assert get_kr_market_phase(dt) == MarketPhase.CLOSED
+
+
+def test_us_market_phase_holiday_memorial_day():
+    # 2026-05-25 (Mon) — Memorial Day, NYSE closed.
+    dt = datetime(2026, 5, 25, 11, 0, tzinfo=ET)
+    assert get_market_phase(dt) == MarketPhase.CLOSED
+
+
+def test_us_market_phase_holiday_christmas():
+    # 2026-12-25 (Fri) — Christmas, NYSE closed.
+    dt = datetime(2026, 12, 25, 11, 0, tzinfo=ET)
+    assert get_market_phase(dt) == MarketPhase.CLOSED
+
+
 def test_task_entry_should_run():
     task = TaskEntry("test", AsyncMock(), interval_sec=60, phases=None)
     now = _make_dt(10, 0)
