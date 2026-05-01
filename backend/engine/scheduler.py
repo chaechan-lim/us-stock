@@ -23,6 +23,8 @@ from datetime import datetime, time
 from enum import Enum
 from zoneinfo import ZoneInfo
 
+from services.holiday_calendar import is_kr_holiday, is_us_holiday
+
 logger = logging.getLogger(__name__)
 
 ET = ZoneInfo("America/New_York")
@@ -48,6 +50,11 @@ def get_market_phase(now: datetime | None = None) -> MarketPhase:
 
     # Weekend
     if weekday >= 5:
+        return MarketPhase.CLOSED
+
+    # NYSE holiday — early-close days are not modeled (still REGULAR for the
+    # morning, time logic below handles them well enough).
+    if is_us_holiday(now.date()):
         return MarketPhase.CLOSED
 
     if time(4, 0) <= t < time(9, 30):
@@ -78,6 +85,11 @@ def get_kr_market_phase(now: datetime | None = None) -> MarketPhase:
     weekday = now.weekday()
 
     if weekday >= 5:
+        return MarketPhase.CLOSED
+
+    # KR public holiday (근로자의 날 / 추석 / 신정 etc.) — KIS-sourced cache
+    # populated at startup, hardcoded fallback for the known year.
+    if is_kr_holiday(now.date()):
         return MarketPhase.CLOSED
 
     if time(8, 0) <= t < time(9, 0):

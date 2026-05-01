@@ -260,6 +260,16 @@ async def lifespan(app: FastAPI):
     app.state.kr_adapter = kr_adapter
     logger.info("KR adapter initialized (mode=%s)", config.trading.mode)
 
+    # Refresh KR holiday calendar from KIS API (paper adapter has no
+    # fetch_kr_holidays; fallback set in holiday_calendar.py is used instead).
+    if not config.is_paper:
+        from services.holiday_calendar import holiday_calendar
+        try:
+            n = await holiday_calendar.refresh_kr(kr_adapter)
+            logger.info("KR holiday calendar bootstrap: %d dates from KIS", n)
+        except Exception as e:
+            logger.warning("KR holiday bootstrap failed (using fallback): %s", e)
+
     # KIS WebSocket (live mode only)
     kis_ws = None
     if not config.is_paper:
