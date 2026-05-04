@@ -272,7 +272,8 @@ class TestStrategyConfigLoaderMarketMethods:
         # 2026-04-17: 10→20% (KR backtest V4: Sharpe 0.56→1.05)
         assert risk_cfg.get("max_position_pct") == pytest.approx(0.20)
         assert risk_cfg.get("min_position_pct") == pytest.approx(0.04)
-        assert risk_cfg.get("max_positions") == 12
+        # 2026-05-04: 12→18 (compare_position_sizing.py VG)
+        assert risk_cfg.get("max_positions") == 18
         assert risk_cfg.get("default_stop_loss_pct") == pytest.approx(0.12)
         assert risk_cfg.get("default_take_profit_pct") == pytest.approx(0.20)
         assert risk_cfg.get("dynamic_sl_tp") is True
@@ -701,7 +702,8 @@ class TestYAMLKRSection:
         # 2026-04-17: 10→20% (KR backtest V4: Sharpe 0.56→1.05)
         assert risk["max_position_pct"] == pytest.approx(0.20)
         assert risk["min_position_pct"] == pytest.approx(0.04)
-        assert risk["max_positions"] == 12
+        # 2026-05-04: 12→18 (compare_position_sizing.py VG)
+        assert risk["max_positions"] == 18
         assert risk["default_stop_loss_pct"] == pytest.approx(0.12)
         assert risk["default_take_profit_pct"] == pytest.approx(0.20)
         assert risk["dynamic_sl_tp"] is True

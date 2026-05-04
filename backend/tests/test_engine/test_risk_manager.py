@@ -201,6 +201,34 @@ class TestDynamicSlTp:
         assert tp_high > tp_low
 
 
+class TestRegimePositionPctOverride:
+    """Per-market regime sizing override (US uses larger sizes than KR)."""
+
+    def test_override_replaces_default_table(self):
+        override = {"uptrend": 0.123, "sideways": 0.045}
+        params = RiskParams(regime_position_pct=override)
+        rm = RiskManager(params=params)
+        rm.set_eval_regime("uptrend")
+        assert rm._get_regime_position_pct() == pytest.approx(0.123)
+        rm.set_eval_regime("sideways")
+        assert rm._get_regime_position_pct() == pytest.approx(0.045)
+
+    def test_no_override_uses_module_default(self):
+        rm = RiskManager(params=RiskParams())
+        rm.set_eval_regime("uptrend")
+        # REGIME_POSITION_PCT["uptrend"] = 0.07 (KR baseline — module default)
+        assert rm._get_regime_position_pct() == pytest.approx(0.07)
+
+    def test_override_unknown_regime_falls_back_to_max_pct(self):
+        params = RiskParams(
+            max_position_pct=0.15,
+            regime_position_pct={"uptrend": 0.10},
+        )
+        rm = RiskManager(params=params)
+        rm.set_eval_regime("nonexistent")
+        assert rm._get_regime_position_pct() == pytest.approx(0.15)
+
+
 class TestDailyPnL:
     def test_update_and_reset(self):
         rm = RiskManager()

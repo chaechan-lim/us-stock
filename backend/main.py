@@ -326,7 +326,7 @@ async def lifespan(app: FastAPI):
     # Conservative: 2x return, 7x Sharpe vs STOCK-77 in pipeline backtest.
     risk_params = RiskParams(
         market_allocations=market_allocs,
-        max_position_pct=0.08,  # 8% per position (diversified)
+        max_position_pct=0.10,  # 10% per position (compare_position_sizing VA)
         max_positions=20,  # Broad diversification
         default_stop_loss_pct=0.12,  # 12% SL (wider, less whipsaw)
         default_take_profit_pct=0.20,  # 20% TP (let winners run)
@@ -335,6 +335,22 @@ async def lifespan(app: FastAPI):
         breakeven_stop_activation_ratio=be_activation,
         breakeven_stop_lock_ratio=be_lock_ratio,
         breakeven_stop_lock_pct=be_lock_pct,
+        # VA sizing (compare_position_sizing.py 2026-05-04, US 2y):
+        # max_position_pct (0.10) × regime multiplier becomes the regime
+        # cap, replacing the module-default REGIME_POSITION_PCT (0.07
+        # uptrend) which was the actual binding constraint on US position
+        # size. Backtest: Ret +8.7% → +9.7%, Sharpe +0.52 → +0.61, MDD
+        # -6.3% → -6.0%, PF 1.20 → 1.22 — passes US combo activation
+        # floor on all four metrics. Cash% 30→28 (modest deployment win).
+        # KR uses the default table (no override) — VA hurts KR
+        # (dual_momentum-only sized-up bleeds alpha; backtest -13.8pp Ret).
+        regime_position_pct={
+            "strong_uptrend": 0.100,  # 1.00 × max
+            "uptrend":        0.085,  # 0.85 × max
+            "sideways":       0.065,  # 0.65 × max
+            "weak_downtrend": 0.040,  # 0.40 × max
+            "downtrend":      0.020,  # 0.20 × max
+        },
     )
     risk_manager = RiskManager(params=risk_params)
     # Conservative Kelly: 0.35x fraction, 3% min position
