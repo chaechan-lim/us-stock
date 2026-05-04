@@ -46,6 +46,12 @@ class RiskParams:
     min_position_pct: float = 0.05  # Minimum position size as % of portfolio
     # Dynamic ATR-based SL/TP (STOCK-65: disable for KR to use static values)
     dynamic_sl_tp: bool = True  # If False, always use default_stop_loss/take_profit_pct
+    # Per-market regime sizing override. If None, uses module-level
+    # REGIME_POSITION_PCT (KR's optimal). US sets this to a higher table
+    # (validated by compare_position_sizing.py VA — 4/4 backtest improvement)
+    # because US strategies (trend_following + supertrend) tolerate larger
+    # positions; KR (dual_momentum-only) loses alpha when sized up.
+    regime_position_pct: dict[str, float] | None = None
 
 
 @dataclass
@@ -95,7 +101,8 @@ class RiskManager:
 
     def _get_regime_position_pct(self) -> float:
         """Get max position % for current regime."""
-        return REGIME_POSITION_PCT.get(self._eval_regime, self._params.max_position_pct)
+        table = self._params.regime_position_pct or REGIME_POSITION_PCT
+        return table.get(self._eval_regime, self._params.max_position_pct)
 
     def _get_regime_exposure_pct(self) -> float:
         """Get max exposure % for current regime."""

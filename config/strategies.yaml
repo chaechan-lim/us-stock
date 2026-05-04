@@ -708,7 +708,15 @@ markets:
       kelly_fraction: 0.40       # Conservative (was 1.00, full Kelly too aggressive)
       max_position_pct: 0.20     # 2026-04-17: 10→20% — KR backtest V4: Sharpe 0.56→1.05
       min_position_pct: 0.04     # 4% min (was 0.15)
-      max_positions: 12
+      # 2026-05-04: 12 → 18. Live observation: 12 KR BUY signals rejected
+      # the morning of 2026-05-04 ("Max positions reached") with cap full
+      # of 1-share placeholder positions. compare_position_sizing.py VG
+      # confirmed: cap=18 → Ret +11.1%→+16.4%, Sharpe +0.60→+0.79, Cash
+      # 38%→18%, MDD -9.4%→-11.4% (acceptable). KR backtest with sized-up
+      # positions failed (VA hurt -13.8pp Ret), but raising cap on the
+      # current sizing won. Single-strategy KR (dual_momentum-only) eats
+      # cash through breadth, not depth.
+      max_positions: 18
       default_stop_loss_pct: 0.12  # 12% SL (was 0.15)
       default_take_profit_pct: 0.20
       dynamic_sl_tp: true        # Enable ATR-based dynamic SL/TP
