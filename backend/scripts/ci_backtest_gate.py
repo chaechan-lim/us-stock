@@ -53,7 +53,7 @@ def _kr_config(disabled: list[str]) -> dict:
         initial_equity=100_000_000,
         default_stop_loss_pct=0.12,
         default_take_profit_pct=0.20,
-        max_positions=12,
+        max_positions=18,                 # 2026-05-04: PR #123 cap raise
         max_position_pct=0.20,
         sell_cooldown_days=1,
         whipsaw_max_losses=2,

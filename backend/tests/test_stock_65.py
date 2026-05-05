@@ -254,15 +254,15 @@ class TestStrategyConfigLoaderMarketMethods:
         assert len(disabled) > 0
 
     def test_get_market_disabled_strategies_kr(self):
-        """2026-04-23 Option A: 14 strategies disabled globally (enabled: false
-        at strategy level). Per-market list only overrides the 3 globally-enabled
-        strategies. KR keeps dual_momentum (vol_filter=false) only.
+        """2026-05-05: KR enables dual_momentum + supertrend (compare_kr_strategy_add
+        VA, +6pp Ret +0.33 Sharpe). trend_following remains disabled (-4pp Ret).
         """
         loader = StrategyConfigLoader()
         disabled = loader.get_market_disabled_strategies("KR")
         assert isinstance(disabled, list)
-        assert set(disabled) == {"supertrend", "trend_following"}
+        assert set(disabled) == {"trend_following"}
         assert "dual_momentum" not in disabled
+        assert "supertrend" not in disabled
 
     def test_get_market_risk_config_kr(self):
         loader = StrategyConfigLoader()
@@ -687,13 +687,12 @@ class TestYAMLKRSection:
         assert "min_hold_days" in ev
 
     def test_yaml_kr_disabled_count(self):
-        """2026-04-23 (Option A redesign): Global enabled=false applied to 14
-        strategies; KR per-market only needs to override the remaining 3
-        globally-enabled strategies. KR keeps dual_momentum only →
-        disabled_strategies = [supertrend, trend_following]."""
+        """2026-05-05: KR enables dual_momentum + supertrend
+        (compare_kr_strategy_add VA, +6pp Ret +0.33 Sharpe).
+        trend_following stays disabled (-4pp Ret in same backtest)."""
         loader = StrategyConfigLoader()
         disabled = loader._config["markets"]["KR"]["disabled_strategies"]
-        assert set(disabled) == {"supertrend", "trend_following"}
+        assert set(disabled) == {"trend_following"}
 
     def test_yaml_kr_risk_values(self):
         loader = StrategyConfigLoader()
