@@ -679,8 +679,17 @@ markets:
     # supertrend + trend_following both dilute dual_momentum signals
     # through the combiner in KR (contradictory SELL → HOLD conversion
     # reduces trade count without alpha gain; see KR backtest E+H).
+    # 2026-05-05: supertrend RE-ENABLED. compare_kr_strategy_add.py
+    # VA_dm_supertrend (KR 2y, cap=18, sector_boost=0.3):
+    #   V0_dm_only:        Ret +10.7%  Sharpe +0.48  MDD -13.4%  PF 1.15  Trades 633
+    #   VA_dm_supertrend:  Ret +16.9%  Sharpe +0.81  MDD -12.0%  PF 1.23  Trades 628  (4/4 ADOPT)
+    # Per-strategy: dual_momentum +₩8.3M, supertrend NEW +₩8.5M.
+    # The 2026-04-23 dilution issue was fixed by infrastructure added since:
+    # G1 limit-at-line entry (#120) eliminates supertrend whipsaw,
+    # F2 anti-overbought blocks 5-day blow-off entries, sector_boost
+    # weight=0.3 strengthens valid signals. trend_following remains
+    # disabled (VB -4.3pp Ret, -0.23 Sharpe — old conclusion holds).
     disabled_strategies:
-      - supertrend
       - trend_following
     # 2026-04-14: trend_following + donchian_breakout KR disable.
     # KR 2y backtest: KR_only_dual_mom (+3.0% PF 1.09) was the only
