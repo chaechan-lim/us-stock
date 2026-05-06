@@ -206,6 +206,123 @@ class TestGetEquityHistory:
         assert history == []
 
 
+class TestCombinedEquityHistory:
+    """combined-mode reads KIS CTRP6548R integrated total — single source of
+    truth. Avoids the US+KR add bug under 통합증거금."""
+
+    async def test_returns_kr_integrated_only(self, db_setup):
+        # KR manager — but we'll seed snapshots for both markets
+        kr_mgr = PortfolioManager(
+            market_data=AsyncMock(),
+            session_factory=db_setup,
+            market="KR",
+        )
+        now = datetime.utcnow()
+        async with db_setup() as session:
+            # KR snapshot WITH integrated_total
+            session.add(PortfolioSnapshot(
+                market="KR",
+                total_value_usd=7_000_000.0,        # KR-only slice
+                cash_usd=5_000_000.0,
+                invested_usd=2_000_000.0,
+                integrated_total_krw=17_900_000.0,  # ← truth
+                recorded_at=now - timedelta(hours=1),
+            ))
+            # US snapshot — should be ignored even if integrated_total set
+            session.add(PortfolioSnapshot(
+                market="US",
+                total_value_usd=11_000.0,
+                cash_usd=9_000.0,
+                invested_usd=2_000.0,
+                integrated_total_krw=99_999_999.0,  # bogus, should be ignored
+                recorded_at=now - timedelta(hours=1),
+            ))
+            await session.commit()
+
+        history = await kr_mgr.get_combined_equity_history(days=30)
+        assert len(history) == 1
+        assert history[0]["total_value_krw"] == 17_900_000.0
+
+    async def test_skips_legacy_null_rows(self, db_setup):
+        kr_mgr = PortfolioManager(
+            market_data=AsyncMock(),
+            session_factory=db_setup,
+            market="KR",
+        )
+        now = datetime.utcnow()
+        async with db_setup() as session:
+            # Legacy KR snapshot — integrated_total NULL
+            session.add(PortfolioSnapshot(
+                market="KR",
+                total_value_usd=6_000_000.0,
+                cash_usd=4_000_000.0,
+                invested_usd=2_000_000.0,
+                integrated_total_krw=None,
+                recorded_at=now - timedelta(days=2),
+            ))
+            # New KR snapshot — integrated_total populated
+            session.add(PortfolioSnapshot(
+                market="KR",
+                total_value_usd=7_000_000.0,
+                cash_usd=5_000_000.0,
+                invested_usd=2_000_000.0,
+                integrated_total_krw=17_900_000.0,
+                recorded_at=now - timedelta(hours=1),
+            ))
+            await session.commit()
+
+        history = await kr_mgr.get_combined_equity_history(days=30)
+        assert len(history) == 1
+        assert history[0]["total_value_krw"] == 17_900_000.0
+
+    async def test_empty_when_no_snapshots(self, db_setup):
+        kr_mgr = PortfolioManager(
+            market_data=AsyncMock(),
+            session_factory=db_setup,
+            market="KR",
+        )
+        history = await kr_mgr.get_combined_equity_history(days=30)
+        assert history == []
+
+
+class TestSnapshotIntegratedTotalCapture:
+    """save_snapshot pulls _integrated_total_asset off the underlying adapter
+    when present (KR side), records None on US."""
+
+    async def test_kr_saves_integrated_total(self, db_setup, mock_market_data):
+        # Stub an adapter with the cached integrated total
+        adapter = AsyncMock()
+        adapter._integrated_total_asset = 17_935_530.0
+        mock_market_data._adapter = adapter
+
+        mgr = PortfolioManager(
+            market_data=mock_market_data,
+            session_factory=db_setup,
+            market="KR",
+        )
+        await mgr.save_snapshot()
+
+        async with db_setup() as session:
+            row = (await session.execute(select(PortfolioSnapshot))).scalar_one()
+            assert row.integrated_total_krw == pytest.approx(17_935_530.0)
+
+    async def test_us_no_adapter_attr_records_null(self, db_setup, mock_market_data):
+        # US adapter doesn't expose _integrated_total_asset
+        adapter = AsyncMock(spec=[])
+        mock_market_data._adapter = adapter
+
+        mgr = PortfolioManager(
+            market_data=mock_market_data,
+            session_factory=db_setup,
+            market="US",
+        )
+        await mgr.save_snapshot()
+
+        async with db_setup() as session:
+            row = (await session.execute(select(PortfolioSnapshot))).scalar_one()
+            assert row.integrated_total_krw is None
+
+
 class TestSnapshotAnomalyDetection:
     """STOCK-45: Anomaly detection prevents saving bad snapshots."""
 

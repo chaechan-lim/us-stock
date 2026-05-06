@@ -192,6 +192,19 @@ class PortfolioManager:
         except Exception as e:
             logger.debug("[%s] Failed to fetch exchange rate for snapshot: %s", self._market, e)
 
+        # 2026-05-06: Capture KIS CTRP6548R integrated total (KRW) when
+        # the underlying adapter has it cached. Equity-history "combined"
+        # mode reads this so it doesn't have to add KR.total + US.total
+        # (which double-counts the shared deposit pool under 통합증거금).
+        integrated_total_krw = None
+        adapter = getattr(self._market_data, "_adapter", None)
+        cached = getattr(adapter, "_integrated_total_asset", None)
+        try:
+            if cached is not None and float(cached) > 0:
+                integrated_total_krw = float(cached)
+        except (TypeError, ValueError):
+            pass  # AsyncMock or other non-numeric — leave None
+
         snapshot = PortfolioSnapshot(
             market=self._market,
             total_value_usd=total_equity,
@@ -201,6 +214,7 @@ class PortfolioManager:
             daily_pnl=daily_pnl,
             cash_flow=cash_flow,
             usd_krw_rate=usd_krw_rate,
+            integrated_total_krw=integrated_total_krw,
             recorded_at=datetime.utcnow(),
         )
 
@@ -305,6 +319,40 @@ class PortfolioManager:
                 "unrealized_pnl": s.unrealized_pnl,
                 "daily_pnl": s.daily_pnl,
                 "cash_flow": getattr(s, "cash_flow", 0.0) or 0.0,
+                "integrated_total_krw": getattr(s, "integrated_total_krw", None),
+            }
+            for s in snapshots
+        ]
+
+    async def get_combined_equity_history(self, days: int = 30) -> list[dict]:
+        """Equity curve using KIS CTRP6548R integrated total (KRW).
+
+        Pulls KR snapshots' `integrated_total_krw` field (the KR adapter is
+        the only one that calls CTRP6548R). Single source of truth — no
+        US+KR addition, no double-counting of the shared deposit pool.
+
+        Returns rows with `total_value_krw` so the field name matches the
+        unit. Rows where the field is NULL (legacy snapshots before
+        2026-05-06) are skipped.
+        """
+        since = datetime.utcnow() - timedelta(days=days)
+
+        async with self._session_factory() as session:
+            stmt = (
+                select(PortfolioSnapshot)
+                .where(PortfolioSnapshot.recorded_at >= since)
+                .where(PortfolioSnapshot.market == "KR")
+                .where(PortfolioSnapshot.integrated_total_krw.isnot(None))
+                .order_by(PortfolioSnapshot.recorded_at.asc())
+            )
+            result = await session.execute(stmt)
+            snapshots = result.scalars().all()
+
+        return [
+            {
+                "date": s.recorded_at.strftime("%Y-%m-%d %H:%M") if s.recorded_at else None,
+                "total_value_krw": s.integrated_total_krw,
+                "usd_krw_rate": s.usd_krw_rate,
             }
             for s in snapshots
         ]

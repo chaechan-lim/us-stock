@@ -730,7 +730,18 @@ async def delete_snapshots(request: Request, ids: str = "", market: str = "KR"):
 
 @router.get("/equity-history")
 async def equity_history(request: Request, days: int = 30, market: str = "US"):
-    """Get portfolio equity history for charting."""
+    """Get portfolio equity history for charting.
+
+    `market="combined"` returns the integrated total (KIS CTRP6548R) — the
+    only correct number under 통합증거금 because adding US+KR per-market
+    snapshots double-counts the shared deposit pool. Legacy snapshots
+    (before 2026-05-06) lack the integrated field and are skipped.
+    """
+    if market == "combined":
+        pm = getattr(request.app.state, "kr_portfolio_manager", None)
+        if not pm:
+            return []
+        return await pm.get_combined_equity_history(days=days)
     if market == "KR":
         pm = getattr(request.app.state, "kr_portfolio_manager", None)
     else:

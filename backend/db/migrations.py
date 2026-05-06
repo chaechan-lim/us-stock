@@ -207,6 +207,9 @@ _EXPECTED_COLUMNS: Sequence[tuple[str, str, str, str | None, bool]] = [
     ("orders", "buy_strategy", "VARCHAR(50)", None, False),
     ("orders", "pnl_pct", "FLOAT", None, False),
     ("portfolio_snapshots", "cash_flow", "FLOAT", "0.0", False),
+    # 2026-05-06: integrated total asset from KIS CTRP6548R (KRW).
+    # Only KR snapshots populate this; legacy rows + US snapshots are NULL.
+    ("portfolio_snapshots", "integrated_total_krw", "FLOAT", None, False),
     # STOCK-83: account_id for multi-account support (default ACC001 for existing data)
     ("orders", "account_id", "VARCHAR(20)", "'ACC001'", True),
     ("positions", "account_id", "VARCHAR(20)", "'ACC001'", True),

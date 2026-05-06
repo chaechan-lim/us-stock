@@ -108,6 +108,13 @@ class PortfolioSnapshot(Base):
     cash_flow = Column(Float, default=0.0)
     # STOCK-58: USD/KRW rate at snapshot time for accurate historical returns
     usd_krw_rate = Column(Float)
+    # 2026-05-06: KIS CTRP6548R-sourced integrated total asset (KRW).
+    # Captures the same number as the KIS app's "총자산" — avoids the per-market
+    # double-counting of shared deposit that the equity-history endpoint hit
+    # when summing US.total + KR.total under integrated margin (통합증거금).
+    # Only populated by the KR portfolio_manager (the KR adapter calls
+    # CTRP6548R). NULL on legacy rows + US snapshots.
+    integrated_total_krw = Column(Float)
     recorded_at = Column(DateTime, default=datetime.utcnow)
 
     __table_args__ = (
