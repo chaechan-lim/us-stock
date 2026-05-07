@@ -740,6 +740,10 @@ markets:
       default_stop_loss_pct: 0.12  # 12% SL (was 0.15)
       default_take_profit_pct: 0.20
       dynamic_sl_tp: true        # Enable ATR-based dynamic SL/TP
+      # P3 (compare_trailing_activation.py 2026-05-08, KR 2y):
+      # V0(4%/3%) Ret 0% → V2(8%/3%) Ret +44.9% Sharpe +1.90 MDD -9.2% PF 1.67.
+      default_trailing_activation_pct: 0.08
+      default_trailing_stop_pct: 0.03
     evaluation_loop:
       min_confidence: 0.30       # 2026-04-17: 0.40→0.30 (backtest V3/V4 slight help)
       min_active_ratio: null

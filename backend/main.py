@@ -348,6 +348,12 @@ async def lifespan(app: FastAPI):
         max_positions=20,  # Broad diversification
         default_stop_loss_pct=0.12,  # 12% SL (wider, less whipsaw)
         default_take_profit_pct=0.20,  # 20% TP (let winners run)
+        # P3 trailing (compare_trailing_activation.py 2026-05-08, US 2y):
+        # V0 (4%/3%) Ret +2.6% Sharpe -0.09 → V1 (6%/3%) Ret +17.6% Sharpe
+        # +1.25 MDD -4.8% PF 1.43. Activation at 4% was clipping winners
+        # too early — most exits at +1-3% while the trend kept running.
+        default_trailing_activation_pct=0.06,
+        default_trailing_stop_pct=0.03,
         tiered_trailing_tiers=tiered_tiers,
         breakeven_stop_enabled=be_enabled,
         breakeven_stop_activation_ratio=be_activation,
@@ -393,6 +399,16 @@ async def lifespan(app: FastAPI):
         max_positions=kr_risk_cfg.get("max_positions", 8),
         default_stop_loss_pct=kr_risk_cfg.get("default_stop_loss_pct", 0.10),
         default_take_profit_pct=kr_risk_cfg.get("default_take_profit_pct", 0.15),
+        # P3 trailing (compare_trailing_activation.py 2026-05-08, KR 2y):
+        # V0 (4%/3%) Ret 0% Sharpe -0.14 → V2 (8%/3%) Ret +44.9% Sharpe
+        # +1.90 MDD -9.2% PF 1.67. Live trades show trailing on KR was
+        # firing at +1-3% gains and capping all winners.
+        default_trailing_activation_pct=kr_risk_cfg.get(
+            "default_trailing_activation_pct", 0.08,
+        ),
+        default_trailing_stop_pct=kr_risk_cfg.get(
+            "default_trailing_stop_pct", 0.03,
+        ),
         dynamic_sl_tp=kr_dynamic_sl_tp,
         tiered_trailing_tiers=tiered_tiers,
         breakeven_stop_enabled=be_enabled,
