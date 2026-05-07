@@ -1796,6 +1796,40 @@ async def test_handle_sell_fill_reason_trailing_stop_is_loss_true(adapter, risk,
     assert callback_calls[0][2] is True
 
 
+# ── 2026-05-07: check_all silent-untrack must fire on_sell_callbacks ────
+
+
+@pytest.mark.asyncio
+async def test_check_all_position_gone_fires_sell_callbacks(adapter, risk, order_mgr):
+    """When a position disappears from the exchange (SELL filled but not yet
+    reconciled), check_all must fire on_sell_callbacks before untrack so the
+    evaluation loop registers a sell cooldown. Without this, the live ENIC
+    whipsaw 2026-05-07 (SELL → BUY 16min later) bypassed the 24h cooldown."""
+    from engine.position_tracker import PositionTracker
+
+    tracker = PositionTracker(adapter=adapter, risk_manager=risk, order_manager=order_mgr)
+
+    callback_fired = []
+
+    def on_sell(symbol, sell_ts, **kwargs):
+        callback_fired.append((symbol, sell_ts, kwargs.get("is_loss", False)))
+
+    tracker.register_on_sell(on_sell)
+
+    # Track ENIC, simulate it being older than the 5-min grace period
+    tracker.track("ENIC", entry_price=4.65, quantity=23, strategy="trend_following")
+    tracker._tracked["ENIC"].tracked_at -= 600  # back-date 10min so grace skipped
+
+    # Exchange now reports no positions (SELL filled)
+    adapter.fetch_positions = AsyncMock(return_value=[])
+
+    await tracker.check_all()
+
+    assert "ENIC" not in tracker.tracked_symbols
+    assert len(callback_fired) == 1
+    assert callback_fired[0][0] == "ENIC"
+
+
 # ── STOCK-52: Pending sell order should NOT untrack position ──────────────
 
 
@@ -2388,35 +2422,32 @@ async def test_handle_sell_fill_already_untracked_multiple_callbacks(adapter, ri
 async def test_check_all_position_gone_then_handle_sell_fill_fires_cooldown(
     adapter, risk, order_mgr
 ):
-    """STOCK-60: Integration — check_all removes tracker, then reconciliation fires callback.
-
-    Simulates the exact HPSP bug timeline:
-    1. check_all finds position gone → untrack (no callbacks)
-    2. reconciliation calls handle_sell_fill → already untracked → fires callbacks ✓
+    """check_all removing a vanished position now fires callbacks itself
+    (2026-05-07 ENIC whipsaw fix). handle_sell_fill is idempotent — if it
+    arrives later from reconciliation, it sees the symbol already untracked
+    and fires again. Total callback invocations = 2 (one per source). The
+    cooldown timestamp stays a recent time.time() either way, so there is
+    no functional regression from the redundancy.
     """
-    # Position is gone from exchange
     adapter.fetch_positions = AsyncMock(return_value=[])
 
     tracker = PositionTracker(adapter, risk, order_mgr)
     tracker.track("HPSP", entry_price=42.0, quantity=100)
-
-    # Advance tracked_at beyond 5-minute grace period
-    tracker._tracked["HPSP"].tracked_at -= 400
+    tracker._tracked["HPSP"].tracked_at -= 400  # past grace
 
     callback_calls: list[str] = []
     tracker.register_on_sell(lambda s, t: callback_calls.append(s))
 
-    # Step 1: check_all removes tracker (position gone from exchange, outside grace period)
+    # Step 1: check_all fires callback before untrack (the new behavior).
     await tracker.check_all()
-    assert "HPSP" not in tracker.tracked_symbols  # tracker removed
-    assert len(callback_calls) == 0  # no callbacks yet (pre-fix behavior of check_all)
+    assert "HPSP" not in tracker.tracked_symbols
+    assert callback_calls == ["HPSP"]
 
-    # Step 2: reconciliation fires handle_sell_fill for the confirmed fill
+    # Step 2: reconciliation also fires when it arrives — both paths call
+    # the cooldown callback; register_sell_cooldown is just an idempotent
+    # write to _recovery_watch[symbol], so duplicate calls are harmless.
     await tracker.handle_sell_fill("HPSP", filled_price=43.0, filled_quantity=100)
-
-    # STOCK-60 fix: callback IS now fired, cooldown will be registered
-    assert len(callback_calls) == 1
-    assert callback_calls[0] == "HPSP"
+    assert callback_calls == ["HPSP", "HPSP"]
 
 
 # ── STOCK-77: order_type inversion bug fixes ─────────────────────────────────
