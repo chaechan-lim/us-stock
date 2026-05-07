@@ -493,6 +493,19 @@ class TestPostRetryBehavior:
         assert result is False
         assert adapter._session.post.call_count == 1
 
+    @pytest.mark.asyncio
+    async def test_cancel_order_accepts_exchange_kwarg(self, adapter):
+        """order_manager.cancel() passes `exchange=` for the US adapter; the
+        KR adapter must absorb the kwarg without raising. Live regression
+        2026-05-07: TypeError prevented KR SELL escalation from cancelling
+        unfilled limit orders."""
+        _mock_post_responses(adapter, [(200, {"rt_cd": "0"})])
+        # Should not raise TypeError for unexpected kwarg
+        result = await adapter.cancel_order(
+            "0001234567", "005930", exchange="KRX",
+        )
+        assert result is True
+
 
 class TestMarketOrderBody:
     """STOCK-29: Verify market orders send ORD_UNPR='0' and ORD_DVSN='01'.

@@ -496,7 +496,10 @@ class KISKRAdapter(ExchangeAdapter):
             symbol, "sell", quantity, price, order_type, self._tr["SELL"]
         )
 
-    async def cancel_order(self, order_id: str, symbol: str) -> bool:
+    async def cancel_order(self, order_id: str, symbol: str, **kwargs) -> bool:
+        # **kwargs absorbs the `exchange=` kwarg that order_manager.cancel
+        # passes for the US adapter. KR cancel doesn't need an exchange code
+        # but the order_manager call site is shared.
         await self._auth.ensure_valid_token()
         body = {
             "CANO": self._config.account_no,
