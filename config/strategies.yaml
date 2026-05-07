@@ -649,6 +649,17 @@ markets:
       # 4h (ALM/AMPX whipsaw). SELL still passes; position_tracker SL/TP
       # runs on its own schedule, so risk exits aren't blocked.
       opening_avoidance_minutes: 30
+      # 2026-05-07: daily_buy budget + escalation, relaxed from
+      # 5/0.65/0.75. Live obs 2026-05-04: 0.64-conf signals (NVDA-tier
+      # 0.81 OK, but most sat at 0.64) piled up after ~3 buys with the
+      # tighter escalation. compare_daily_buy_limit.py 2y backtest:
+      #   V0_current(5/0.65/0.75): Ret +8.5% Sharpe +0.53 Cash 34%
+      #   V1_relaxed(10/0.50/0.60): Ret +8.5% Sharpe +0.52 Cash 31% ← ✓
+      # Ret/Sharpe flat (no alpha cost) but +3pp cash deployed. KR keeps
+      # the tighter defaults — relaxation hurt KR -2pp Ret.
+      daily_buy_limit: 10
+      daily_buy_escalation_low: 0.50
+      daily_buy_escalation_high: 0.60
   KR:
     # 2026-04-08 — full KR re-evaluation after the KR-currency bug fix
     #   (full_pipeline.py initial_equity now auto-scales to 100M KRW).

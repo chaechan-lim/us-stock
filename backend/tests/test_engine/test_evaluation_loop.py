@@ -201,6 +201,38 @@ class TestEvaluationLoop:
             pass
 
 
+class TestSetDailyBuyBudget:
+    """set_daily_buy_budget configures all four thresholds and is the only
+    way to relax the per-market budget (PR #129 — yaml-driven)."""
+
+    def test_set_overrides_defaults(self, eval_loop):
+        eval_loop.set_daily_buy_budget(
+            limit=10, escalation_low=0.50, escalation_high=0.60, override=0.85
+        )
+        assert eval_loop._daily_buy_limit == 10
+        assert eval_loop._daily_buy_escalation_low == pytest.approx(0.50)
+        assert eval_loop._daily_buy_escalation_high == pytest.approx(0.60)
+        assert eval_loop._daily_buy_override == pytest.approx(0.85)
+
+    def test_set_partial_keeps_others(self, eval_loop):
+        # Defaults: 5/0.65/0.75/0.90
+        eval_loop.set_daily_buy_budget(limit=8)
+        assert eval_loop._daily_buy_limit == 8
+        assert eval_loop._daily_buy_escalation_low == pytest.approx(0.65)
+        assert eval_loop._daily_buy_escalation_high == pytest.approx(0.75)
+        assert eval_loop._daily_buy_override == pytest.approx(0.90)
+
+    def test_set_rejects_negative_limit(self, eval_loop):
+        import pytest as _pt
+        with _pt.raises(ValueError):
+            eval_loop.set_daily_buy_budget(limit=-1)
+
+    def test_set_rejects_out_of_range_threshold(self, eval_loop):
+        import pytest as _pt
+        with _pt.raises(ValueError):
+            eval_loop.set_daily_buy_budget(escalation_low=1.5)
+
+
 class TestDailyBuyLimit:
     """Test daily buy limit with dynamic confidence escalation."""
 
