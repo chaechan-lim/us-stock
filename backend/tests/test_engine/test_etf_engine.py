@@ -698,6 +698,40 @@ class TestExposureLimits:
         assert actions == []
 
 
+class TestEtfPortfolioHeadroom:
+    """2026-05-07: hard-cap enforcement before BUY (not just warning)."""
+
+    def test_full_cap_when_no_etf_positions(self, engine):
+        balance = MagicMock(total=100_000)
+        # Engine default max_portfolio_pct = 0.30 (test fixture)
+        engine._risk.max_portfolio_pct = 0.10
+        h = engine._etf_portfolio_headroom([], balance)
+        assert h == 10_000.0
+
+    def test_subtracts_existing_etf_value(self, engine):
+        balance = MagicMock(total=100_000)
+        engine._risk.max_portfolio_pct = 0.10
+        # 1 leveraged ETF held = $4,000 → headroom = $10K cap - $4K = $6K
+        pos = MagicMock(symbol="TQQQ", quantity=20, current_price=200.0)
+        h = engine._etf_portfolio_headroom([pos], balance)
+        assert h == 6_000.0
+
+    def test_zero_when_over_cap(self, engine):
+        balance = MagicMock(total=100_000)
+        engine._risk.max_portfolio_pct = 0.10
+        pos = MagicMock(symbol="TQQQ", quantity=200, current_price=100.0)  # $20K
+        h = engine._etf_portfolio_headroom([pos], balance)
+        assert h == 0.0
+
+    def test_ignores_non_etf_positions(self, engine):
+        balance = MagicMock(total=100_000)
+        engine._risk.max_portfolio_pct = 0.10
+        # AAPL is a regular stock, not an ETF
+        pos = MagicMock(symbol="AAPL", quantity=100, current_price=200.0)  # $20K
+        h = engine._etf_portfolio_headroom([pos], balance)
+        assert h == 10_000.0  # full cap (AAPL doesn't count)
+
+
 class TestFullEvaluation:
     """Test full evaluate() flow."""
 

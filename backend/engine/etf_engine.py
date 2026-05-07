@@ -22,7 +22,7 @@ from data.market_state import MarketStateDetector, MarketRegime, MarketState
 from scanner.etf_universe import ETFUniverse
 from scanner.sector_analyzer import SectorAnalyzer, SectorScore
 from engine.order_manager import OrderManager
-from engine.risk_manager import RiskManager, RiskParams
+from engine.risk_manager import PositionSizeResult, RiskManager, RiskParams
 from services.notification import NotificationService
 
 logger = logging.getLogger(__name__)
@@ -430,26 +430,45 @@ class ETFEngine:
                         continue
                     price = float(df.iloc[-1]["close"])
 
-                    # Position sizing: regime-adaptive allocation
+                    # Position sizing: regime-adaptive allocation, capped by
+                    # max_single_etf_pct AND remaining max_portfolio_pct
+                    # headroom (so total ETF exposure never exceeds yaml cap).
                     regime_pct = self._regime_alloc_pct.get(
                         regime.value, self._risk.max_single_etf_pct,
                     )
+                    regime_pct = min(regime_pct, self._risk.max_single_etf_pct)
                     max_alloc = balance.total * regime_pct
                     if is_bear_entry:
                         max_alloc *= self._bear_size_ratio
+                    headroom = self._etf_portfolio_headroom(positions, balance)
+                    max_alloc = min(max_alloc, headroom)
                     alloc = min(max_alloc, balance.available * 0.9)
                     if alloc < price:
                         continue
 
+                    qty = int(alloc / price)
+                    if qty <= 0:
+                        continue
+                    sizing = PositionSizeResult(
+                        quantity=qty,
+                        allocation_usd=qty * price,
+                        risk_per_share=price * self._risk.default_stop_loss_pct,
+                        reason=f"etf_engine regime={regime.value}",
+                        allowed=True,
+                    )
                     result = await self._order_manager.place_buy(
                         symbol=sym,
                         price=price,
+                        # cash_available passes the real cash so the
+                        # exposure check sees the full picture (the per-ETF
+                        # alloc is already encoded in sizing_override).
                         portfolio_value=balance.total,
-                        cash_available=alloc,
+                        cash_available=balance.available,
                         current_positions=current_count,
                         strategy_name="etf_engine_regime",
                         exchange=self._etf.get_exchange(sym),
                         skip_position_limit=True,
+                        sizing_override=sizing,
                     )
                     if result is None:
                         logger.warning("ETF Engine: BUY %s failed — skipping", sym)
@@ -571,19 +590,32 @@ class ETFEngine:
                 price = float(df.iloc[-1]["close"])
 
                 max_alloc = balance.total * self._risk.max_single_etf_pct
+                headroom = self._etf_portfolio_headroom(positions, balance)
+                max_alloc = min(max_alloc, headroom)
                 alloc = min(max_alloc, balance.available * 0.9)
                 if alloc < price:
                     continue
 
+                qty = int(alloc / price)
+                if qty <= 0:
+                    continue
+                sizing = PositionSizeResult(
+                    quantity=qty,
+                    allocation_usd=qty * price,
+                    risk_per_share=price * self._risk.default_stop_loss_pct,
+                    reason="etf_engine sector",
+                    allowed=True,
+                )
                 result = await self._order_manager.place_buy(
                     symbol=etf_sym,
                     price=price,
                     portfolio_value=balance.total,
-                    cash_available=alloc,
+                    cash_available=balance.available,
                     current_positions=current_count,
                     strategy_name="etf_engine_sector",
                     exchange=self._etf.get_exchange(etf_sym),
                     skip_position_limit=True,
+                    sizing_override=sizing,
                 )
                 if result is None:
                     logger.warning("ETF Engine: BUY %s (sector) failed — skipping", etf_sym)
@@ -658,6 +690,27 @@ class ETFEngine:
             self._managed_positions.pop(sym, None)
 
         return actions
+
+    def _etf_portfolio_headroom(self, positions, balance) -> float:
+        """Remaining $ that can flow into ETFs without breaching
+        max_portfolio_pct. Sums current ETF position values and subtracts
+        from the cap; returns 0 if already over."""
+        if not balance or balance.total <= 0:
+            return 0.0
+        etf_value = 0.0
+        if positions:
+            sector_etfs = {
+                s.etf for s in self._etf.get_all_sectors().values()
+            }
+            for pos in positions:
+                if (
+                    self._etf.is_leveraged(pos.symbol)
+                    or pos.symbol in sector_etfs
+                ):
+                    px = pos.current_price if pos.current_price else 0
+                    etf_value += px * pos.quantity
+        cap = balance.total * self._risk.max_portfolio_pct
+        return max(0.0, cap - etf_value)
 
     def _check_exposure_limits(self, positions=None, balance=None) -> list[str]:
         """Warn if total ETF exposure exceeds max_portfolio_pct."""
