@@ -427,6 +427,25 @@ class PositionTracker:
                     )
                     continue
                 logger.info("Position %s no longer held, removing tracker", symbol)
+                # 2026-05-07: position disappearing from the exchange means
+                # the SELL filled — fire on_sell_callbacks before untrack so
+                # the evaluation loop registers a sell cooldown. Without this,
+                # the live ENIC whipsaw 5/7 (SELL trend_following → BUY
+                # supertrend 16min later) bypassed cooldown because check_all
+                # untracked silently while the order reconciler later saw
+                # status="not_found" instead of "filled" (KIS date-boundary
+                # quirk) so handle_sell_fill was never invoked.
+                sell_ts = time.time()
+                for cb in self._on_sell_callbacks:
+                    try:
+                        cb(symbol, sell_ts, is_loss=False)  # type: ignore[call-arg]
+                    except TypeError:
+                        try:
+                            cb(symbol, sell_ts)
+                        except Exception as e:
+                            logger.warning("on_sell callback failed for %s: %s", symbol, e)
+                    except Exception as e:
+                        logger.warning("on_sell callback failed for %s: %s", symbol, e)
                 self.untrack(symbol)
                 continue
 

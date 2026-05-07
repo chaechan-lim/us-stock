@@ -529,6 +529,42 @@ class OrderManager:
                             )
                     except Exception:
                         pass  # Fall through to not_found handling below
+                # 2026-05-07: Same treatment for SELL not_found — if we no
+                # longer hold the stock, the SELL filled. KIS sometimes marks
+                # market SELLs as not_found across date boundaries; without
+                # this conversion main.py:906 (status=="filled" gate) skipped
+                # handle_sell_fill, so register_sell_cooldown was never
+                # invoked → ENIC whipsaw on 2026-05-07.
+                elif order.side == "SELL" and self._market_data:
+                    try:
+                        positions = await self._market_data.get_positions()
+                        still_held = any(
+                            p.symbol == order.symbol and p.quantity > 0 for p in positions
+                        )
+                        if not still_held:
+                            logger.info(
+                                "Order %s SELL %s: not_found but stock no longer held — treating as filled",
+                                order_id,
+                                order.symbol,
+                            )
+                            result = OrderResult(
+                                order_id=result.order_id,
+                                symbol=result.symbol,
+                                side=result.side,
+                                order_type=result.order_type,
+                                quantity=result.quantity,
+                                status="filled",
+                                # Best-effort fill price: order limit price if
+                                # set, else market price preserved on the order
+                                filled_price=(
+                                    order.filled_price
+                                    if order.filled_price is not None
+                                    else order.price
+                                ),
+                                filled_quantity=order.quantity,
+                            )
+                    except Exception:
+                        pass
 
                 # Preserve any existing fill data on the ManagedOrder
                 if result.filled_price is None and order.filled_price is not None:
