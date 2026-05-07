@@ -201,6 +201,112 @@ class TestDynamicSlTp:
         assert tp_high > tp_low
 
 
+class TestP1RoundUp:
+    """P1: allow buying 1 share when alloc < price but 1 share fits max_pct."""
+
+    def test_round_up_when_alloc_below_price_but_one_share_fits(self):
+        # Portfolio ₩7M, max_pct=20% → 1 share cap ₩1.4M; share ₩300K fits.
+        # Allocation comes out below ₩300K (low conf scenario).
+        params = RiskParams(
+            max_position_pct=0.20, min_position_pct=0.04,
+            allow_one_share_round_up=True,
+        )
+        rm_inst = RiskManager(params=params)
+        result = rm_inst.calculate_kelly_position_size(
+            symbol="005380", price=300_000.0,
+            portfolio_value=7_000_000.0, cash_available=5_000_000.0,
+            current_positions=0, signal_confidence=0.30,
+            market="KR", combined_portfolio_value=7_000_000.0,
+        )
+        assert result.allowed is True
+        assert result.quantity == 1
+        assert "Round-up" in result.reason or "P1" in result.reason
+
+    def test_round_up_blocked_when_one_share_exceeds_max_pct(self):
+        # Share ₩2M, portfolio ₩7M, max_pct=20% → 1 share = 28.5% > 20%.
+        # Should still reject.
+        params = RiskParams(
+            max_position_pct=0.20, min_position_pct=0.04,
+            allow_one_share_round_up=True,
+        )
+        rm_inst = RiskManager(params=params)
+        result = rm_inst.calculate_kelly_position_size(
+            symbol="010130", price=2_000_000.0,
+            portfolio_value=7_000_000.0, cash_available=5_000_000.0,
+            current_positions=0, signal_confidence=0.30,
+            market="KR", combined_portfolio_value=7_000_000.0,
+        )
+        assert result.allowed is False
+
+    def test_disabled_keeps_legacy_behavior(self):
+        params = RiskParams(
+            max_position_pct=0.20, min_position_pct=0.04,
+            allow_one_share_round_up=False,
+        )
+        rm_inst = RiskManager(params=params)
+        result = rm_inst.calculate_kelly_position_size(
+            symbol="005380", price=300_000.0,
+            portfolio_value=7_000_000.0, cash_available=5_000_000.0,
+            current_positions=0, signal_confidence=0.30,
+            market="KR", combined_portfolio_value=7_000_000.0,
+        )
+        # Without round-up, legacy "Price too high" rejection.
+        assert result.allowed is False
+
+
+class TestP2MinPositionFloor:
+    """P2: enforce min_position_pct floor in fixed-sizing fallback."""
+
+    def test_floor_bumps_small_alloc(self):
+        # uptrend regime → base 0.07; conf 0.30 → conf_mult 0.58 → adj 4.06%.
+        # min 5% → floor bumps it. ₩7M × 5% = ₩350K → 1 share at ₩100K = 3.
+        # Without floor: 4.06% × ₩7M = ₩284K → 2 shares.
+        params_floor = RiskParams(
+            max_position_pct=0.20, min_position_pct=0.05,
+            enforce_min_position_pct_floor=True,
+        )
+        rm_floor = RiskManager(params=params_floor)
+        rm_floor.set_eval_regime("uptrend")
+        r_floor = rm_floor.calculate_kelly_position_size(
+            symbol="X", price=100_000.0,
+            portfolio_value=7_000_000.0, cash_available=2_000_000.0,
+            current_positions=0, signal_confidence=0.30,
+        )
+
+        params_no = RiskParams(
+            max_position_pct=0.20, min_position_pct=0.05,
+            enforce_min_position_pct_floor=False,
+        )
+        rm_no = RiskManager(params=params_no)
+        rm_no.set_eval_regime("uptrend")
+        r_no = rm_no.calculate_kelly_position_size(
+            symbol="X", price=100_000.0,
+            portfolio_value=7_000_000.0, cash_available=2_000_000.0,
+            current_positions=0, signal_confidence=0.30,
+        )
+
+        assert r_floor.allowed is True
+        assert r_no.allowed is True
+        assert r_floor.quantity > r_no.quantity
+
+    def test_floor_capped_by_max_position_pct(self):
+        # Even with floor, allocation cannot exceed max_position_pct.
+        params = RiskParams(
+            max_position_pct=0.10, min_position_pct=0.20,  # min > max edge
+            enforce_min_position_pct_floor=True,
+        )
+        rm_inst = RiskManager(params=params)
+        rm_inst.set_eval_regime("uptrend")
+        result = rm_inst.calculate_kelly_position_size(
+            symbol="X", price=100_000.0,
+            portfolio_value=7_000_000.0, cash_available=2_000_000.0,
+            current_positions=0, signal_confidence=0.30,
+        )
+        assert result.allowed is True
+        # max 10% × ₩7M = ₩700K → 7 shares max
+        assert result.allocation_usd <= 700_000.0
+
+
 class TestRegimePositionPctOverride:
     """Per-market regime sizing override (US uses larger sizes than KR)."""
 
