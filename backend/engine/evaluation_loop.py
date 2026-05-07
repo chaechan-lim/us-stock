@@ -119,6 +119,13 @@ class EvaluationLoop:
         # Daily buy counter (resets at midnight)
         self._daily_buy_count: int = 0
         self._daily_buy_date: str = ""
+        # Daily buy budget + dynamic confidence escalation. Defaults match
+        # the prior hardcoded behavior (KR backtest VP0). US relaxes to
+        # 10/0.50/0.60 via yaml — compare_daily_buy_limit.py V1 was 4/4 OK.
+        self._daily_buy_limit: int = 5
+        self._daily_buy_escalation_low: float = 0.65   # ≥60% usage
+        self._daily_buy_escalation_high: float = 0.75  # ≥80% usage
+        self._daily_buy_override: float = 0.90         # over-cap override
         # Recent signals buffer for frontend display (last N signals)
         from collections import deque
 
@@ -284,6 +291,45 @@ class EvaluationLoop:
         """Update sector strength scores (0-100), typically called from
         the ETF evaluation task that already fetches sector performance."""
         self._sector_scores = dict(scores)
+
+    def set_daily_buy_budget(
+        self,
+        *,
+        limit: int | None = None,
+        escalation_low: float | None = None,
+        escalation_high: float | None = None,
+        override: float | None = None,
+    ) -> None:
+        """Configure daily buy budget + confidence escalation thresholds.
+
+        compare_daily_buy_limit.py 2026-05-07 found different optima per market:
+          KR: 5/0.65/0.75 (default, untouched). Relaxing hurt -2pp Ret.
+          US: 10/0.50/0.60. 4/4 floor improvement, Cash 34→31%.
+        """
+        if limit is not None:
+            if limit < 0:
+                raise ValueError(f"daily_buy_limit must be >= 0, got {limit}")
+            self._daily_buy_limit = int(limit)
+        if escalation_low is not None:
+            if not 0.0 <= escalation_low <= 1.0:
+                raise ValueError(f"escalation_low out of [0,1]: {escalation_low}")
+            self._daily_buy_escalation_low = float(escalation_low)
+        if escalation_high is not None:
+            if not 0.0 <= escalation_high <= 1.0:
+                raise ValueError(f"escalation_high out of [0,1]: {escalation_high}")
+            self._daily_buy_escalation_high = float(escalation_high)
+        if override is not None:
+            if not 0.0 <= override <= 1.0:
+                raise ValueError(f"override out of [0,1]: {override}")
+            self._daily_buy_override = float(override)
+        logger.info(
+            "Market %s: daily_buy_budget limit=%d esc=%.2f/%.2f override=%.2f",
+            self._market,
+            self._daily_buy_limit,
+            self._daily_buy_escalation_low,
+            self._daily_buy_escalation_high,
+            self._daily_buy_override,
+        )
 
     def set_opening_avoidance_minutes(self, minutes: int) -> None:
         """Skip BUY eval during the first N minutes after regular open.
@@ -1611,16 +1657,18 @@ class EvaluationLoop:
             if self._daily_buy_date != today:
                 self._daily_buy_count = 0
                 self._daily_buy_date = today
-            daily_limit = getattr(self, "_daily_buy_limit", 5)
+            daily_limit = self._daily_buy_limit
+            override = self._daily_buy_override
             if daily_limit > 0 and self._daily_buy_count >= daily_limit:
-                # Hard cap reached — only ultra-high confidence (0.90+) can override
-                if signal.confidence < 0.90:
+                # Hard cap reached — only ultra-high confidence override
+                if signal.confidence < override:
                     logger.info(
-                        "Skipping BUY for %s: daily limit reached (%d/%d, conf=%.2f < 0.90)",
+                        "Skipping BUY for %s: daily limit reached (%d/%d, conf=%.2f < %.2f)",
                         symbol,
                         self._daily_buy_count,
                         daily_limit,
                         signal.confidence,
+                        override,
                     )
                     return
                 logger.info(
@@ -1634,9 +1682,9 @@ class EvaluationLoop:
                 # Dynamic confidence bar: higher as budget depletes
                 usage_ratio = self._daily_buy_count / daily_limit
                 if usage_ratio >= 0.8:
-                    min_conf = 0.75
+                    min_conf = self._daily_buy_escalation_high
                 elif usage_ratio >= 0.6:
-                    min_conf = 0.65
+                    min_conf = self._daily_buy_escalation_low
                 else:
                     min_conf = 0.0  # Use normal min_confidence from combiner
                 if min_conf > 0 and signal.confidence < min_conf:

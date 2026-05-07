@@ -162,14 +162,23 @@ class TestUSConfigLoader:
         assert loader.get_market_risk_config("US") == {}
 
     def test_us_eval_loop_has_expected_overrides(self):
-        """2026-04-24: markets.US.evaluation_loop carries only sector_boost_weight
-        (D1) + opening_avoidance_minutes (post-open BUY guard). All other
-        eval-loop params still use code defaults."""
+        """2026-05-07: US eval-loop overrides include sector_boost_weight (D1),
+        opening_avoidance_minutes, and the relaxed daily_buy budget
+        (10/0.50/0.60 — compare_daily_buy_limit.py V1)."""
         loader = StrategyConfigLoader()
         cfg = loader.get_market_evaluation_loop_config("US")
-        assert set(cfg.keys()) == {"sector_boost_weight", "opening_avoidance_minutes"}
+        assert set(cfg.keys()) == {
+            "sector_boost_weight",
+            "opening_avoidance_minutes",
+            "daily_buy_limit",
+            "daily_buy_escalation_low",
+            "daily_buy_escalation_high",
+        }
         assert cfg["sector_boost_weight"] == pytest.approx(0.2)
         assert cfg["opening_avoidance_minutes"] == 30
+        assert cfg["daily_buy_limit"] == 10
+        assert cfg["daily_buy_escalation_low"] == pytest.approx(0.50)
+        assert cfg["daily_buy_escalation_high"] == pytest.approx(0.60)
 
 
 # ---------------------------------------------------------------------------
