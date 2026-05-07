@@ -381,6 +381,10 @@ async def lifespan(app: FastAPI):
         breakeven_stop_activation_ratio=be_activation,
         breakeven_stop_lock_ratio=be_lock_ratio,
         breakeven_stop_lock_pct=be_lock_pct,
+        # P2 floor — KR-only (US lost -0.9pp Ret in backtest VP2).
+        # compare_sizing_p1_p2.py 2026-05-07: KR Ret +7.7→+11.1, Sharpe
+        # +0.33→+0.51, Cash 22→14 with min_position_pct=4% floor.
+        enforce_min_position_pct_floor=True,
     )
     kr_risk_manager = RiskManager(params=kr_risk_params)
     order_manager = OrderManager(

@@ -52,6 +52,22 @@ class RiskParams:
     # because US strategies (trend_following + supertrend) tolerate larger
     # positions; KR (dual_momentum-only) loses alpha when sized up.
     regime_position_pct: dict[str, float] | None = None
+    # P2 (compare_sizing_p1_p2.py 2026-05-07): Enforce min_position_pct as a
+    # floor in the fixed-sizing fallback path (Kelly path already clamps).
+    # KR live: backtest VP2 +3.4pp Ret, +0.18 Sharpe, -8pp cash, MDD same —
+    # 4/4 win because supertrend+dm signals get sized up to meaningful
+    # amounts. US lost -0.9pp Ret in the same backtest (small cap, smaller
+    # equity) so this stays per-market.
+    enforce_min_position_pct_floor: bool = False
+    # P1 (compare_sizing_p1_p2.py 2026-05-07): Allow buying 1 share when
+    # the computed allocation is less than the share price BUT 1 share
+    # still fits within max_position_pct of portfolio. Fixes the "Price
+    # too high for allocation" rejection pattern observed live (KR blue
+    # chips: LGES, 현대차, SK하이닉스, etc. — 18 rejects/16h on 2026-05-07).
+    # Backtest doesn't trigger the case (initial_equity is too high) but
+    # live ₩6.85M × 4% = ₩274K allocation is below ₩300K+ share prices.
+    # Bounded by max_position_pct so no concentration risk.
+    allow_one_share_round_up: bool = True
 
 
 @dataclass
@@ -531,8 +547,36 @@ class RiskManager:
                 allowed=False,
             )
 
+        # P2 floor: bump small allocations up to min_position_pct, capped
+        # by max_position_pct. Only KR turns this on (US lost alpha in
+        # backtest VP2). Done before quantity calc so the floor flows
+        # through to the integer-share rounding cleanly.
+        if self._params.enforce_min_position_pct_floor:
+            min_alloc = portfolio_value * self._params.min_position_pct
+            max_alloc = portfolio_value * self._params.max_position_pct
+            if allocation < min_alloc:
+                allocation = min(min_alloc, cash_available * 0.95, max_alloc, exposure_headroom)
+
         quantity = int(allocation / price)
         if quantity <= 0:
+            # P1 round-up: if the calculated allocation is short of one
+            # share BUT one share still fits within max_position_pct, allow
+            # the buy. Fixes "Price too high for allocation" on KR blue
+            # chips where alloc (₩280K) is just below the share price
+            # (₩300K+) but 1 share is well within the per-position cap.
+            if (
+                self._params.allow_one_share_round_up
+                and price > 0
+                and price <= portfolio_value * self._params.max_position_pct
+                and price <= cash_available * 0.95
+            ):
+                return PositionSizeResult(
+                    quantity=1,
+                    allocation_usd=price,
+                    risk_per_share=price * self._params.default_stop_loss_pct,
+                    reason="Round-up to 1 share (P1)",
+                    allowed=True,
+                )
             return PositionSizeResult(
                 quantity=0,
                 allocation_usd=0,
