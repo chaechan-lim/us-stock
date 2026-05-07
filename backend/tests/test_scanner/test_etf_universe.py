@@ -68,7 +68,8 @@ def test_is_leveraged(universe):
 def test_risk_rules(universe):
     rules = universe.risk_rules
     assert rules.max_hold_days == 20
-    assert rules.max_portfolio_pct == 0.20
+    # 2026-05-07: 0.20 → 0.10 (conservative ETF re-enable)
+    assert rules.max_portfolio_pct == 0.10
     assert rules.require_stop_loss is True
 
 

@@ -98,10 +98,14 @@ exchanges:
   TLT: NASD
 
 # Risk limits for leveraged ETFs
+# 2026-05-07: ETF engine re-enabled with conservative caps (user request).
+# Bug fix (cash_available semantics) makes the engine actually buy now;
+# caps lowered to keep total ETF exposure bounded while we build up live
+# evidence — there's no backtest harness for the ETF engine.
 risk_rules:
   max_hold_days: 20                    # No holding leveraged >20 days (backtest: 10d too short)
-  max_portfolio_pct: 0.20              # Max 20% in leveraged ETFs
-  max_single_etf_pct: 0.10             # Max 10% in single ETF
+  max_portfolio_pct: 0.10              # 2026-05-07: 0.20 → 0.10 (conservative re-enable)
+  max_single_etf_pct: 0.05             # 2026-05-07: 0.10 → 0.05 (conservative re-enable)
   require_stop_loss: true              # Always use stop-loss
   default_stop_loss_pct: 0.08
   min_hold_leveraged_hours: 4          # Min 4h hold for leveraged ETFs before selling
