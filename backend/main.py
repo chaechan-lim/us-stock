@@ -1557,6 +1557,37 @@ async def lifespan(app: FastAPI):
             # earlier version sent only `summary`, which the operator
             # reported as "no insight included" — root cause was the
             # message template dropping the structured fields entirely.
+            # Persist any proposed_changes to the recommendations queue
+            # so the operator can accept/reject from the dashboard.
+            new_rec_ids: list[int] = []
+            proposed = summary.get("proposed_changes") or []
+            if proposed:
+                from core.models import AgentRecommendation
+                async with session_factory() as session:
+                    for ch in proposed:
+                        rec = AgentRecommendation(
+                            agent_type="trade_review",
+                            param_path=ch.get("param_path", ""),
+                            current_value=ch.get("current_value"),
+                            proposed_value=ch.get("proposed_value"),
+                            rationale=ch.get("rationale"),
+                            expected_effect=ch.get("expected_effect"),
+                            confidence=ch.get("confidence"),
+                            risk=ch.get("risk"),
+                            status="pending",
+                        )
+                        session.add(rec)
+                    await session.commit()
+                    # Re-fetch ids for the Discord link
+                    from sqlalchemy import desc, select
+                    rows = (await session.execute(
+                        select(AgentRecommendation)
+                        .where(AgentRecommendation.agent_type == "trade_review")
+                        .order_by(desc(AgentRecommendation.id))
+                        .limit(len(proposed))
+                    )).scalars().all()
+                    new_rec_ids = [r.id for r in rows]
+
             if summary.get("summary"):
                 lines = [
                     f"📊 일일 거래 리뷰: {summary['overall_grade']} "
@@ -1581,6 +1612,10 @@ async def lifespan(app: FastAPI):
                 lines += _bulleted(summary.get("patterns_identified") or [], "🔍 패턴")
                 lines += _bulleted(summary.get("daily_lessons") or [], "💡 교훈")
                 lines += _bulleted(summary.get("recommendations") or [], "🔧 권고")
+                if proposed:
+                    lines.append(
+                        f"\n**📝 제안된 변경 ({len(proposed)}건)** — 대시보드 추천 패널에서 검토 (#{','.join(map(str, new_rec_ids))})"
+                    )
                 lines.append(f"\n_{summary['summary']}_")
                 msg = "\n".join(lines)
                 await notification.notify_system_event("trade_review", msg)

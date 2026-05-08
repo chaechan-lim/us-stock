@@ -13,6 +13,7 @@ import SectorHeatmap from './SectorHeatmap'
 import ETFPanel from './ETFPanel'
 import EventsCalendar from './EventsCalendar'
 import PerformanceDashboard from './PerformanceDashboard'
+import RecommendationsPanel from './RecommendationsPanel'
 import MarketToggle from './MarketToggle'
 import AccountSelector from './AccountSelector'
 import { AccountProvider } from '../contexts/AccountContext'
@@ -85,6 +86,10 @@ function AppContent({ tab, setTab }: { tab: Tab; setTab: (t: Tab) => void }) {
             <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-4">
               <h2 className="text-sm font-semibold text-gray-900 mb-3">📊 성과 지표</h2>
               <PerformanceDashboard />
+            </div>
+            <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-4">
+              <h2 className="text-sm font-semibold text-gray-900 mb-3">🤖 에이전트 권고</h2>
+              <RecommendationsPanel />
             </div>
             <Dashboard />
           </div>

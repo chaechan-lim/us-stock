@@ -310,3 +310,30 @@ export const fetchPerformanceMetrics = (days = 30, market?: string) =>
   api.get<PerformanceMetrics>('/portfolio/metrics', {
     params: { days, ...(market ? { market } : {}) },
   }).then(r => r.data)
+
+// Self-evolution recommendations
+export interface AgentRecommendation {
+  id: number
+  created_at: string
+  agent_type: string
+  param_path: string
+  current_value: any
+  proposed_value: any
+  rationale: string | null
+  expected_effect: string | null
+  confidence: string | null
+  risk: string | null
+  backtest_result: any
+  status: string
+  applied_at: string | null
+  rejected_reason: string | null
+  notes: string | null
+}
+export const fetchRecommendations = (status: string = 'pending', limit = 50) =>
+  api.get<AgentRecommendation[]>('/recommendations/', {
+    params: { status, limit },
+  }).then(r => r.data)
+export const acceptRecommendation = (id: number, notes?: string) =>
+  api.post<AgentRecommendation>(`/recommendations/${id}/accept`, { notes }).then(r => r.data)
+export const rejectRecommendation = (id: number, reason?: string) =>
+  api.post<AgentRecommendation>(`/recommendations/${id}/reject`, { reason }).then(r => r.data)

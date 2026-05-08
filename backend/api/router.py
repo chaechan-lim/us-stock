@@ -10,6 +10,7 @@ from api.news import router as news_router
 from api.orders import router as orders_router
 from api.portfolio import router as portfolio_router
 from api.positions import router as positions_router
+from api.recommendations import router as recommendations_router
 from api.scanner_api import router as scanner_router
 from api.strategies import router as strategies_router
 from api.trades import router as trades_router
@@ -31,3 +32,4 @@ api_router.include_router(trades_router)
 api_router.include_router(backtest_router)
 api_router.include_router(ws_router)
 api_router.include_router(news_router)
+api_router.include_router(recommendations_router)

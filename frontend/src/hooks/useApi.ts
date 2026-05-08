@@ -166,3 +166,33 @@ export function usePerformanceMetrics(days = 30, market?: string) {
     staleTime: 30_000,
   })
 }
+
+export function useRecommendations(status: string = 'pending') {
+  return useQuery({
+    queryKey: ['recommendations', status],
+    queryFn: () => api.fetchRecommendations(status),
+    refetchInterval: 60_000,
+  })
+}
+
+export function useAcceptRecommendation() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ id, notes }: { id: number; notes?: string }) =>
+      api.acceptRecommendation(id, notes),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['recommendations'] })
+    },
+  })
+}
+
+export function useRejectRecommendation() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ id, reason }: { id: number; reason?: string }) =>
+      api.rejectRecommendation(id, reason),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['recommendations'] })
+    },
+  })
+}

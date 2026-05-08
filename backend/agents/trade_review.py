@@ -87,8 +87,39 @@ JSON 출력 (모든 텍스트 필드는 한국어로):
     "<구체적인 config/code 변경 제안 + 근거 (한국어). 예: 'KR sell_cooldown 1→2일로 늘려 005935 dm-supertrend 핑퐁 차단'>",
     "..."
   ],
+  "proposed_changes": [
+    {
+      "param_path": "<yaml dotted path. 예: markets.KR.evaluation_loop.sell_cooldown_days>",
+      "current_value": <현재 yaml 값 (숫자/문자열/null)>,
+      "proposed_value": <제안하는 새 값 (같은 타입)>,
+      "rationale": "<왜 변경 (한국어)>",
+      "expected_effect": "<무엇이 좋아질지 (한국어)>",
+      "confidence": "low" | "medium" | "high",
+      "risk": "low" | "medium" | "high"
+    }
+  ],
   "summary": "<오늘 거래 한 단락 요약 + 가장 우선 행동할 패턴 (한국어)>"
 }
+
+proposed_changes는 실제 yaml 경로를 정확히 명시해야 함. 잘 모르겠으면 빈
+array. recommendations는 자유 서술이지만 proposed_changes는 시스템이
+파싱해서 dashboard에 띄울 구조화 데이터.
+
+알려진 yaml 경로 (예시 — 본 시스템에서 실제 사용 중):
+- markets.KR.disabled_strategies (list of strategy names)
+- markets.KR.risk.max_positions (int)
+- markets.KR.risk.max_position_pct (float)
+- markets.KR.risk.default_trailing_activation_pct (float)
+- markets.KR.evaluation_loop.sell_cooldown_days (int)
+- markets.KR.evaluation_loop.sector_boost_weight (float)
+- markets.KR.evaluation_loop.opening_avoidance_minutes (int)
+- markets.KR.evaluation_loop.daily_buy_limit (int)
+- markets.US.evaluation_loop.sector_boost_weight (float)
+- markets.US.evaluation_loop.opening_avoidance_minutes (int)
+- markets.US.evaluation_loop.daily_buy_limit (int)
+- markets.US.evaluation_loop.daily_buy_escalation_low (float)
+- markets.US.evaluation_loop.daily_buy_escalation_high (float)
+- tiered_trailing_stop.tiers (list of {gain_pct, trail_pct})
 
 구체적 패턴이 없으면 빈 array를 반환. 일반론보다 침묵이 낫습니다."""
 
@@ -317,6 +348,24 @@ Provide your daily trade review as JSON."""
                 json_str = text.split("```")[1].split("```")[0]
 
             data = json.loads(json_str.strip())
+            # Validate proposed_changes shape — drop malformed entries
+            # rather than letting them crash the dashboard.
+            raw_changes = data.get("proposed_changes") or []
+            valid_changes = []
+            for ch in raw_changes:
+                if not isinstance(ch, dict):
+                    continue
+                if not ch.get("param_path"):
+                    continue
+                valid_changes.append({
+                    "param_path": str(ch["param_path"]),
+                    "current_value": ch.get("current_value"),
+                    "proposed_value": ch.get("proposed_value"),
+                    "rationale": str(ch.get("rationale", "")),
+                    "expected_effect": str(ch.get("expected_effect", "")),
+                    "confidence": str(ch.get("confidence", "medium")),
+                    "risk": str(ch.get("risk", "medium")),
+                })
             return {
                 "overall_grade": data.get("overall_grade", "C"),
                 "overall_score": int(data.get("overall_score", 50)),
@@ -326,6 +375,7 @@ Provide your daily trade review as JSON."""
                 "patterns_identified": data.get("patterns_identified", []),
                 "daily_lessons": data.get("daily_lessons", []),
                 "recommendations": data.get("recommendations", []),
+                "proposed_changes": valid_changes,
                 "summary": data.get("summary", ""),
             }
         except (json.JSONDecodeError, KeyError, ValueError) as e:
@@ -339,5 +389,6 @@ Provide your daily trade review as JSON."""
                 "patterns_identified": [],
                 "daily_lessons": [],
                 "recommendations": [],
+                "proposed_changes": [],
                 "summary": text[:500],
             }
