@@ -11,7 +11,6 @@ import SignalPanel from './SignalPanel'
 import StockChart from './StockChart'
 import SectorHeatmap from './SectorHeatmap'
 import ETFPanel from './ETFPanel'
-import NewsSentiment from './NewsSentiment'
 import EventsCalendar from './EventsCalendar'
 import MarketToggle from './MarketToggle'
 import AccountSelector from './AccountSelector'
@@ -119,11 +118,8 @@ function AppContent({ tab, setTab }: { tab: Tab; setTab: (t: Tab) => void }) {
               <ETFPanel />
             </div>
             <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-4">
-              <h2 className="text-sm font-semibold text-gray-900 mb-3">Sentiment & Events</h2>
-              <NewsSentiment />
-              <div className="mt-4">
-                <EventsCalendar />
-              </div>
+              <h2 className="text-sm font-semibold text-gray-900 mb-3">Events</h2>
+              <EventsCalendar />
             </div>
           </div>
         )}

@@ -48,22 +48,49 @@ Output your analysis as JSON with this exact structure:
   "summary": "One paragraph summary of the trade review"
 }"""
 
-DAILY_REVIEW_PROMPT = """You are a professional trade review analyst for US equities.
-Review the following batch of trades executed today and provide an aggregated
-daily performance summary.
+DAILY_REVIEW_PROMPT = """당신은 듀얼 마켓(US + KR) 자동 거래 시스템의 일일 거래를
+리뷰합니다. 활성 전략은 dual_momentum, supertrend, trend_following이며
+시장별로 다르게 enable됩니다. 시스템은 ATR 기반 SL/TP, default trailing
+stop (US 6% / KR 8% activation), tiered trailing (5/10/15/20% gain tier)을
+사용합니다.
 
-Output your analysis as JSON with this exact structure:
+운영자가 이번 주 안에 행동에 옮길 수 있는 **구체적 패턴**만 찾으세요.
+"전략 점검", "리스크 관리" 같은 일반론은 쓰지 마세요. 다음 항목을 살펴봐:
+
+1. **Whipsaw / cross-strategy 충돌** — 한 전략이 매수한 종목을 24시간 안에
+   다른 전략이 매도, 또는 trailing이 진입가 근처에서 짧은 peak 후 exit한 경우.
+2. **Cap binding** — Max positions / Price too high for allocation /
+   Max exposure / daily_buy_limit 등으로 BUY가 자주 reject됐는지 (시장별
+   파라미터가 너무 빡빡하거나 stale한 신호).
+3. **전략별 imbalance** — 한 전략이 PnL 압도(±), 저WR 전략, 신호 안 내는 전략.
+4. **사이징 이상** — 비싼 종목에 qty=1 (allocation < 1주 가격), 또는 잡주 1주씩
+   누적되는 케이스.
+5. **Exit 타이밍** — 평균 peak gain vs exit gain (trailing이 너무 일찍 발동?
+   take_profit이 너무 일찍?).
+
+JSON 출력 (모든 텍스트 필드는 한국어로):
 {
-  "overall_grade": "A" | "B" | "C" | "D" | "F",
+  "overall_grade": "A"|"B"|"C"|"D"|"F",
   "overall_score": 0-100,
-  "total_trades": 0,
-  "best_trade": "symbol",
-  "worst_trade": "symbol",
-  "patterns_identified": ["pattern1", "pattern2"],
-  "daily_lessons": ["lesson1", "lesson2"],
-  "recommendations": ["recommendation1", "recommendation2"],
-  "summary": "One paragraph summary of the day's trading"
-}"""
+  "total_trades": <int>,
+  "best_trade": "<종목 — 좋았던 이유 (한국어)>",
+  "worst_trade": "<종목 — 잘못된 이유 (한국어)>",
+  "patterns_identified": [
+    "<오늘 거래에 매인 구체적 관찰 (한국어). 예: 'CRML 라운드트립: 13:30 supertrend BUY → 14:21 trailing SELL, 순익 $2'>",
+    "..."
+  ],
+  "daily_lessons": [
+    "<config/code 노브에 매인 행동 가능 교훈 (한국어). 예: '오픈 30분 이내 매수 4건 모두 적자 — opening_avoidance 더 길게'>",
+    "..."
+  ],
+  "recommendations": [
+    "<구체적인 config/code 변경 제안 + 근거 (한국어). 예: 'KR sell_cooldown 1→2일로 늘려 005935 dm-supertrend 핑퐁 차단'>",
+    "..."
+  ],
+  "summary": "<오늘 거래 한 단락 요약 + 가장 우선 행동할 패턴 (한국어)>"
+}
+
+구체적 패턴이 없으면 빈 array를 반환. 일반론보다 침묵이 낫습니다."""
 
 
 @dataclass
