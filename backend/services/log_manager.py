@@ -135,6 +135,15 @@ def setup_logging(config: LogConfig | None = None) -> None:
         json_handler.setFormatter(JSONFormatter())
         root.addHandler(json_handler)
 
+    # 2026-05-08: Suppress yfinance ERROR-level "possibly delisted" /
+    # "No fundamentals data found" noise. yfinance routinely logs ERROR
+    # for ETFs (no fundamentals exist), SPACs (no fundamentals yet), and
+    # symbols flaky in Yahoo's coverage (some KR tickers). Our scanner /
+    # adapter wrappers already swallow the exceptions and decide whether
+    # to skip the symbol, so yfinance's own error logs are pure noise.
+    # CRITICAL level keeps only true crash-class messages.
+    logging.getLogger("yfinance").setLevel(logging.CRITICAL)
+
 
 class TradingLogger:
     """Convenience wrapper that attaches structured fields to log records.

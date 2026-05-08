@@ -535,29 +535,18 @@ async def lifespan(app: FastAPI):
         from agents.market_analyst import MarketAnalystAgent
         from agents.risk_assessment import RiskAssessmentAgent
         from agents.trade_review import TradeReviewAgent
-        from agents.news_sentiment_agent import NewsSentimentAgent
 
         ai_agent = MarketAnalystAgent(llm_client=llm_client, context_service=agent_ctx)
         risk_agent = RiskAssessmentAgent(llm_client=llm_client, context_service=agent_ctx)
         trade_review_agent = TradeReviewAgent(llm_client=llm_client, context_service=agent_ctx)
-        # News sentiment: use Gemini (free tier) to save Anthropic credits
-        news_model = None
-        if config.llm.news_use_gemini and config.llm.gemini_fallback_model:
-            news_model = config.llm.gemini_fallback_model
-        news_batch_size = config.llm.news_batch_size
-        news_sentiment_agent = NewsSentimentAgent(
-            llm_client=llm_client,
-            context_service=agent_ctx,
-            model_override=news_model,
-            batch_size=news_batch_size,
-        )
-        # KR agent: also use Gemini to save costs (Korean supported by Gemini)
-        kr_news_sentiment_agent = NewsSentimentAgent(
-            llm_client=llm_client,
-            model_override=news_model,
-            batch_size=news_batch_size,
-        )
-        logger.info("AI agents enabled (analyst, risk, trade_review, news_sentiment)")
+        # 2026-05-08: news_sentiment_agent disabled — Layer 2.5 enrichment
+        # was producing ±2.25 max score adjustment (15 weight × ±15 cap on
+        # 0-100 scale). No live BUY/SELL decisions traceably flipped by
+        # sentiment in 5/6-5/8 logs. LLM cost for marginal-to-no alpha.
+        # NewsEnricher / news_service stay loaded for potential future
+        # repurposing (per-position news monitoring) but agent + enricher
+        # are skipped at wiring.
+        logger.info("AI agents enabled (analyst, risk, trade_review) — news_sentiment disabled")
     app.state.risk_agent = risk_agent
     app.state.trade_review_agent = trade_review_agent
     app.state.news_sentiment_agent = news_sentiment_agent
@@ -572,9 +561,12 @@ async def lifespan(app: FastAPI):
 
     news_service = FinnhubNewsService(api_key=config.external.finnhub_api_key)
     app.state.news_service = news_service
-    news_enricher = NewsEnricher() if news_service.available else None
+    # 2026-05-08: news_enricher disabled (sentiment turn-off). Layer 2.5
+    # skipped in scanner pipeline. Service kept available for the
+    # /news/sentiment endpoint (legacy frontend) until that's also removed.
+    news_enricher = None
     if news_service.available:
-        logger.info("Finnhub news service enabled")
+        logger.info("Finnhub news service available (enricher disabled)")
 
     # Event calendar (earnings, macro, insider)
     from data.earnings_service import EarningsCalendarService
@@ -1614,6 +1606,10 @@ async def lifespan(app: FastAPI):
         Runs pre-market (once) + every 30min during regular hours.
         Results cached on scanner pipeline + API endpoint.
         """
+        # 2026-05-08: news sentiment disabled — exit early to skip LLM call
+        # while keeping the scheduled task in place for easy re-enable.
+        if news_sentiment_agent is None:
+            return
         if not news_service.available:
             return
         try:
@@ -1743,6 +1739,9 @@ async def lifespan(app: FastAPI):
         Runs pre-market (once) + every 30min during KR regular hours.
         Results cached on API endpoint + fed to KR evaluation loop.
         """
+        # 2026-05-08: news sentiment disabled — see task_news_analysis comment.
+        if kr_news_sentiment_agent is None:
+            return
         try:
             from db.trade_repository import TradeRepository
             from api.news import update_kr_sentiment_cache
