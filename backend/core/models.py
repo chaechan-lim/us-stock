@@ -244,3 +244,37 @@ class Watchlist(Base):
         UniqueConstraint("market", "symbol", name="uq_watchlist_market_symbol"),
         Index("idx_watchlist_active", "is_active"),
     )
+
+
+# 2026-05-08: Self-evolution recommendations
+# trade_review (and future agents) propose specific config changes.
+# Operator reviews via the dashboard; accept = apply yaml + reload.
+class AgentRecommendation(Base):
+    __tablename__ = "agent_recommendations"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    agent_type = Column(String(50), nullable=False)   # trade_review, ...
+    # Yaml dotted path, e.g. "markets.KR.risk.max_positions"
+    param_path = Column(String(200), nullable=False)
+    # Stored as JSON to handle int / float / string / list / null transparently.
+    current_value = Column(JSONB)
+    proposed_value = Column(JSONB)
+    rationale = Column(Text)
+    expected_effect = Column(Text)
+    confidence = Column(String(10))   # low | medium | high
+    risk = Column(String(10))         # low | medium | high
+    # Filled in by the auto-backtest worker (track B).
+    backtest_result = Column(JSONB)
+    # pending → accepted/rejected/superseded. Expired auto-set after 7d.
+    status = Column(String(20), nullable=False, default="pending")
+    applied_at = Column(DateTime)
+    rejected_reason = Column(Text)
+    # Operator can attach notes when accepting/rejecting.
+    notes = Column(Text)
+
+    __table_args__ = (
+        Index("idx_recs_status", "status"),
+        Index("idx_recs_created", "created_at"),
+        Index("idx_recs_agent_status", "agent_type", "status"),
+    )
