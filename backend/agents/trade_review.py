@@ -48,22 +48,53 @@ Output your analysis as JSON with this exact structure:
   "summary": "One paragraph summary of the trade review"
 }"""
 
-DAILY_REVIEW_PROMPT = """You are a professional trade review analyst for US equities.
-Review the following batch of trades executed today and provide an aggregated
-daily performance summary.
+DAILY_REVIEW_PROMPT = """You are reviewing the day's trades for a dual-market
+(US + KR) automated trading system. Active strategies are dual_momentum,
+supertrend, and trend_following (per market). The system uses ATR-based
+SL/TP, a default trailing stop with 6% (US) / 8% (KR) activation, plus
+tiered trailing tiers at 5/10/15/20% gains.
 
-Output your analysis as JSON with this exact structure:
+Find ACTIONABLE patterns the operator can act on this week. Skip generic
+advice ("review your strategies", "manage risk"). Look for:
+
+1. **Whipsaws / cross-strategy conflicts** — same symbol bought by one
+   strategy then sold by another within 24h, or trailing stops that
+   exited near entry price after a brief peak.
+2. **Cap binding** — many BUY rejections from cap (Max positions, Price
+   too high for allocation, Max exposure, daily limit) that suggest a
+   per-market knob is too tight or stale.
+3. **Strategy-level imbalance** — one strategy dominating PnL (positive
+   or negative), low-WR strategies, or one strategy never firing.
+4. **Sizing oddities** — positions with qty=1 on expensive symbols
+   (sizing math gave less than 1 share's price), or 1-share trades
+   accumulating dust.
+5. **Exit timing** — average peak gain reached vs gain at exit
+   (premature trailing? too-early take-profit?).
+
+Output as JSON:
 {
-  "overall_grade": "A" | "B" | "C" | "D" | "F",
+  "overall_grade": "A"|"B"|"C"|"D"|"F",
   "overall_score": 0-100,
-  "total_trades": 0,
-  "best_trade": "symbol",
-  "worst_trade": "symbol",
-  "patterns_identified": ["pattern1", "pattern2"],
-  "daily_lessons": ["lesson1", "lesson2"],
-  "recommendations": ["recommendation1", "recommendation2"],
-  "summary": "One paragraph summary of the day's trading"
-}"""
+  "total_trades": <int>,
+  "best_trade": "<symbol — what made it good>",
+  "worst_trade": "<symbol — what went wrong>",
+  "patterns_identified": [
+    "<concrete observation about today, not generic — e.g. 'CRML round-tripped: BUY supertrend 13:30, SELL trailing 14:21, +$2 net'>",
+    "..."
+  ],
+  "daily_lessons": [
+    "<actionable lesson tied to a config/code knob — e.g. 'opening_avoidance might be too short; 4 trades within 30min open went red'>",
+    "..."
+  ],
+  "recommendations": [
+    "<specific config/code change to consider, with rationale — e.g. 'raise KR sell_cooldown from 1 to 2 days to break the dm-vs-supertrend ping-pong on 005935'>",
+    "..."
+  ],
+  "summary": "<one paragraph, what happened today and the most important pattern to act on>"
+}
+
+If you can't find a concrete pattern, say so explicitly — empty arrays
+are better than generic platitudes."""
 
 
 @dataclass

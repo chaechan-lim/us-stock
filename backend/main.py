@@ -1552,14 +1552,37 @@ async def lifespan(app: FastAPI):
                 summary.get("total_trades", 0),
             )
 
-            # Send review via notification
+            # Send review via notification — include the actionable lists
+            # (patterns / lessons / recommendations) the LLM produces. The
+            # earlier version sent only `summary`, which the operator
+            # reported as "no insight included" — root cause was the
+            # message template dropping the structured fields entirely.
             if summary.get("summary"):
-                msg = (
+                lines = [
                     f"Daily Trade Review: {summary['overall_grade']} "
-                    f"(score={summary['overall_score']})\n"
-                    f"Trades: {summary['total_trades']}\n"
-                    f"{summary['summary']}"
-                )
+                    f"(score={summary['overall_score']})",
+                    f"Trades: {summary['total_trades']}",
+                ]
+                best = summary.get("best_trade")
+                worst = summary.get("worst_trade")
+                if best:
+                    lines.append(f"  Best: {best}")
+                if worst:
+                    lines.append(f"  Worst: {worst}")
+
+                def _bulleted(items, header):
+                    out = []
+                    if items:
+                        out.append(f"\n**{header}**")
+                        for x in items[:5]:  # cap to keep Discord readable
+                            out.append(f"• {x}")
+                    return out
+
+                lines += _bulleted(summary.get("patterns_identified") or [], "Patterns")
+                lines += _bulleted(summary.get("daily_lessons") or [], "Lessons")
+                lines += _bulleted(summary.get("recommendations") or [], "Recommendations")
+                lines.append(f"\n_{summary['summary']}_")
+                msg = "\n".join(lines)
                 await notification.notify_system_event("trade_review", msg)
 
         except Exception as e:
