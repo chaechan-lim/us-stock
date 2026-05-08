@@ -170,7 +170,13 @@ def compute_equity_metrics(equity_series: list[tuple[date, float]]) -> EquityMet
         cagr = 0.0
     else:
         net_return = (end - start) / start
-        cagr = ((end / start) ** (365.0 / days)) - 1 if start > 0 else 0.0
+        # Annualization needs enough daily samples to avoid blowing up.
+        # With < 7 days the projection is meaningless (any 1-day move
+        # extrapolates to thousands of percent), so don't extrapolate.
+        if days >= 7 and start > 0:
+            cagr = ((end / start) ** (365.0 / days)) - 1
+        else:
+            cagr = 0.0
 
     # Max drawdown + recovery
     peak = start
@@ -206,7 +212,10 @@ def compute_equity_metrics(equity_series: list[tuple[date, float]]) -> EquityMet
         cur = equity_series[i][1]
         if prev > 0:
             returns.append((cur - prev) / prev)
-    if returns:
+    # Need ≥7 daily returns to compute meaningful Sharpe/Sortino —
+    # otherwise the std is too noisy and the annualization (×√252)
+    # explodes (e.g. 9.28 Sharpe on 1-day sample).
+    if len(returns) >= 7:
         mu = sum(returns) / len(returns)
         var = sum((r - mu) ** 2 for r in returns) / max(1, len(returns) - 1)
         std = math.sqrt(var)

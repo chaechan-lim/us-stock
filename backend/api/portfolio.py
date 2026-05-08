@@ -799,11 +799,24 @@ async def performance_metrics(
             v = p.get("total_value_krw") or p.get("total_value_usd") or 0
             if v:
                 per_day[d] = float(v)
-            snapshots.append({
-                "total_value": v,
-                "cash": p.get("cash_usd") or p.get("cash") or 0,
-            })
         equity_series = list(per_day.items())
+
+    # Exposure uses the per-market series (has cash + invested fields).
+    # The combined endpoint exposes only the integrated total, no cash split.
+    us_pm = getattr(request.app.state, "portfolio_manager", None)
+    kr_pm = getattr(request.app.state, "kr_portfolio_manager", None)
+    for src in (us_pm, kr_pm):
+        if not src:
+            continue
+        try:
+            hist = await src.get_equity_history(days=days)
+            for p in hist:
+                snapshots.append({
+                    "total_value": p.get("total_value_usd") or 0,
+                    "cash": p.get("cash_usd") or 0,
+                })
+        except Exception:
+            pass
 
     equity_metrics = compute_equity_metrics(equity_series)
     equity_metrics.exposure_pct = compute_exposure_pct(snapshots)
