@@ -272,3 +272,41 @@ export interface SignalEntry {
 }
 export const fetchSignals = (market = 'ALL', limit = 100) =>
   api.get<SignalEntry[]>('/engine/signals', { params: { market, limit } }).then(r => r.data)
+
+// Performance metrics (cost-aware, equity-based hierarchy)
+export interface PerformanceMetrics {
+  window_days: number
+  market: string
+  equity: {
+    start_equity: number
+    end_equity: number
+    net_return_pct: number
+    annualized_return_pct: number
+    max_drawdown_pct: number
+    max_dd_recovery_days: number
+    calmar_ratio: number
+    sharpe_ratio: number
+    sortino_ratio: number
+    exposure_pct: number
+  }
+  trades: {
+    total_trades: number
+    wins: number
+    losses: number
+    win_rate: number
+    avg_win: number
+    avg_loss: number
+    gross_profit: number
+    gross_loss: number
+    gross_pf: number | null
+    expectancy: number
+    estimated_fees: number
+    estimated_slippage: number
+    net_profit: number
+    net_pf: number | null
+  }
+}
+export const fetchPerformanceMetrics = (days = 30, market?: string) =>
+  api.get<PerformanceMetrics>('/portfolio/metrics', {
+    params: { days, ...(market ? { market } : {}) },
+  }).then(r => r.data)

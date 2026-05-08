@@ -157,3 +157,12 @@ export function useMarketEvents(market: string = 'US') {
     refetchInterval: 300_000,
   })
 }
+
+export function usePerformanceMetrics(days = 30, market?: string) {
+  return useQuery({
+    queryKey: ['portfolio', 'metrics', days, market ?? 'all'],
+    queryFn: () => api.fetchPerformanceMetrics(days, market),
+    refetchInterval: 60_000,
+    staleTime: 30_000,
+  })
+}

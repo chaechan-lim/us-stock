@@ -751,6 +751,103 @@ async def equity_history(request: Request, days: int = 30, market: str = "US"):
     return await pm.get_equity_history(days=days)
 
 
+@router.get("/metrics")
+async def performance_metrics(
+    request: Request,
+    days: int = 30,
+    market: str | None = None,
+):
+    """Compute the cost-aware performance metric set.
+
+    Hierarchy follows operator priority (2026-05-08): Net Equity Curve →
+    MDD + recovery → Calmar/Sharpe/Sortino → Net PF + Expectancy.
+    PF here is Net (cost-adjusted), not Gross.
+    """
+    from datetime import date as _date
+
+    from analytics.performance_metrics import (
+        compute_equity_metrics,
+        compute_exposure_pct,
+        compute_trade_metrics,
+    )
+    from api.trades import _session_factory
+    from db.trade_repository import TradeRepository
+
+    # 1. Equity series — combined integrated total when available
+    pm = getattr(request.app.state, "kr_portfolio_manager", None)
+    if not pm:
+        pm = getattr(request.app.state, "portfolio_manager", None)
+    equity_series: list[tuple[_date, float]] = []
+    snapshots: list[dict] = []
+    if pm:
+        history = await pm.get_combined_equity_history(days=days) if hasattr(
+            pm, "get_combined_equity_history"
+        ) else []
+        if not history:
+            history = await pm.get_equity_history(days=days)
+        # Group to one point per date (last value of day)
+        from collections import OrderedDict
+        per_day: OrderedDict[_date, float] = OrderedDict()
+        for p in history:
+            ds = (p.get("date", "") or "")[:10]
+            if not ds:
+                continue
+            try:
+                d = _date.fromisoformat(ds)
+            except Exception:
+                continue
+            v = p.get("total_value_krw") or p.get("total_value_usd") or 0
+            if v:
+                per_day[d] = float(v)
+            snapshots.append({
+                "total_value": v,
+                "cash": p.get("cash_usd") or p.get("cash") or 0,
+            })
+        equity_series = list(per_day.items())
+
+    equity_metrics = compute_equity_metrics(equity_series)
+    equity_metrics.exposure_pct = compute_exposure_pct(snapshots)
+
+    # 2. Trade-level metrics (cost-adjusted)
+    trade_metrics_data = {}
+    if _session_factory:
+        async with _session_factory() as session:
+            repo = TradeRepository(session)
+            orders = await repo.get_trade_history(limit=1000)
+        if market:
+            orders = [o for o in orders if getattr(o, "market", "US") == market]
+        # Last `days` window
+        cutoff = datetime.utcnow() - timedelta(days=days)
+        orders = [o for o in orders if (o.filled_at or o.created_at or cutoff) >= cutoff]
+        trade_dicts = [
+            {
+                "side": o.side,
+                "pnl": getattr(o, "pnl", None),
+                "market": getattr(o, "market", "US"),
+                "quantity": getattr(o, "filled_quantity", None) or o.quantity,
+                "filled_price": getattr(o, "filled_price", None),
+                "price": o.price,
+            }
+            for o in orders
+            if o.status in ("filled", "not_found")
+        ]
+        tm = compute_trade_metrics(trade_dicts)
+        trade_metrics_data = tm.__dict__
+
+    # JSON-friendly: replace inf with a large sentinel
+    def _safe(v):
+        if isinstance(v, float) and (v != v or v == float("inf") or v == float("-inf")):
+            return None
+        return v
+
+    return {
+        "window_days": days,
+        "market": market or "ALL",
+        "equity": {k: _safe(v) for k, v in equity_metrics.__dict__.items()},
+        "trades": {k: _safe(v) for k, v in trade_metrics_data.items()},
+    }
+
+
 @router.get("/trade-summary")
 async def trade_summary_periods(request: Request, market: str | None = None):
     """Get trade P&L summary by period: today, this week, this month, all-time."""
