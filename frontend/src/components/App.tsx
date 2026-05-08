@@ -12,6 +12,7 @@ import StockChart from './StockChart'
 import SectorHeatmap from './SectorHeatmap'
 import ETFPanel from './ETFPanel'
 import EventsCalendar from './EventsCalendar'
+import PerformanceDashboard from './PerformanceDashboard'
 import MarketToggle from './MarketToggle'
 import AccountSelector from './AccountSelector'
 import { AccountProvider } from '../contexts/AccountContext'
@@ -79,7 +80,15 @@ function AppContent({ tab, setTab }: { tab: Tab; setTab: (t: Tab) => void }) {
 
       {/* Content */}
       <main className="p-3 sm:p-6">
-        {tab === 'dashboard' && <Dashboard />}
+        {tab === 'dashboard' && (
+          <div className="space-y-6">
+            <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-4">
+              <h2 className="text-sm font-semibold text-gray-900 mb-3">📊 성과 지표</h2>
+              <PerformanceDashboard />
+            </div>
+            <Dashboard />
+          </div>
+        )}
 
         {tab === 'trades' && (
           <div className="space-y-6">
