@@ -1559,16 +1559,16 @@ async def lifespan(app: FastAPI):
             # message template dropping the structured fields entirely.
             if summary.get("summary"):
                 lines = [
-                    f"Daily Trade Review: {summary['overall_grade']} "
-                    f"(score={summary['overall_score']})",
-                    f"Trades: {summary['total_trades']}",
+                    f"📊 일일 거래 리뷰: {summary['overall_grade']} "
+                    f"(점수={summary['overall_score']})",
+                    f"거래 수: {summary['total_trades']}",
                 ]
                 best = summary.get("best_trade")
                 worst = summary.get("worst_trade")
                 if best:
-                    lines.append(f"  Best: {best}")
+                    lines.append(f"  ✅ 베스트: {best}")
                 if worst:
-                    lines.append(f"  Worst: {worst}")
+                    lines.append(f"  ❌ 워스트: {worst}")
 
                 def _bulleted(items, header):
                     out = []
@@ -1578,9 +1578,9 @@ async def lifespan(app: FastAPI):
                             out.append(f"• {x}")
                     return out
 
-                lines += _bulleted(summary.get("patterns_identified") or [], "Patterns")
-                lines += _bulleted(summary.get("daily_lessons") or [], "Lessons")
-                lines += _bulleted(summary.get("recommendations") or [], "Recommendations")
+                lines += _bulleted(summary.get("patterns_identified") or [], "🔍 패턴")
+                lines += _bulleted(summary.get("daily_lessons") or [], "💡 교훈")
+                lines += _bulleted(summary.get("recommendations") or [], "🔧 권고")
                 lines.append(f"\n_{summary['summary']}_")
                 msg = "\n".join(lines)
                 await notification.notify_system_event("trade_review", msg)
