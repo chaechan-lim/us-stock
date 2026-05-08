@@ -735,6 +735,113 @@ async def test_telegram_adapter_html_formatting():
 
 
 @pytest.mark.asyncio
+async def test_discord_429_rate_limit_retries():
+    """Discord 429 with retry_after — adapter waits and retries once,
+    then succeeds. Live obs 2026-05-09: previous adapter dropped these."""
+    adapter = DiscordAdapter(webhook_url="https://discord.com/api/webhooks/fake")
+
+    # Sequence: first call → 429 with retry_after=1, second → 204
+    call_count = 0
+
+    def _make_resp(status, text):
+        resp = AsyncMock()
+        resp.status = status
+        resp.text = AsyncMock(return_value=text)
+        return resp
+
+    def _post_side_effect(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        ctx = AsyncMock()
+        if call_count == 1:
+            ctx.__aenter__ = AsyncMock(return_value=_make_resp(
+                429, '{"message":"rate limited","retry_after":0.05}'
+            ))
+        else:
+            ctx.__aenter__ = AsyncMock(return_value=_make_resp(204, ""))
+        ctx.__aexit__ = AsyncMock(return_value=False)
+        return ctx
+
+    session = AsyncMock()
+    session.__aenter__ = AsyncMock(return_value=session)
+    session.__aexit__ = AsyncMock(return_value=False)
+    session.post = MagicMock(side_effect=_post_side_effect)
+
+    with patch("aiohttp.ClientSession", return_value=session):
+        ok = await adapter.send("test", AlertLevel.INFO)
+    assert ok is True
+    assert call_count == 2  # one 429, one success
+
+
+@pytest.mark.asyncio
+async def test_discord_503_retries_with_backoff():
+    """Discord 503 (transient server error) — adapter retries with
+    exponential backoff up to 3 attempts."""
+    adapter = DiscordAdapter(webhook_url="https://discord.com/api/webhooks/fake")
+    call_count = 0
+
+    def _make_resp(status, text):
+        resp = AsyncMock()
+        resp.status = status
+        resp.text = AsyncMock(return_value=text)
+        return resp
+
+    def _post_side_effect(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        ctx = AsyncMock()
+        if call_count <= 2:
+            ctx.__aenter__ = AsyncMock(return_value=_make_resp(503, "no upstream"))
+        else:
+            ctx.__aenter__ = AsyncMock(return_value=_make_resp(204, ""))
+        ctx.__aexit__ = AsyncMock(return_value=False)
+        return ctx
+
+    session = AsyncMock()
+    session.__aenter__ = AsyncMock(return_value=session)
+    session.__aexit__ = AsyncMock(return_value=False)
+    session.post = MagicMock(side_effect=_post_side_effect)
+
+    # Patch sleep so the test doesn't actually wait the backoff
+    with patch("aiohttp.ClientSession", return_value=session), \
+         patch("asyncio.sleep", new=AsyncMock()):
+        ok = await adapter.send("test", AlertLevel.INFO)
+    assert ok is True
+    assert call_count == 3
+
+
+@pytest.mark.asyncio
+async def test_discord_400_no_retry():
+    """4xx other than 429 are real errors — don't retry."""
+    adapter = DiscordAdapter(webhook_url="https://discord.com/api/webhooks/fake")
+    call_count = 0
+
+    def _make_resp(status, text):
+        resp = AsyncMock()
+        resp.status = status
+        resp.text = AsyncMock(return_value=text)
+        return resp
+
+    def _post_side_effect(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        ctx = AsyncMock()
+        ctx.__aenter__ = AsyncMock(return_value=_make_resp(400, "bad request"))
+        ctx.__aexit__ = AsyncMock(return_value=False)
+        return ctx
+
+    session = AsyncMock()
+    session.__aenter__ = AsyncMock(return_value=session)
+    session.__aexit__ = AsyncMock(return_value=False)
+    session.post = MagicMock(side_effect=_post_side_effect)
+
+    with patch("aiohttp.ClientSession", return_value=session):
+        ok = await adapter.send("test", AlertLevel.INFO)
+    assert ok is False
+    assert call_count == 1
+
+
+@pytest.mark.asyncio
 async def test_discord_adapter_uses_embeds():
     """DiscordAdapter.send_rich uses Discord embeds, no HTML."""
     adapter = DiscordAdapter(webhook_url="https://discord.com/api/webhooks/fake")

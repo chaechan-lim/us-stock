@@ -158,21 +158,76 @@ class DiscordAdapter(NotificationAdapter):
         return await self._post({"embeds": [embed]})
 
     async def _post(self, payload: dict) -> bool:
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    self._webhook_url,
-                    json=payload,
-                    timeout=aiohttp.ClientTimeout(total=10),
-                ) as resp:
-                    if resp.status in (200, 204):
-                        return True
-                    body = await resp.text()
-                    logger.error("Discord error %d: %s", resp.status, body)
-                    return False
-        except Exception as e:
-            logger.error("Discord send failed: %s", e)
-            return False
+        """POST with retry for transient failures.
+
+        - 429 rate-limited: honour `retry_after` (capped at 30s) once.
+        - 5xx server-side (Discord/Cloudflare blip): up to 3 attempts with
+          exponential backoff (1s, 2s, 4s).
+        - 4xx other than 429: real error, do not retry.
+
+        Live obs 2026-05-09: Discord returned 429 (retry_after=3) and 503
+        ("no healthy upstream") within minutes; the previous fire-and-forget
+        adapter dropped both. Now we recover automatically in the common
+        cases without escalating to CRITICAL spam.
+        """
+        import asyncio
+
+        attempts = 0
+        backoff = 1.0
+        max_attempts = 3
+        while attempts < max_attempts:
+            attempts += 1
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(
+                        self._webhook_url,
+                        json=payload,
+                        timeout=aiohttp.ClientTimeout(total=10),
+                    ) as resp:
+                        if resp.status in (200, 204):
+                            return True
+                        body = await resp.text()
+                        if resp.status == 429:
+                            # parse retry_after seconds from response
+                            wait = 1.0
+                            try:
+                                import json as _json
+                                data = _json.loads(body)
+                                wait = float(data.get("retry_after", 1.0))
+                            except Exception:
+                                pass
+                            wait = min(wait, 30.0)
+                            logger.warning(
+                                "Discord rate-limited, waiting %.1fs (attempt %d/%d)",
+                                wait, attempts, max_attempts,
+                            )
+                            await asyncio.sleep(wait)
+                            continue
+                        if resp.status >= 500 and attempts < max_attempts:
+                            logger.warning(
+                                "Discord %d (transient), backoff %.1fs (attempt %d/%d): %s",
+                                resp.status, backoff, attempts, max_attempts, body[:120],
+                            )
+                            await asyncio.sleep(backoff)
+                            backoff *= 2
+                            continue
+                        logger.error("Discord error %d: %s", resp.status, body)
+                        return False
+            except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+                if attempts < max_attempts:
+                    logger.warning(
+                        "Discord network error (%s), backoff %.1fs (attempt %d/%d)",
+                        e, backoff, attempts, max_attempts,
+                    )
+                    await asyncio.sleep(backoff)
+                    backoff *= 2
+                    continue
+                logger.error("Discord send failed after %d attempts: %s", attempts, e)
+                return False
+            except Exception as e:
+                logger.error("Discord send failed: %s", e)
+                return False
+        return False
 
 
 # ── Telegram adapter ──────────────────────────────────────────────────
