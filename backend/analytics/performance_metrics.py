@@ -65,7 +65,7 @@ class EquityMetrics:
     end_equity: float
     net_return_pct: float        # (end - start) / start × 100
     annualized_return_pct: float # CAGR computed from equity curve length
-    max_drawdown_pct: float      # peak-to-trough, 0 to negative %
+    max_drawdown_pct: float      # peak-to-trough on EOD/daily series
     max_dd_recovery_days: int    # days from MDD trough to fresh high (0 if not recovered)
     calmar_ratio: float          # annualized_return / |max_drawdown|
     sharpe_ratio: float          # daily-return-based, annualized (252)
@@ -73,6 +73,11 @@ class EquityMetrics:
     exposure_pct: float          # avg fraction of equity invested over time
     sample_days: int = 0         # daily samples used (0 means metrics zeroed)
     sufficient_samples: bool = False  # ≥7 days needed for Sharpe/Calmar
+    # P4: intraday MDD computed from the full sub-daily series (hourly or
+    # finer). Captures peaks-and-troughs the EOD-only daily MDD misses.
+    # Always ≤ max_drawdown_pct (intraday is more conservative).
+    intraday_max_drawdown_pct: float = 0.0
+    intraday_sample_count: int = 0  # how many sub-daily points were used
 
 
 def _estimate_trade_costs(
@@ -226,19 +231,49 @@ def compute_trade_metrics(trades: list[dict]) -> TradeMetrics:
     )
 
 
-def compute_equity_metrics(equity_series: list[tuple[date, float]]) -> EquityMetrics:
+def _compute_intraday_dd(intraday_series: list[float]) -> float:
+    """Peak-to-trough on a sub-daily series. Returns negative %."""
+    if len(intraday_series) < 2:
+        return 0.0
+    peak = intraday_series[0]
+    max_dd = 0.0
+    for v in intraday_series:
+        if v > peak:
+            peak = v
+        if peak > 0:
+            dd = (v - peak) / peak
+            if dd < max_dd:
+                max_dd = dd
+    return round(max_dd * 100, 2)
+
+
+def compute_equity_metrics(
+    equity_series: list[tuple[date, float]],
+    intraday_values: list[float] | None = None,
+) -> EquityMetrics:
     """Compute equity-curve-based metrics from daily snapshots.
 
     Args:
-        equity_series: list of (date, equity_value) sorted ascending.
-                       equity_value should be cost-adjusted Net Equity.
+        equity_series: list of (date, equity_value) sorted ascending — one
+                       point per trading day (last sample of the day).
+                       Used for daily-return-based stats (CAGR, Sharpe,
+                       Sortino, daily MDD).
+        intraday_values: optional ordered list of equity values at higher
+                       frequency (hourly or finer). Used for intraday MDD
+                       which catches peaks/troughs the daily series misses.
     """
     n = len(equity_series)
     if n < 2:
         zero = EquityMetrics(0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-                             sample_days=n, sufficient_samples=False)
+                             sample_days=n, sufficient_samples=False,
+                             intraday_max_drawdown_pct=0.0,
+                             intraday_sample_count=0)
         if equity_series:
             zero.start_equity = zero.end_equity = equity_series[0][1]
+        # Even with <2 daily samples, intraday series may have lots
+        if intraday_values and len(intraday_values) >= 2:
+            zero.intraday_max_drawdown_pct = _compute_intraday_dd(intraday_values)
+            zero.intraday_sample_count = len(intraday_values)
         return zero
 
     start = equity_series[0][1]
@@ -311,6 +346,10 @@ def compute_equity_metrics(equity_series: list[tuple[date, float]]) -> EquityMet
 
     calmar = (cagr / abs(max_dd)) if max_dd < 0 else 0.0
 
+    intraday_dd = (
+        _compute_intraday_dd(intraday_values) if intraday_values else round(max_dd * 100, 2)
+    )
+
     return EquityMetrics(
         start_equity=round(start, 2),
         end_equity=round(end, 2),
@@ -324,7 +363,45 @@ def compute_equity_metrics(equity_series: list[tuple[date, float]]) -> EquityMet
         exposure_pct=0.0,  # populated by caller from snapshots
         sample_days=n,
         sufficient_samples=(len(returns) >= 7),
+        intraday_max_drawdown_pct=intraday_dd,
+        intraday_sample_count=len(intraday_values) if intraday_values else 0,
     )
+
+
+_BENCHMARK_CACHE: dict[str, tuple[float, float]] = {}  # key → (return_pct, fetched_at_ts)
+_BENCHMARK_TTL_SEC = 300  # 5 min
+
+
+def benchmark_return_pct(symbol: str, days: int) -> float | None:
+    """Fetch the benchmark's % return over the trailing `days` window.
+
+    Cached for 5 min so the dashboard's 60s refetch doesn't hammer yfinance.
+    Returns None on fetch failure.
+    """
+    import time as _t
+    key = f"{symbol}|{days}"
+    cached = _BENCHMARK_CACHE.get(key)
+    if cached and (_t.time() - cached[1]) < _BENCHMARK_TTL_SEC:
+        return cached[0]
+
+    try:
+        import yfinance as yf  # local import — yfinance load is slow
+        # Pull a few extra days to handle weekends/holidays around boundaries.
+        t = yf.Ticker(symbol)
+        hist = t.history(period=f"{max(days + 7, 14)}d", interval="1d")
+        if hist is None or hist.empty or len(hist) < 2:
+            return None
+        # Window: last `days` trading sessions (or what we have)
+        window = hist.tail(days + 1) if len(hist) > days + 1 else hist
+        first = float(window["Close"].iloc[0])
+        last = float(window["Close"].iloc[-1])
+        if first <= 0:
+            return None
+        ret = (last - first) / first * 100
+        _BENCHMARK_CACHE[key] = (ret, _t.time())
+        return round(ret, 2)
+    except Exception:
+        return None
 
 
 def compute_exposure_pct(snapshots: list[dict]) -> float:

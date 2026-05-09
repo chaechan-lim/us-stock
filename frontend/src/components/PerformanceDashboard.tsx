@@ -83,7 +83,7 @@ export default function PerformanceDashboard() {
       </div>
     )
   }
-  const { equity: e, trades: t } = data
+  const { equity: e, trades: t, benchmark: bm } = data
 
   const insufficient = !e.sufficient_samples
   const sampleHint = insufficient
@@ -155,16 +155,33 @@ export default function PerformanceDashboard() {
           highlight
         />
         <KpiTile
+          label={`vs ${bm.label}`}
+          value={bm.alpha_pct != null ? fmtPct(bm.alpha_pct) : '—'}
+          sub={
+            bm.return_pct != null
+              ? `${bm.label}: ${fmtPct(bm.return_pct)}`
+              : '벤치마크 가져오기 실패'
+          }
+          toneVal={tone(bm.alpha_pct)}
+          highlight
+        />
+        <KpiTile
           label="MDD"
           value={fmtPct(e.max_drawdown_pct, false)}
           sub={
-            e.max_dd_recovery_days > 0
-              ? `복구 ${e.max_dd_recovery_days}일`
-              : '낙폭 없음'
+            e.intraday_sample_count > 0 && e.intraday_max_drawdown_pct < e.max_drawdown_pct
+              ? `장중 ${fmtPct(e.intraday_max_drawdown_pct, false)} · 복구 ${e.max_dd_recovery_days || 0}일`
+              : e.max_dd_recovery_days > 0
+                ? `복구 ${e.max_dd_recovery_days}일`
+                : '낙폭 없음'
           }
           toneVal={tone(e.max_drawdown_pct)}
           highlight
         />
+      </div>
+
+      {/* 2순위: Risk-adjusted */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-2">
         <KpiTile
           label="Calmar"
           value={insufficient ? '—' : fmtNum(e.calmar_ratio)}
@@ -178,12 +195,7 @@ export default function PerformanceDashboard() {
               ? 'neu'
               : (e.calmar_ratio ?? 0) > 1 ? 'pos' : (e.calmar_ratio ?? 0) > 0 ? 'neu' : 'neg'
           }
-          highlight
         />
-      </div>
-
-      {/* 2순위: Risk-adjusted */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-2">
         <KpiTile
           label="Sharpe"
           value={insufficient ? '—' : fmtNum(e.sharpe_ratio)}
@@ -209,16 +221,16 @@ export default function PerformanceDashboard() {
           value={`${e.exposure_pct.toFixed(0)}%`}
           sub="평균 투자비율"
         />
+      </div>
+
+      {/* 3순위: Trade-level */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-2">
         <KpiTile
           label="Net PnL"
           value={fmtMoney(t.net_profit)}
           sub={`수수료 ${fmtMoney(-t.estimated_fees)} / 슬리피지 ${fmtMoney(-t.estimated_slippage)}`}
           toneVal={tone(t.net_profit)}
         />
-      </div>
-
-      {/* 3순위: Trade-level */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-2">
         <KpiTile
           label="Net PF"
           value={t.net_pf == null ? '∞' : fmtNum(t.net_pf, 2)}
@@ -234,19 +246,14 @@ export default function PerformanceDashboard() {
           toneVal={tone(t.expectancy)}
         />
         <KpiTile
-          label="라운드트립 승률"
+          label="라운드트립 WR"
           value={t.round_trips > 0 ? `${(t.round_trip_win_rate * 100).toFixed(0)}%` : '—'}
           sub={
             t.round_trips > 0
-              ? `${t.round_trip_wins}승 / ${t.round_trip_losses}패 (${t.round_trips} RT)`
+              ? `${t.round_trip_wins}승/${t.round_trip_losses}패 · Partial WR ${(t.win_rate * 100).toFixed(0)}%`
               : '진행 중 (open positions)'
           }
           toneVal={t.round_trips > 0 && t.round_trip_win_rate >= 0.5 ? 'pos' : 'neu'}
-        />
-        <KpiTile
-          label="Partial 승률"
-          value={`${(t.win_rate * 100).toFixed(0)}%`}
-          sub={`SELL ${t.wins}승/${t.losses}패 · ${t.total_trades}건`}
         />
       </div>
 
