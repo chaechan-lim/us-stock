@@ -87,23 +87,77 @@ async def list_recommendations(
 async def accept_recommendation(
     request: Request, rec_id: int, body: AcceptBody | None = None,
 ):
-    """Mark accepted. Yaml hot-update is wired in track A4; for now this
-    just records the decision so the operator can apply manually."""
+    """Apply the proposed yaml change + hot-reload + mark accepted.
+
+    A4: yaml mutation goes through services.yaml_mutator (whitelist +
+    type validation + .bak backup + atomic write). After the file is
+    updated we trigger the same reload path /strategies/reload uses, so
+    the live engines see the change without a backend restart.
+
+    Failures (path not whitelisted, type mismatch, missing key) leave
+    the recommendation as `pending` and surface a 422.
+    """
+    import logging
+    from pathlib import Path
+
     from api.trades import _session_factory
+    from services.yaml_mutator import YamlMutationError, apply_yaml_change
+
+    logger = logging.getLogger(__name__)
 
     if not _session_factory:
         raise HTTPException(503, "DB unavailable")
+
     async with _session_factory() as session:
         rec = await session.get(AgentRecommendation, rec_id)
         if not rec:
             raise HTTPException(404, "recommendation not found")
         if rec.status != "pending":
             raise HTTPException(409, f"already {rec.status}")
+
+        # Step 1: apply yaml change (synchronous file IO).
+        yaml_path = Path(__file__).resolve().parent.parent.parent / "config" / "strategies.yaml"
+        try:
+            old_value, new_value = apply_yaml_change(
+                yaml_path, rec.param_path, rec.proposed_value,
+            )
+        except YamlMutationError as e:
+            logger.warning(
+                "Recommendation #%d apply failed: %s", rec.id, e,
+            )
+            raise HTTPException(422, f"yaml apply failed: {e}") from e
+
+        # Step 2: trigger hot-reload so the engines pick up the change.
+        try:
+            registry = getattr(request.app.state, "strategy_registry", None) \
+                or getattr(request.app.state, "registry", None)
+            if registry and hasattr(registry, "reload_config"):
+                registry.reload_config()
+            apply_kr = getattr(request.app.state, "apply_kr_eval_overrides", None)
+            apply_us = getattr(request.app.state, "apply_us_eval_overrides", None)
+            if apply_kr:
+                apply_kr()
+            if apply_us:
+                apply_us()
+            logger.info("Recommendation #%d reload triggered", rec.id)
+        except Exception as e:
+            # Yaml is already written. Log + continue — operator can
+            # restart manually if reload glitches.
+            logger.error(
+                "Recommendation #%d hot-reload failed (yaml already applied): %s",
+                rec.id, e,
+            )
+
+        # Step 3: mark accepted.
         rec.status = "accepted"
         rec.applied_at = datetime.utcnow()
         if body and body.notes:
             rec.notes = body.notes
         await session.commit()
+        logger.info(
+            "Recommendation #%d accepted: %s : %r → %r",
+            rec.id, rec.param_path, old_value, new_value,
+        )
         return _to_dto(rec)
 
 
