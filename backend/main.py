@@ -1,5 +1,6 @@
 """US Stock Auto-Trading Engine - FastAPI Application."""
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -1587,6 +1588,23 @@ async def lifespan(app: FastAPI):
                         .limit(len(proposed))
                     )).scalars().all()
                     new_rec_ids = [r.id for r in rows]
+
+                # B1: kick off auto-backtest validation in the background
+                # for each new recommendation. Each runs sequentially via
+                # the validator's lock so they don't fight for CPU/cache
+                # with the live engines.
+                if new_rec_ids:
+                    from services.recommendation_validator import (
+                        validate_recommendation,
+                    )
+                    for rid in new_rec_ids:
+                        asyncio.create_task(
+                            validate_recommendation(rid, session_factory)
+                        )
+                    logger.info(
+                        "Spawned %d backtest validations for new recommendations",
+                        len(new_rec_ids),
+                    )
 
             if summary.get("summary"):
                 lines = [
