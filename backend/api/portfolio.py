@@ -805,6 +805,7 @@ async def performance_metrics(
     else:
         history = []
 
+    intraday_values: list[float] = []
     for p in history:
         ds = (p.get("date", "") or "")[:10]
         if not ds:
@@ -815,7 +816,9 @@ async def performance_metrics(
             continue
         v = p.get("total_value_krw") or p.get("total_value_usd") or 0
         if v:
-            per_day[d] = float(v)
+            v_f = float(v)
+            per_day[d] = v_f       # last value of day overrides
+            intraday_values.append(v_f)
     equity_series = list(per_day.items())
 
     # Exposure uses the per-market series (has cash + invested fields).
@@ -840,7 +843,7 @@ async def performance_metrics(
         except Exception:
             pass
 
-    equity_metrics = compute_equity_metrics(equity_series)
+    equity_metrics = compute_equity_metrics(equity_series, intraday_values=intraday_values)
     equity_metrics.exposure_pct = compute_exposure_pct(snapshots)
 
     # 2. Trade-level metrics (cost-adjusted)

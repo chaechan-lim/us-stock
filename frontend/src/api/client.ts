@@ -290,6 +290,8 @@ export interface PerformanceMetrics {
     exposure_pct: number
     sample_days: number
     sufficient_samples: boolean
+    intraday_max_drawdown_pct: number
+    intraday_sample_count: number
   }
   trades: {
     total_trades: number

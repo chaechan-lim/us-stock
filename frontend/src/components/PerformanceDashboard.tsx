@@ -169,9 +169,11 @@ export default function PerformanceDashboard() {
           label="MDD"
           value={fmtPct(e.max_drawdown_pct, false)}
           sub={
-            e.max_dd_recovery_days > 0
-              ? `복구 ${e.max_dd_recovery_days}일`
-              : '낙폭 없음'
+            e.intraday_sample_count > 0 && e.intraday_max_drawdown_pct < e.max_drawdown_pct
+              ? `장중 ${fmtPct(e.intraday_max_drawdown_pct, false)} · 복구 ${e.max_dd_recovery_days || 0}일`
+              : e.max_dd_recovery_days > 0
+                ? `복구 ${e.max_dd_recovery_days}일`
+                : '낙폭 없음'
           }
           toneVal={tone(e.max_drawdown_pct)}
           highlight
