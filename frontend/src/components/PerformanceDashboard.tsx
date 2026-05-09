@@ -230,18 +230,23 @@ export default function PerformanceDashboard() {
         <KpiTile
           label="Expectancy"
           value={fmtMoney(t.expectancy)}
-          sub="거래당 평균 기대값"
+          sub={`평균 W ${fmtNum(t.avg_win, 0)} / L ${fmtNum(t.avg_loss, 0)}`}
           toneVal={tone(t.expectancy)}
         />
         <KpiTile
-          label="승률"
-          value={`${(t.win_rate * 100).toFixed(0)}%`}
-          sub={`${t.wins}승 / ${t.losses}패 (${t.total_trades}건)`}
+          label="라운드트립 승률"
+          value={t.round_trips > 0 ? `${(t.round_trip_win_rate * 100).toFixed(0)}%` : '—'}
+          sub={
+            t.round_trips > 0
+              ? `${t.round_trip_wins}승 / ${t.round_trip_losses}패 (${t.round_trips} RT)`
+              : '진행 중 (open positions)'
+          }
+          toneVal={t.round_trips > 0 && t.round_trip_win_rate >= 0.5 ? 'pos' : 'neu'}
         />
         <KpiTile
-          label="평균 손익"
-          value={`+${fmtNum(t.avg_win, 0)} / ${fmtNum(t.avg_loss, 0)}`}
-          sub="W / L"
+          label="Partial 승률"
+          value={`${(t.win_rate * 100).toFixed(0)}%`}
+          sub={`SELL ${t.wins}승/${t.losses}패 · ${t.total_trades}건`}
         />
       </div>
 

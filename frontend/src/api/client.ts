@@ -306,6 +306,11 @@ export interface PerformanceMetrics {
     estimated_slippage: number
     net_profit: number
     net_pf: number | null
+    round_trips: number
+    round_trip_wins: number
+    round_trip_losses: number
+    round_trip_win_rate: number
+    round_trip_avg_pnl: number
   }
 }
 export const fetchPerformanceMetrics = (days = 30, market?: string) =>
