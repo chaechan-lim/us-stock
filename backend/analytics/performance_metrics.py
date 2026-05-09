@@ -38,7 +38,7 @@ class TradeMetrics:
     total_trades: int
     wins: int
     losses: int
-    win_rate: float           # 0.0–1.0
+    win_rate: float           # 0.0–1.0  (per-SELL-event WR — partials count individually)
     avg_win: float            # in trade currency
     avg_loss: float           # negative number
     gross_profit: float       # sum of positive PnL
@@ -49,6 +49,14 @@ class TradeMetrics:
     estimated_slippage: float # |filled_price - intended_price| × qty across trades
     net_profit: float         # gross_profit - gross_loss - fees - slippage
     net_pf: float             # (gross_profit - costs/2) / (gross_loss + costs/2)
+    # Round-trip view: partial SELLs (profit_taking + trailing_stop on the
+    # same entry) collapsed back to single trades. Tiered trailing makes
+    # the per-SELL count and WR overstate the "real" round-trip count.
+    round_trips: int = 0
+    round_trip_wins: int = 0
+    round_trip_losses: int = 0
+    round_trip_win_rate: float = 0.0
+    round_trip_avg_pnl: float = 0.0
 
 
 @dataclass
@@ -90,6 +98,61 @@ def _estimate_trade_costs(
     return fees, slippage
 
 
+def _aggregate_round_trips(trades: list[dict]) -> tuple[int, int, int, float]:
+    """Collapse partial SELLs (e.g. profit_taking + trailing_stop on the
+    same entry) into round-trips. Walks symbol-level events in time order;
+    a round-trip closes when the running position returns to 0.
+
+    Returns (round_trips, wins, losses, total_pnl).
+    """
+    from collections import defaultdict
+
+    # Group events by symbol, sort by filled_at/created_at.
+    by_sym: dict[str, list[dict]] = defaultdict(list)
+    for t in trades:
+        if t.get("symbol"):
+            by_sym[t["symbol"]].append(t)
+
+    rt_count = 0
+    wins = 0
+    losses = 0
+    total_pnl = 0.0
+
+    for sym, events in by_sym.items():
+        events.sort(key=lambda e: e.get("filled_at") or e.get("created_at") or "")
+        position = 0.0
+        accum_pnl = 0.0
+        in_trip = False
+        for e in events:
+            qty = float(e.get("quantity") or 0)
+            if e.get("side") == "BUY":
+                if not in_trip and position == 0:
+                    in_trip = True
+                    accum_pnl = 0.0
+                position += qty
+            elif e.get("side") == "SELL":
+                pnl = e.get("pnl")
+                if pnl is not None:
+                    try:
+                        accum_pnl += float(pnl)
+                    except (TypeError, ValueError):
+                        pass
+                position -= qty
+                # Round-trip closes when we've sold down to (or past) 0.
+                if position <= 0.0001 and in_trip:
+                    rt_count += 1
+                    total_pnl += accum_pnl
+                    if accum_pnl > 0:
+                        wins += 1
+                    elif accum_pnl < 0:
+                        losses += 1
+                    # else: zero PnL — neither win nor loss
+                    in_trip = False
+                    position = max(0.0, position)
+                    accum_pnl = 0.0
+    return rt_count, wins, losses, total_pnl
+
+
 def compute_trade_metrics(trades: list[dict]) -> TradeMetrics:
     """Aggregate trade-level stats. Each `trade` is a dict with keys side,
     pnl, market, quantity, filled_price, price (intended)."""
@@ -97,7 +160,10 @@ def compute_trade_metrics(trades: list[dict]) -> TradeMetrics:
 
     if not sells:
         return TradeMetrics(0, 0, 0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-                            0.0, 0.0, 0.0, 0.0)
+                            0.0, 0.0, 0.0, 0.0,
+                            round_trips=0, round_trip_wins=0,
+                            round_trip_losses=0, round_trip_win_rate=0.0,
+                            round_trip_avg_pnl=0.0)
 
     pnls = [float(t["pnl"]) for t in sells]
     wins = [p for p in pnls if p > 0]
@@ -133,6 +199,10 @@ def compute_trade_metrics(trades: list[dict]) -> TradeMetrics:
     else:
         net_pf = 0.0
 
+    rt_count, rt_wins, rt_losses, rt_total_pnl = _aggregate_round_trips(trades)
+    rt_win_rate = (rt_wins / rt_count) if rt_count else 0.0
+    rt_avg_pnl = (rt_total_pnl / rt_count) if rt_count else 0.0
+
     return TradeMetrics(
         total_trades=n,
         wins=n_w,
@@ -148,6 +218,11 @@ def compute_trade_metrics(trades: list[dict]) -> TradeMetrics:
         estimated_slippage=round(slip_total, 2),
         net_profit=round(net_profit, 2),
         net_pf=round(net_pf, 3) if net_pf != float("inf") else float("inf"),
+        round_trips=rt_count,
+        round_trip_wins=rt_wins,
+        round_trip_losses=rt_losses,
+        round_trip_win_rate=round(rt_win_rate, 4),
+        round_trip_avg_pnl=round(rt_avg_pnl, 2),
     )
 
 

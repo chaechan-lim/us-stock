@@ -56,6 +56,72 @@ class TestTradeMetrics:
         assert m.gross_pf == float("inf")
         assert m.win_rate == 1.0
 
+    def test_round_trip_collapses_partial_sells(self):
+        """1 BUY → 3 partial SELLs (profit_taking + tier + trailing) should
+        count as 1 round-trip in the round-trip metrics, not 3.
+        Per-SELL WR can still report 3 wins, but rt_wins == 1."""
+        trades = [
+            {"symbol": "ATOM", "side": "BUY", "pnl": None, "market": "US",
+             "quantity": 6, "filled_price": 10.0, "price": 10.0,
+             "filled_at": "2026-05-08 10:00"},
+            {"symbol": "ATOM", "side": "SELL", "pnl": 1.5, "market": "US",
+             "quantity": 2, "filled_price": 10.5, "price": 10.5,
+             "filled_at": "2026-05-08 11:00"},
+            {"symbol": "ATOM", "side": "SELL", "pnl": 1.2, "market": "US",
+             "quantity": 2, "filled_price": 10.4, "price": 10.4,
+             "filled_at": "2026-05-08 12:00"},
+            {"symbol": "ATOM", "side": "SELL", "pnl": 0.6, "market": "US",
+             "quantity": 2, "filled_price": 10.2, "price": 10.2,
+             "filled_at": "2026-05-08 13:00"},
+        ]
+        m = compute_trade_metrics(trades)
+        # Per-SELL: 3 trades, 3 wins
+        assert m.total_trades == 3
+        assert m.win_rate == 1.0
+        # Round-trip: 1 round-trip, 1 win, total PnL 1.5+1.2+0.6
+        assert m.round_trips == 1
+        assert m.round_trip_wins == 1
+        assert m.round_trip_losses == 0
+        assert m.round_trip_avg_pnl == 3.3
+
+    def test_round_trip_open_position_skipped(self):
+        """If position never returns to 0 (still held), no round-trip recorded."""
+        trades = [
+            {"symbol": "X", "side": "BUY", "pnl": None, "market": "US",
+             "quantity": 5, "filled_price": 10, "price": 10,
+             "filled_at": "2026-05-08 10:00"},
+            {"symbol": "X", "side": "SELL", "pnl": 1.0, "market": "US",
+             "quantity": 2, "filled_price": 11, "price": 11,
+             "filled_at": "2026-05-08 11:00"},
+            # position still 3 — no round-trip yet
+        ]
+        m = compute_trade_metrics(trades)
+        assert m.round_trips == 0
+
+    def test_round_trip_mixed_wins_losses(self):
+        """Two complete round-trips, one positive PnL, one negative."""
+        trades = [
+            # Trip 1: +5 net
+            {"symbol": "A", "side": "BUY", "pnl": None, "market": "US",
+             "quantity": 1, "filled_price": 100, "price": 100,
+             "filled_at": "2026-05-08 09:00"},
+            {"symbol": "A", "side": "SELL", "pnl": 5, "market": "US",
+             "quantity": 1, "filled_price": 105, "price": 105,
+             "filled_at": "2026-05-08 10:00"},
+            # Trip 2: -3 net
+            {"symbol": "A", "side": "BUY", "pnl": None, "market": "US",
+             "quantity": 1, "filled_price": 105, "price": 105,
+             "filled_at": "2026-05-08 11:00"},
+            {"symbol": "A", "side": "SELL", "pnl": -3, "market": "US",
+             "quantity": 1, "filled_price": 102, "price": 102,
+             "filled_at": "2026-05-08 12:00"},
+        ]
+        m = compute_trade_metrics(trades)
+        assert m.round_trips == 2
+        assert m.round_trip_wins == 1
+        assert m.round_trip_losses == 1
+        assert m.round_trip_win_rate == 0.5
+
 
 class TestEquityMetrics:
     def test_flat_equity_returns_zero(self):

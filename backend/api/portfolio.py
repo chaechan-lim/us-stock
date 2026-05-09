@@ -855,12 +855,15 @@ async def performance_metrics(
         orders = [o for o in orders if (o.filled_at or o.created_at or cutoff) >= cutoff]
         trade_dicts = [
             {
+                "symbol": o.symbol,
                 "side": o.side,
                 "pnl": getattr(o, "pnl", None),
                 "market": getattr(o, "market", "US"),
                 "quantity": getattr(o, "filled_quantity", None) or o.quantity,
                 "filled_price": getattr(o, "filled_price", None),
                 "price": o.price,
+                "filled_at": str(o.filled_at) if o.filled_at else "",
+                "created_at": str(o.created_at) if o.created_at else "",
             }
             for o in orders
             if o.status in ("filled", "not_found")
