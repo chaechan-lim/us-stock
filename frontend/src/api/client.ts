@@ -312,6 +312,12 @@ export interface PerformanceMetrics {
     round_trip_win_rate: number
     round_trip_avg_pnl: number
   }
+  benchmark: {
+    symbol: string
+    label: string
+    return_pct: number | null
+    alpha_pct: number | null
+  }
 }
 export const fetchPerformanceMetrics = (days = 30, market?: string) =>
   api.get<PerformanceMetrics>('/portfolio/metrics', {

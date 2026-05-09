@@ -327,6 +327,42 @@ def compute_equity_metrics(equity_series: list[tuple[date, float]]) -> EquityMet
     )
 
 
+_BENCHMARK_CACHE: dict[str, tuple[float, float]] = {}  # key → (return_pct, fetched_at_ts)
+_BENCHMARK_TTL_SEC = 300  # 5 min
+
+
+def benchmark_return_pct(symbol: str, days: int) -> float | None:
+    """Fetch the benchmark's % return over the trailing `days` window.
+
+    Cached for 5 min so the dashboard's 60s refetch doesn't hammer yfinance.
+    Returns None on fetch failure.
+    """
+    import time as _t
+    key = f"{symbol}|{days}"
+    cached = _BENCHMARK_CACHE.get(key)
+    if cached and (_t.time() - cached[1]) < _BENCHMARK_TTL_SEC:
+        return cached[0]
+
+    try:
+        import yfinance as yf  # local import — yfinance load is slow
+        # Pull a few extra days to handle weekends/holidays around boundaries.
+        t = yf.Ticker(symbol)
+        hist = t.history(period=f"{max(days + 7, 14)}d", interval="1d")
+        if hist is None or hist.empty or len(hist) < 2:
+            return None
+        # Window: last `days` trading sessions (or what we have)
+        window = hist.tail(days + 1) if len(hist) > days + 1 else hist
+        first = float(window["Close"].iloc[0])
+        last = float(window["Close"].iloc[-1])
+        if first <= 0:
+            return None
+        ret = (last - first) / first * 100
+        _BENCHMARK_CACHE[key] = (ret, _t.time())
+        return round(ret, 2)
+    except Exception:
+        return None
+
+
 def compute_exposure_pct(snapshots: list[dict]) -> float:
     """Average position-value / equity ratio across snapshots."""
     if not snapshots:
