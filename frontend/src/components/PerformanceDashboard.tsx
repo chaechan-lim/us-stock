@@ -8,6 +8,12 @@ const WINDOWS = [
   { days: 90, label: '90d' },
 ]
 
+const MARKETS = [
+  { key: '', label: 'ALL' },
+  { key: 'KR', label: 'KR' },
+  { key: 'US', label: 'US' },
+]
+
 function fmtPct(v: number | null | undefined, signed = true) {
   if (v == null) return '—'
   const s = signed && v > 0 ? '+' : ''
@@ -62,7 +68,8 @@ function KpiTile({ label, value, sub, toneVal = 'neu', highlight }: KpiTileProps
 
 export default function PerformanceDashboard() {
   const [days, setDays] = useState(30)
-  const { data, isLoading, error } = usePerformanceMetrics(days)
+  const [market, setMarket] = useState<string>('')
+  const { data, isLoading, error } = usePerformanceMetrics(days, market || undefined)
 
   if (isLoading) {
     return (
@@ -78,25 +85,54 @@ export default function PerformanceDashboard() {
   }
   const { equity: e, trades: t } = data
 
+  const insufficient = !e.sufficient_samples
+  const sampleHint = insufficient
+    ? `데이터 ${e.sample_days}/7일`
+    : null
+
   return (
     <div className="space-y-3">
-      {/* Window selector */}
-      <div className="flex items-center gap-2">
-        <span className="text-xs text-gray-500">기간:</span>
-        {WINDOWS.map(w => (
-          <button
-            key={w.days}
-            onClick={() => setDays(w.days)}
-            className={clsx(
-              'px-2.5 py-1 rounded-md text-xs font-medium transition-colors',
-              days === w.days
-                ? 'bg-blue-600 text-white'
-                : 'bg-gray-100 text-gray-700 hover:bg-gray-200',
-            )}
-          >
-            {w.label}
-          </button>
-        ))}
+      {/* Window + Market selectors */}
+      <div className="flex items-center gap-3 flex-wrap">
+        <div className="flex items-center gap-2">
+          <span className="text-xs text-gray-500">기간:</span>
+          {WINDOWS.map(w => (
+            <button
+              key={w.days}
+              onClick={() => setDays(w.days)}
+              className={clsx(
+                'px-2.5 py-1 rounded-md text-xs font-medium transition-colors',
+                days === w.days
+                  ? 'bg-blue-600 text-white'
+                  : 'bg-gray-100 text-gray-700 hover:bg-gray-200',
+              )}
+            >
+              {w.label}
+            </button>
+          ))}
+        </div>
+        <div className="flex items-center gap-2">
+          <span className="text-xs text-gray-500">시장:</span>
+          {MARKETS.map(m => (
+            <button
+              key={m.key}
+              onClick={() => setMarket(m.key)}
+              className={clsx(
+                'px-2.5 py-1 rounded-md text-xs font-medium transition-colors',
+                market === m.key
+                  ? 'bg-purple-600 text-white'
+                  : 'bg-gray-100 text-gray-700 hover:bg-gray-200',
+              )}
+            >
+              {m.label}
+            </button>
+          ))}
+        </div>
+        {sampleHint && (
+          <div className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 px-2 py-0.5 rounded">
+            ⚠️ {sampleHint} — 일부 지표 신뢰도 낮음
+          </div>
+        )}
       </div>
 
       {/* 1순위: Equity-based primary metrics */}
@@ -110,7 +146,11 @@ export default function PerformanceDashboard() {
         <KpiTile
           label="Net 수익률"
           value={fmtPct(e.net_return_pct)}
-          sub={`연환산 ${fmtPct(e.annualized_return_pct)}`}
+          sub={
+            insufficient
+              ? `연환산: 데이터 ${e.sample_days}/7일`
+              : `연환산 ${fmtPct(e.annualized_return_pct)}`
+          }
           toneVal={tone(e.net_return_pct)}
           highlight
         />
@@ -127,10 +167,16 @@ export default function PerformanceDashboard() {
         />
         <KpiTile
           label="Calmar"
-          value={fmtNum(e.calmar_ratio)}
-          sub="연수익률 / |MDD|"
+          value={insufficient ? '—' : fmtNum(e.calmar_ratio)}
+          sub={
+            insufficient
+              ? `데이터 ${e.sample_days}/7일 필요`
+              : '연수익률 / |MDD|'
+          }
           toneVal={
-            (e.calmar_ratio ?? 0) > 1 ? 'pos' : (e.calmar_ratio ?? 0) > 0 ? 'neu' : 'neg'
+            insufficient
+              ? 'neu'
+              : (e.calmar_ratio ?? 0) > 1 ? 'pos' : (e.calmar_ratio ?? 0) > 0 ? 'neu' : 'neg'
           }
           highlight
         />
@@ -140,15 +186,23 @@ export default function PerformanceDashboard() {
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-2">
         <KpiTile
           label="Sharpe"
-          value={fmtNum(e.sharpe_ratio)}
-          sub="일간 수익률 기반 (×√252)"
-          toneVal={tone(e.sharpe_ratio)}
+          value={insufficient ? '—' : fmtNum(e.sharpe_ratio)}
+          sub={
+            insufficient
+              ? `데이터 ${e.sample_days}/7일 필요`
+              : '일간 수익률 기반 (×√252)'
+          }
+          toneVal={insufficient ? 'neu' : tone(e.sharpe_ratio)}
         />
         <KpiTile
           label="Sortino"
-          value={fmtNum(e.sortino_ratio)}
-          sub="하락 변동성만"
-          toneVal={tone(e.sortino_ratio)}
+          value={insufficient ? '—' : fmtNum(e.sortino_ratio)}
+          sub={
+            insufficient
+              ? `데이터 ${e.sample_days}/7일 필요`
+              : '하락 변동성만'
+          }
+          toneVal={insufficient ? 'neu' : tone(e.sortino_ratio)}
         />
         <KpiTile
           label="Exposure"

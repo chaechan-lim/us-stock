@@ -773,39 +773,60 @@ async def performance_metrics(
     from api.trades import _session_factory
     from db.trade_repository import TradeRepository
 
-    # 1. Equity series — combined integrated total when available
-    pm = getattr(request.app.state, "kr_portfolio_manager", None)
-    if not pm:
-        pm = getattr(request.app.state, "portfolio_manager", None)
-    equity_series: list[tuple[_date, float]] = []
-    snapshots: list[dict] = []
-    if pm:
-        history = await pm.get_combined_equity_history(days=days) if hasattr(
-            pm, "get_combined_equity_history"
-        ) else []
-        if not history:
-            history = await pm.get_equity_history(days=days)
-        # Group to one point per date (last value of day)
-        from collections import OrderedDict
-        per_day: OrderedDict[_date, float] = OrderedDict()
-        for p in history:
-            ds = (p.get("date", "") or "")[:10]
-            if not ds:
-                continue
-            try:
-                d = _date.fromisoformat(ds)
-            except Exception:
-                continue
-            v = p.get("total_value_krw") or p.get("total_value_usd") or 0
-            if v:
-                per_day[d] = float(v)
-        equity_series = list(per_day.items())
-
-    # Exposure uses the per-market series (has cash + invested fields).
-    # The combined endpoint exposes only the integrated total, no cash split.
+    # 1. Equity series — depends on `market` filter
+    #    market=None / "ALL" : KR portfolio_manager.get_combined_equity_history
+    #                          (integrated_total_krw — KIS 통합 총자산)
+    #    market="KR" / "US"  : per-market portfolio_manager.get_equity_history
+    #                          (each manager records its own balance.total)
     us_pm = getattr(request.app.state, "portfolio_manager", None)
     kr_pm = getattr(request.app.state, "kr_portfolio_manager", None)
-    for src in (us_pm, kr_pm):
+    equity_series: list[tuple[_date, float]] = []
+    snapshots: list[dict] = []
+
+    from collections import OrderedDict
+    per_day: OrderedDict[_date, float] = OrderedDict()
+
+    async def _fetch_history(manager, combined: bool):
+        if not manager:
+            return []
+        if combined and hasattr(manager, "get_combined_equity_history"):
+            data = await manager.get_combined_equity_history(days=days)
+            if data:
+                return data
+        return await manager.get_equity_history(days=days)
+
+    if not market or market.upper() == "ALL":
+        history = await _fetch_history(kr_pm or us_pm, combined=True)
+    elif market.upper() == "US":
+        history = await _fetch_history(us_pm, combined=False)
+    elif market.upper() == "KR":
+        history = await _fetch_history(kr_pm, combined=False)
+    else:
+        history = []
+
+    for p in history:
+        ds = (p.get("date", "") or "")[:10]
+        if not ds:
+            continue
+        try:
+            d = _date.fromisoformat(ds)
+        except Exception:
+            continue
+        v = p.get("total_value_krw") or p.get("total_value_usd") or 0
+        if v:
+            per_day[d] = float(v)
+    equity_series = list(per_day.items())
+
+    # Exposure uses the per-market series (has cash + invested fields).
+    if not market or market.upper() == "ALL":
+        sources = [us_pm, kr_pm]
+    elif market.upper() == "US":
+        sources = [us_pm]
+    elif market.upper() == "KR":
+        sources = [kr_pm]
+    else:
+        sources = []
+    for src in sources:
         if not src:
             continue
         try:
