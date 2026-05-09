@@ -288,6 +288,8 @@ export interface PerformanceMetrics {
     sharpe_ratio: number
     sortino_ratio: number
     exposure_pct: number
+    sample_days: number
+    sufficient_samples: boolean
   }
   trades: {
     total_trades: number

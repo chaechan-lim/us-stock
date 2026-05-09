@@ -63,6 +63,8 @@ class EquityMetrics:
     sharpe_ratio: float          # daily-return-based, annualized (252)
     sortino_ratio: float         # like sharpe but only downside vol
     exposure_pct: float          # avg fraction of equity invested over time
+    sample_days: int = 0         # daily samples used (0 means metrics zeroed)
+    sufficient_samples: bool = False  # ≥7 days needed for Sharpe/Calmar
 
 
 def _estimate_trade_costs(
@@ -156,8 +158,10 @@ def compute_equity_metrics(equity_series: list[tuple[date, float]]) -> EquityMet
         equity_series: list of (date, equity_value) sorted ascending.
                        equity_value should be cost-adjusted Net Equity.
     """
-    if len(equity_series) < 2:
-        zero = EquityMetrics(0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+    n = len(equity_series)
+    if n < 2:
+        zero = EquityMetrics(0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                             sample_days=n, sufficient_samples=False)
         if equity_series:
             zero.start_equity = zero.end_equity = equity_series[0][1]
         return zero
@@ -243,6 +247,8 @@ def compute_equity_metrics(equity_series: list[tuple[date, float]]) -> EquityMet
         sharpe_ratio=round(sharpe, 2),
         sortino_ratio=round(sortino, 2),
         exposure_pct=0.0,  # populated by caller from snapshots
+        sample_days=n,
+        sufficient_samples=(len(returns) >= 7),
     )
 
 
