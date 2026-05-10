@@ -167,6 +167,15 @@ export function usePerformanceMetrics(days = 30, market?: string) {
   })
 }
 
+export function useRejectionFunnel() {
+  return useQuery({
+    queryKey: ['engine', 'rejection-funnel'],
+    queryFn: () => api.fetchRejectionFunnel(),
+    refetchInterval: 60_000,
+    staleTime: 30_000,
+  })
+}
+
 export function useRecommendations(status: string = 'pending') {
   return useQuery({
     queryKey: ['recommendations', status],

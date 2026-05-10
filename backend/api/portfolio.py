@@ -889,6 +889,51 @@ async def performance_metrics(
     alpha_pct = None
     if bench_ret is not None and equity_metrics.net_return_pct is not None:
         alpha_pct = round(equity_metrics.net_return_pct - bench_ret, 2)
+    # F3: exposure-adjusted benchmark — what 100% market beta would have
+    # earned at the bot's actual exposure level. Fair apples-to-apples
+    # comparison since the bot only puts ~exposure_pct% of capital at risk.
+    # Adjusted = bench × exposure_pct / 100. Idle cash earns 0.
+    adjusted_bench_ret = None
+    adjusted_alpha_pct = None
+    if bench_ret is not None and equity_metrics.exposure_pct > 0:
+        adjusted_bench_ret = round(bench_ret * equity_metrics.exposure_pct / 100, 2)
+        if equity_metrics.net_return_pct is not None:
+            adjusted_alpha_pct = round(
+                equity_metrics.net_return_pct - adjusted_bench_ret, 2
+            )
+
+    # F2: target exposure (operator's portfolio goal, set in yaml). The
+    # gap measures whether residual cash is *intended* defense or a
+    # bottleneck — large positive gap means the system can't deploy.
+    target_exposure_pct = None
+    exposure_gap_pct = None
+    try:
+        from strategies.config_loader import StrategyConfigLoader
+        loader = StrategyConfigLoader()
+        if market_upper == "KR":
+            kr_cfg = loader._config.get("markets", {}).get("KR", {})
+            target_exposure_pct = kr_cfg.get("target_exposure_pct")
+        elif market_upper == "US":
+            us_cfg = loader._config.get("markets", {}).get("US", {})
+            target_exposure_pct = us_cfg.get("target_exposure_pct")
+        else:
+            # ALL: weighted average of US + KR targets, treating each
+            # market as equal weight for simplicity (real allocation is
+            # 통합증거금-driven and time-varying).
+            us_t = loader._config.get("markets", {}).get("US", {}).get("target_exposure_pct")
+            kr_t = loader._config.get("markets", {}).get("KR", {}).get("target_exposure_pct")
+            if us_t is not None and kr_t is not None:
+                target_exposure_pct = (us_t + kr_t) / 2
+            elif us_t is not None or kr_t is not None:
+                target_exposure_pct = us_t if us_t is not None else kr_t
+    except Exception:
+        pass
+    if target_exposure_pct is not None:
+        # yaml stores as fraction (0.70); UI works in percent.
+        target_exposure_pct = round(target_exposure_pct * 100, 1)
+        exposure_gap_pct = round(
+            target_exposure_pct - equity_metrics.exposure_pct, 1
+        )
 
     # JSON-friendly: replace inf with a large sentinel
     def _safe(v):
@@ -906,6 +951,15 @@ async def performance_metrics(
             "label": bench_label,
             "return_pct": bench_ret,
             "alpha_pct": alpha_pct,
+            # F3: exposure-adjusted comparison
+            "adjusted_return_pct": adjusted_bench_ret,
+            "adjusted_alpha_pct": adjusted_alpha_pct,
+        },
+        # F2: portfolio target + gap
+        "target": {
+            "target_exposure_pct": target_exposure_pct,
+            "current_exposure_pct": equity_metrics.exposure_pct,
+            "exposure_gap_pct": exposure_gap_pct,
         },
     }
 

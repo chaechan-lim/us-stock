@@ -14,6 +14,7 @@ import ETFPanel from './ETFPanel'
 import EventsCalendar from './EventsCalendar'
 import PerformanceDashboard from './PerformanceDashboard'
 import RecommendationsPanel from './RecommendationsPanel'
+import RejectionFunnelPanel from './RejectionFunnelPanel'
 import MarketToggle from './MarketToggle'
 import AccountSelector from './AccountSelector'
 import { AccountProvider } from '../contexts/AccountContext'
@@ -86,6 +87,12 @@ function AppContent({ tab, setTab }: { tab: Tab; setTab: (t: Tab) => void }) {
             <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-4">
               <h2 className="text-sm font-semibold text-gray-900 mb-3">📊 성과 지표</h2>
               <PerformanceDashboard />
+            </div>
+            <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-4">
+              <h2 className="text-sm font-semibold text-gray-900 mb-3">
+                🚦 매수 깔때기 (오늘 거절 분포)
+              </h2>
+              <RejectionFunnelPanel />
             </div>
             <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-4">
               <h2 className="text-sm font-semibold text-gray-900 mb-3">🤖 에이전트 권고</h2>

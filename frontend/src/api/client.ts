@@ -319,12 +319,34 @@ export interface PerformanceMetrics {
     label: string
     return_pct: number | null
     alpha_pct: number | null
+    adjusted_return_pct: number | null
+    adjusted_alpha_pct: number | null
+  }
+  target: {
+    target_exposure_pct: number | null
+    current_exposure_pct: number
+    exposure_gap_pct: number | null
   }
 }
 export const fetchPerformanceMetrics = (days = 30, market?: string) =>
   api.get<PerformanceMetrics>('/portfolio/metrics', {
     params: { days, ...(market ? { market } : {}) },
   }).then(r => r.data)
+
+// F1 attribution funnel
+export interface RejectionFunnelMarket {
+  buy_signals_total: number
+  buys_placed: number
+  rejected_total: number
+  fill_rate: number | null
+  rejections: Record<string, number>
+  daily_buy_count: number
+  daily_buy_limit: number
+  daily_buy_date: string
+}
+export type RejectionFunnel = Partial<Record<'US' | 'KR', RejectionFunnelMarket>>
+export const fetchRejectionFunnel = () =>
+  api.get<RejectionFunnel>('/engine/rejection-funnel').then(r => r.data)
 
 // Self-evolution recommendations
 export interface AgentRecommendation {
