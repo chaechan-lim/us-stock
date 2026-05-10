@@ -37,12 +37,19 @@ REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 DEFAULT_OUT = REPO_ROOT / "data" / "signal_quality_snapshot.json"
 
 
-async def build_snapshot(out_path: Path, max_history: int = 5000) -> int:
+async def build_snapshot(
+    out_path: Path,
+    max_history: int = 5000,
+    min_trades_per_strategy: int = 30,
+) -> int:
     """Read closed sells from the trades table and serialize a tracker.
 
     Args:
         out_path: Where to write the JSON snapshot.
         max_history: Max trades to fetch (most recent first).
+        min_trades_per_strategy: Drop strategies under this sample size —
+            matches the live seed default in signal_quality_seed.py so the
+            backtest snapshot mirrors what the live engine actually loads.
 
     Returns:
         Total trade records ingested into the tracker.
@@ -79,6 +86,16 @@ async def build_snapshot(out_path: Path, max_history: int = 5000) -> int:
             "return_pct": float(o.pnl_pct) / 100.0,  # DB stores % (5.2 = 5.2%)
             "timestamp": ts,
         })
+
+    # Apply min-sample filter (matches live seed_tracker_from_db).
+    if min_trades_per_strategy > 1:
+        counts: dict[str, int] = {}
+        for r in records:
+            counts[r["strategy"]] = counts.get(r["strategy"], 0) + 1
+        dropped = {s for s, c in counts.items() if c < min_trades_per_strategy}
+        if dropped:
+            records = [r for r in records if r["strategy"] not in dropped]
+            print(f"Dropped under-sampled strategies (<{min_trades_per_strategy}): {sorted(dropped)}")
 
     n = tracker.seed_from_trades(records)
 

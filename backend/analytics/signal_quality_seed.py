@@ -27,6 +27,7 @@ async def seed_tracker_from_db(
     *,
     market: str | None = None,
     max_history: int = 5000,
+    min_trades_per_strategy: int = 30,
 ) -> int:
     """Seed `tracker` from filled SELLs in the orders table.
 
@@ -37,6 +38,12 @@ async def seed_tracker_from_db(
         market: Optional 'US' or 'KR' filter — when set, only orders for
             that market are seeded.
         max_history: Cap on rows pulled from DB (most recent first).
+        min_trades_per_strategy: Strategies with fewer than this many
+            qualifying SELLs are skipped — Kelly sizing on small samples
+            is noise (e.g. PF 10 from 3 trades). Default 30 was chosen
+            after the A/B backtest at compare_signal_quality_seed.py
+            showed that seeding all strategies regressed 2y Ret by 2.9pp
+            because tiny-sample strategies got over-sized.
 
     Returns:
         Count of records ingested. Zero on empty DB or no closed SELLs.
@@ -71,6 +78,21 @@ async def seed_tracker_from_db(
             "timestamp": ts,
         })
 
+    # Filter: drop strategies below the min-sample threshold. Their Kelly
+    # stats would be noise (e.g. 3 wins/0 losses → PF=∞ → over-sized).
+    if min_trades_per_strategy > 1:
+        counts: dict[str, int] = {}
+        for r in records:
+            counts[r["strategy"]] = counts.get(r["strategy"], 0) + 1
+        dropped = {s for s, c in counts.items() if c < min_trades_per_strategy}
+        if dropped:
+            records = [r for r in records if r["strategy"] not in dropped]
+            logger.info(
+                "SignalQualityTracker seed: dropped %d under-sampled strategies "
+                "(<%d trades): %s",
+                len(dropped), min_trades_per_strategy, sorted(dropped),
+            )
+
     n = tracker.seed_from_trades(records)
     if n > 0:
         logger.info(
@@ -80,7 +102,8 @@ async def seed_tracker_from_db(
         )
     else:
         logger.info(
-            "SignalQualityTracker seed empty (market=%s) — DB has no closed SELLs",
-            market or "ALL",
+            "SignalQualityTracker seed empty (market=%s) — DB has no closed SELLs "
+            "with ≥%d trades per strategy",
+            market or "ALL", min_trades_per_strategy,
         )
     return n

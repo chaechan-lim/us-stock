@@ -71,7 +71,7 @@ class TestSeedTrackerFromDb:
             _order(buy_strategy="supertrend", strategy_name="supertrend:trailing_stop", pnl_pct=8.0),
             _order(buy_strategy="dual_momentum", strategy_name="dual_momentum", pnl_pct=-3.0),
         ]
-        n = await seed_tracker_from_db(tracker, _factory(orders))
+        n = await seed_tracker_from_db(tracker, _factory(orders), min_trades_per_strategy=1)
         assert n == 2
         assert tracker.get_metrics("supertrend").total_trades == 1
         assert tracker.get_metrics("dual_momentum").total_trades == 1
@@ -81,7 +81,7 @@ class TestSeedTrackerFromDb:
         """When buy_strategy is None, fall back to SELL strategy_name and strip ':role'."""
         tracker = SignalQualityTracker()
         o = _order(buy_strategy=None, strategy_name="supertrend:stop_loss")
-        n = await seed_tracker_from_db(tracker, _factory([o]))
+        n = await seed_tracker_from_db(tracker, _factory([o]), min_trades_per_strategy=1)
         assert n == 1
         # Bucketed under bare 'supertrend', not 'supertrend:stop_loss'
         assert tracker.get_metrics("supertrend").total_trades == 1
@@ -90,21 +90,21 @@ class TestSeedTrackerFromDb:
     async def test_skips_buy_orders(self):
         tracker = SignalQualityTracker()
         orders = [_order(side="BUY")]
-        n = await seed_tracker_from_db(tracker, _factory(orders))
+        n = await seed_tracker_from_db(tracker, _factory(orders), min_trades_per_strategy=1)
         assert n == 0
 
     @pytest.mark.asyncio
     async def test_skips_unfilled(self):
         tracker = SignalQualityTracker()
         orders = [_order(status="cancelled"), _order(status="error")]
-        n = await seed_tracker_from_db(tracker, _factory(orders))
+        n = await seed_tracker_from_db(tracker, _factory(orders), min_trades_per_strategy=1)
         assert n == 0
 
     @pytest.mark.asyncio
     async def test_skips_null_pnl(self):
         tracker = SignalQualityTracker()
         orders = [_order(pnl_pct=None)]
-        n = await seed_tracker_from_db(tracker, _factory(orders))
+        n = await seed_tracker_from_db(tracker, _factory(orders), min_trades_per_strategy=1)
         assert n == 0
 
     @pytest.mark.asyncio
@@ -114,7 +114,7 @@ class TestSeedTrackerFromDb:
             _order(market="US", buy_strategy="supertrend", pnl_pct=5.0),
             _order(market="KR", buy_strategy="dual_momentum", pnl_pct=2.0),
         ]
-        n = await seed_tracker_from_db(tracker, _factory(orders), market="US")
+        n = await seed_tracker_from_db(tracker, _factory(orders), market="US", min_trades_per_strategy=1)
         assert n == 1
         assert tracker.get_metrics("supertrend").total_trades == 1
         assert tracker.get_metrics("dual_momentum").total_trades == 0
@@ -124,6 +124,48 @@ class TestSeedTrackerFromDb:
         """DB pnl_pct=5.2 (percent) → tracker stores 0.052 (fraction)."""
         tracker = SignalQualityTracker()
         orders = [_order(buy_strategy="supertrend", pnl_pct=5.2)]
-        await seed_tracker_from_db(tracker, _factory(orders))
+        await seed_tracker_from_db(tracker, _factory(orders), min_trades_per_strategy=1)
         rec = tracker._trades["supertrend"][0]
         assert rec.return_pct == pytest.approx(0.052)
+
+
+class TestMinTradesFilter:
+    """min_trades_per_strategy drops noisy small-sample strategies."""
+
+    @pytest.mark.asyncio
+    async def test_drops_under_threshold(self):
+        tracker = SignalQualityTracker()
+        orders = (
+            [_order(buy_strategy="supertrend", pnl_pct=2.0) for _ in range(5)]
+            + [_order(buy_strategy="quality_factor", pnl_pct=3.0) for _ in range(2)]
+        )
+        n = await seed_tracker_from_db(
+            tracker, _factory(orders), min_trades_per_strategy=5
+        )
+        # supertrend kept (5 ≥ 5), quality_factor dropped (2 < 5)
+        assert n == 5
+        assert tracker.get_metrics("supertrend").total_trades == 5
+        assert tracker.get_metrics("quality_factor").total_trades == 0
+
+    @pytest.mark.asyncio
+    async def test_threshold_one_keeps_all(self):
+        tracker = SignalQualityTracker()
+        orders = [_order(buy_strategy=s, pnl_pct=1.0)
+                  for s in ("s1", "s2", "s3")]
+        n = await seed_tracker_from_db(
+            tracker, _factory(orders), min_trades_per_strategy=1
+        )
+        assert n == 3
+
+    @pytest.mark.asyncio
+    async def test_default_threshold_30_drops_small_samples(self):
+        """Default min_trades=30 — anything under 30 dropped."""
+        tracker = SignalQualityTracker()
+        orders = (
+            [_order(buy_strategy="supertrend", pnl_pct=2.0) for _ in range(40)]
+            + [_order(buy_strategy="donchian", pnl_pct=3.0) for _ in range(9)]
+        )
+        n = await seed_tracker_from_db(tracker, _factory(orders))
+        assert n == 40
+        assert tracker.get_metrics("supertrend").total_trades == 40
+        assert tracker.get_metrics("donchian").total_trades == 0
