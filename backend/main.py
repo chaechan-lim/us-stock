@@ -639,6 +639,20 @@ async def lifespan(app: FastAPI):
     )
     app.state.evaluation_loop = evaluation_loop
 
+    # P2 (2026-05-10): seed SignalQualityTracker from live trades DB so
+    # Kelly sizing + strategy gating boot with real history. Without this
+    # seed every backend restart loses ~5000 trades of accumulated stats
+    # and the engine runs blind until enough live trades re-fill the
+    # tracker. See backend/analytics/signal_quality_seed.py.
+    from analytics.signal_quality_seed import seed_tracker_from_db
+
+    try:
+        await seed_tracker_from_db(
+            evaluation_loop._signal_quality, session_factory, market="US"
+        )
+    except Exception as exc:
+        logger.warning("US SignalQualityTracker seed failed: %s", exc)
+
     # Stock scanner & sector analyzer
     stock_scanner = StockScanner(adapter=adapter, market_data=market_data)
     sector_analyzer = SectorAnalyzer()
@@ -1941,6 +1955,14 @@ async def lifespan(app: FastAPI):
     )
 
     app.state.kr_evaluation_loop = kr_evaluation_loop
+
+    # P2 (2026-05-10): seed KR tracker from live trades DB. See US seed above.
+    try:
+        await seed_tracker_from_db(
+            kr_evaluation_loop._signal_quality, session_factory, market="KR"
+        )
+    except Exception as exc:
+        logger.warning("KR SignalQualityTracker seed failed: %s", exc)
 
     # Cross-link market data for combined portfolio allocation (통합증거금)
     evaluation_loop.set_other_market_data(kr_market_data)
