@@ -82,7 +82,7 @@ export default function RejectionFunnelPanel() {
                 <div className="text-base font-semibold text-red-700">{rejectedTotal}</div>
               </div>
               <div className="rounded-md bg-emerald-50 px-2 py-1.5">
-                <div className="text-[10px] uppercase text-emerald-600">체결</div>
+                <div className="text-[10px] uppercase text-emerald-600">주문</div>
                 <div className="text-base font-semibold text-emerald-700">
                   {placed} <span className="text-[11px] font-normal text-emerald-600">({fillPct}%)</span>
                 </div>

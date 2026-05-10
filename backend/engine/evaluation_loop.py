@@ -128,7 +128,7 @@ class EvaluationLoop:
         self._daily_buy_override: float = 0.90         # over-cap override
         # F1 (2026-05-09) attribution funnel: count BUY-flow rejections by
         # category so the dashboard can answer "why is cash sitting?"
-        # Reset daily by _reset_daily_buy_count_if_needed.
+        # Reset daily by _reset_daily_counters_if_needed.
         self._reject_counters: dict[str, int] = {}
         self._buy_flow_counters: dict[str, int] = {
             "buy_signals_total": 0,
@@ -191,6 +191,23 @@ class EvaluationLoop:
 
     def _bump_reject(self, reason: str) -> None:
         self._reject_counters[reason] = self._reject_counters.get(reason, 0) + 1
+
+    def _reset_daily_counters_if_needed(self) -> None:
+        """Roll over _daily_buy_count, _reject_counters, _buy_flow_counters
+        when the date changes. Must run before any per-signal counter touch
+        so the first BUY of a new day is attributed to the new day.
+        """
+        from datetime import date as _date
+
+        today = _date.today().isoformat()
+        if self._daily_buy_date != today:
+            self._daily_buy_count = 0
+            self._daily_buy_date = today
+            self._reject_counters.clear()
+            self._buy_flow_counters = {
+                "buy_signals_total": 0,
+                "buys_placed": 0,
+            }
 
     def set_disabled_strategies(self, names: list[str]) -> None:
         """Set market-specific disabled strategy names."""
@@ -1645,6 +1662,10 @@ class EvaluationLoop:
             price = float(df.iloc[-1]["close"])
 
         if signal.signal_type == SignalType.BUY:
+            # F1 funnel: roll counters BEFORE any increments so the first
+            # BUY of a new day is attributed to the new day even if it gets
+            # rejected at the first gate.
+            self._reset_daily_counters_if_needed()
             self._buy_flow_counters["buy_signals_total"] += 1
             # 2026-04-24: skip BUY during the first N minutes after market open.
             # Live BUY pattern showed ~60% of fills land in the opening 30 min
@@ -1664,19 +1685,7 @@ class EvaluationLoop:
             # Daily buy budget with dynamic confidence escalation
             # As more slots are used, require higher confidence to preserve
             # remaining slots for stronger opportunities later in the day.
-            from datetime import date as _date
-
-            today = _date.today().isoformat()
-            if self._daily_buy_date != today:
-                self._daily_buy_count = 0
-                self._daily_buy_date = today
-                # F1 funnel resets with the daily-buy budget so the dashboard
-                # shows today's rejections, not lifetime totals.
-                self._reject_counters.clear()
-                self._buy_flow_counters = {
-                    "buy_signals_total": 1,  # the current signal we just counted
-                    "buys_placed": 0,
-                }
+            # (Date rollover handled by _reset_daily_counters_if_needed above.)
             daily_limit = self._daily_buy_limit
             override = self._daily_buy_override
             if daily_limit > 0 and self._daily_buy_count >= daily_limit:

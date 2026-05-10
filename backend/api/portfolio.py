@@ -908,26 +908,22 @@ async def performance_metrics(
     target_exposure_pct = None
     exposure_gap_pct = None
     try:
-        from strategies.config_loader import StrategyConfigLoader
-        loader = StrategyConfigLoader()
-        if market_upper == "KR":
-            kr_cfg = loader._config.get("markets", {}).get("KR", {})
-            target_exposure_pct = kr_cfg.get("target_exposure_pct")
-        elif market_upper == "US":
-            us_cfg = loader._config.get("markets", {}).get("US", {})
-            target_exposure_pct = us_cfg.get("target_exposure_pct")
-        else:
-            # ALL: weighted average of US + KR targets, treating each
-            # market as equal weight for simplicity (real allocation is
-            # 통합증거금-driven and time-varying).
-            us_t = loader._config.get("markets", {}).get("US", {}).get("target_exposure_pct")
-            kr_t = loader._config.get("markets", {}).get("KR", {}).get("target_exposure_pct")
-            if us_t is not None and kr_t is not None:
-                target_exposure_pct = (us_t + kr_t) / 2
-            elif us_t is not None or kr_t is not None:
-                target_exposure_pct = us_t if us_t is not None else kr_t
-    except Exception:
-        pass
+        registry = getattr(request.app.state, "registry", None)
+        loader = getattr(registry, "config_loader", None) if registry else None
+        if loader is not None:
+            if market_upper in ("US", "KR"):
+                target_exposure_pct = loader.get_market_target_exposure_pct(market_upper)
+            else:
+                # ALL: equal-weight average of US + KR targets (real
+                # allocation is 통합증거금-driven and time-varying).
+                us_t = loader.get_market_target_exposure_pct("US")
+                kr_t = loader.get_market_target_exposure_pct("KR")
+                if us_t is not None and kr_t is not None:
+                    target_exposure_pct = (us_t + kr_t) / 2
+                elif us_t is not None or kr_t is not None:
+                    target_exposure_pct = us_t if us_t is not None else kr_t
+    except Exception as exc:
+        logger.warning("F2 target_exposure read failed: %s", exc)
     if target_exposure_pct is not None:
         # yaml stores as fraction (0.70); UI works in percent.
         target_exposure_pct = round(target_exposure_pct * 100, 1)
