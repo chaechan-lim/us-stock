@@ -321,6 +321,36 @@ async def recent_signals(request: Request, market: str = "ALL", limit: int = 100
     return signals[:limit]
 
 
+@router.get("/rejection-funnel")
+async def rejection_funnel(request: Request):
+    """F1 attribution funnel — today's BUY-flow rejections by category.
+
+    Resets daily with the daily_buy_count budget. Answers "why is cash sitting?"
+    by counting how many BUY signals were filtered out at each stage.
+    """
+    out: dict[str, dict] = {}
+    for attr, market in (("evaluation_loop", "US"), ("kr_evaluation_loop", "KR")):
+        loop = getattr(request.app.state, attr, None)
+        if not loop:
+            continue
+        rejects = dict(getattr(loop, "_reject_counters", {}))
+        flow = dict(getattr(loop, "_buy_flow_counters", {}))
+        signals_total = flow.get("buy_signals_total", 0)
+        placed = flow.get("buys_placed", 0)
+        rejected_sum = sum(rejects.values())
+        out[market] = {
+            "buy_signals_total": signals_total,
+            "buys_placed": placed,
+            "rejected_total": rejected_sum,
+            "fill_rate": round(placed / signals_total, 3) if signals_total > 0 else None,
+            "rejections": dict(sorted(rejects.items(), key=lambda x: -x[1])),
+            "daily_buy_count": getattr(loop, "_daily_buy_count", 0),
+            "daily_buy_limit": getattr(loop, "_daily_buy_limit", 0),
+            "daily_buy_date": getattr(loop, "_daily_buy_date", ""),
+        }
+    return out
+
+
 @router.get("/analytics/factors")
 async def factor_scores(request: Request):
     """Get current factor model scores for watchlist stocks."""

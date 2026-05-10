@@ -83,7 +83,7 @@ export default function PerformanceDashboard() {
       </div>
     )
   }
-  const { equity: e, trades: t, benchmark: bm } = data
+  const { equity: e, trades: t, benchmark: bm, target: tg } = data
 
   const insufficient = !e.sufficient_samples
   const sampleHint = insufficient
@@ -155,14 +155,14 @@ export default function PerformanceDashboard() {
           highlight
         />
         <KpiTile
-          label={`vs ${bm.label}`}
-          value={bm.alpha_pct != null ? fmtPct(bm.alpha_pct) : '—'}
+          label={`vs ${bm.label} (Adj.)`}
+          value={bm.adjusted_alpha_pct != null ? fmtPct(bm.adjusted_alpha_pct) : '—'}
           sub={
             bm.return_pct != null
-              ? `${bm.label}: ${fmtPct(bm.return_pct)}`
+              ? `${bm.label} ${fmtPct(bm.return_pct)} → exposure-adj ${bm.adjusted_return_pct != null ? fmtPct(bm.adjusted_return_pct) : '—'}`
               : '벤치마크 가져오기 실패'
           }
-          toneVal={tone(bm.alpha_pct)}
+          toneVal={tone(bm.adjusted_alpha_pct)}
           highlight
         />
         <KpiTile
@@ -219,7 +219,16 @@ export default function PerformanceDashboard() {
         <KpiTile
           label="Exposure"
           value={`${e.exposure_pct.toFixed(0)}%`}
-          sub="평균 투자비율"
+          sub={
+            tg.target_exposure_pct != null
+              ? `목표 ${tg.target_exposure_pct.toFixed(0)}% · Gap ${tg.exposure_gap_pct != null && tg.exposure_gap_pct > 0 ? '+' : ''}${tg.exposure_gap_pct?.toFixed(0) ?? 0}%`
+              : '평균 투자비율'
+          }
+          toneVal={
+            tg.exposure_gap_pct != null
+              ? (tg.exposure_gap_pct > 20 ? 'neg' : tg.exposure_gap_pct > 5 ? 'neu' : 'pos')
+              : 'neu'
+          }
         />
       </div>
 

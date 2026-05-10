@@ -126,6 +126,14 @@ class EvaluationLoop:
         self._daily_buy_escalation_low: float = 0.65   # ≥60% usage
         self._daily_buy_escalation_high: float = 0.75  # ≥80% usage
         self._daily_buy_override: float = 0.90         # over-cap override
+        # F1 (2026-05-09) attribution funnel: count BUY-flow rejections by
+        # category so the dashboard can answer "why is cash sitting?"
+        # Reset daily by _reset_daily_counters_if_needed.
+        self._reject_counters: dict[str, int] = {}
+        self._buy_flow_counters: dict[str, int] = {
+            "buy_signals_total": 0,
+            "buys_placed": 0,
+        }
         # Recent signals buffer for frontend display (last N signals)
         from collections import deque
 
@@ -180,6 +188,26 @@ class EvaluationLoop:
         if self._cycle_positions is not None:
             return self._cycle_positions
         return await self._market_data.get_positions()
+
+    def _bump_reject(self, reason: str) -> None:
+        self._reject_counters[reason] = self._reject_counters.get(reason, 0) + 1
+
+    def _reset_daily_counters_if_needed(self) -> None:
+        """Roll over _daily_buy_count, _reject_counters, _buy_flow_counters
+        when the date changes. Must run before any per-signal counter touch
+        so the first BUY of a new day is attributed to the new day.
+        """
+        from datetime import date as _date
+
+        today = _date.today().isoformat()
+        if self._daily_buy_date != today:
+            self._daily_buy_count = 0
+            self._daily_buy_date = today
+            self._reject_counters.clear()
+            self._buy_flow_counters = {
+                "buy_signals_total": 0,
+                "buys_placed": 0,
+            }
 
     def set_disabled_strategies(self, names: list[str]) -> None:
         """Set market-specific disabled strategy names."""
@@ -1634,6 +1662,11 @@ class EvaluationLoop:
             price = float(df.iloc[-1]["close"])
 
         if signal.signal_type == SignalType.BUY:
+            # F1 funnel: roll counters BEFORE any increments so the first
+            # BUY of a new day is attributed to the new day even if it gets
+            # rejected at the first gate.
+            self._reset_daily_counters_if_needed()
+            self._buy_flow_counters["buy_signals_total"] += 1
             # 2026-04-24: skip BUY during the first N minutes after market open.
             # Live BUY pattern showed ~60% of fills land in the opening 30 min
             # and lose ~5% within 4h (ALM/AMPX whipsaw). SELL signals pass
@@ -1646,17 +1679,13 @@ class EvaluationLoop:
                         "Skipping BUY for %s: within %dmin post-open avoidance window",
                         symbol, self._opening_avoidance_minutes,
                     )
+                    self._bump_reject("opening_avoidance")
                     return
 
             # Daily buy budget with dynamic confidence escalation
             # As more slots are used, require higher confidence to preserve
             # remaining slots for stronger opportunities later in the day.
-            from datetime import date as _date
-
-            today = _date.today().isoformat()
-            if self._daily_buy_date != today:
-                self._daily_buy_count = 0
-                self._daily_buy_date = today
+            # (Date rollover handled by _reset_daily_counters_if_needed above.)
             daily_limit = self._daily_buy_limit
             override = self._daily_buy_override
             if daily_limit > 0 and self._daily_buy_count >= daily_limit:
@@ -1670,6 +1699,7 @@ class EvaluationLoop:
                         signal.confidence,
                         override,
                     )
+                    self._bump_reject("daily_limit")
                     return
                 logger.info(
                     "High-confidence override for %s (conf=%.2f, %d/%d used)",
@@ -1696,16 +1726,19 @@ class EvaluationLoop:
                         min_conf,
                         signal.confidence,
                     )
+                    self._bump_reject("daily_budget_conf_bar")
                     return
 
             # Skip if there's already a pending buy order for this symbol
             if self._order_manager.has_pending_order(symbol, "BUY"):
                 logger.debug("Skipping BUY for %s: pending order exists", symbol)
+                self._bump_reject("pending_order")
                 return
 
             # Skip if we already hold this symbol (prevent duplicate buys)
             if self._position_tracker and symbol in self._position_tracker.tracked_symbols:
                 logger.debug("Skipping BUY for %s: already held", symbol)
+                self._bump_reject("already_held")
                 return
 
             # STOCK-20: Sell cooldown — block BUY for recently-sold symbols.
@@ -1723,6 +1756,7 @@ class EvaluationLoop:
                         hours_ago,
                         cooldown_h,
                     )
+                    self._bump_reject("sell_cooldown")
                     return
 
             # STOCK-47: Whipsaw counter — block re-entry after repeated loss sells
@@ -1737,6 +1771,7 @@ class EvaluationLoop:
                         len(recent),
                         self._max_loss_sells,
                     )
+                    self._bump_reject("whipsaw_block")
                     return
 
             # Skip if signal hasn't changed since last evaluation (daily strategies
@@ -1744,6 +1779,7 @@ class EvaluationLoop:
             last = self._last_signal.get(symbol)
             if last and last[0] == "BUY" and time.time() - last[1] < 86400:
                 logger.debug("Skipping BUY for %s: same signal within 24h", symbol)
+                self._bump_reject("same_signal_24h")
                 return
             self._last_signal[symbol] = ("BUY", time.time())
 
@@ -1752,6 +1788,7 @@ class EvaluationLoop:
                 skip, reason = self._event_calendar.should_skip_buy(symbol)
                 if skip:
                     logger.info("Skipping BUY for %s: %s", symbol, reason)
+                    self._bump_reject("event_calendar")
                     return
 
             balance = await self._market_data.get_balance()
@@ -1771,6 +1808,7 @@ class EvaluationLoop:
                 else price
             )
             if not self._check_sector_limit(symbol, est_cost, positions, balance.total):
+                self._bump_reject("sector_limit")
                 return
 
             # Defense-in-depth: block buy if already holding via exchange
@@ -1781,6 +1819,7 @@ class EvaluationLoop:
                     "Skipping BUY for %s: already held (exchange positions)",
                     symbol,
                 )
+                self._bump_reject("already_held_exchange")
                 return
 
             # STOCK-20: Per-symbol position concentration limit.
@@ -1805,6 +1844,7 @@ class EvaluationLoop:
                         (existing_value / balance.total) * 100,
                         self._max_per_symbol_pct * 100,
                     )
+                    self._bump_reject("position_concentration")
                     return
 
             # Combined portfolio value for integrated margin allocation
@@ -1898,6 +1938,11 @@ class EvaluationLoop:
                     symbol,
                     sizing.reason,
                 )
+                # Sizing rejection reason is fine-grained (insufficient_cash,
+                # max_positions, max_exposure, kelly_zero, etc) — surface the
+                # raw token from RiskManager so the funnel can break down why.
+                reason_token = (sizing.reason or "sizing_rejected").split(":", 1)[0].strip()
+                self._bump_reject(f"sizing_{reason_token}")
                 return
 
             # AI pre-trade risk check (non-blocking: failures default to approved)
@@ -1922,6 +1967,7 @@ class EvaluationLoop:
                             symbol,
                             risk_check.get("reason", ""),
                         )
+                        self._bump_reject("risk_agent_block")
                         return
                 except Exception as e:
                     logger.debug("Risk agent pre-trade check error: %s", e)
@@ -1966,6 +2012,7 @@ class EvaluationLoop:
             # Increment daily buy counter
             if order:
                 self._daily_buy_count += 1
+                self._buy_flow_counters["buys_placed"] += 1
 
             # Register position for SL/TP/trailing stop monitoring
             if order and self._position_tracker:

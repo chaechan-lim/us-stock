@@ -142,6 +142,16 @@ class StrategyConfigLoader:
         """
         return dict(self._get_market_config(market).get("evaluation_loop", {}))
 
+    def get_market_target_exposure_pct(self, market: str) -> float | None:
+        """Get F2 portfolio target exposure as a fraction (e.g. 0.70).
+
+        Returns None when not configured for the market. Operator goal —
+        the dashboard surfaces the gap vs current exposure to flag whether
+        residual cash is intended defense or a deployment bottleneck.
+        """
+        v = self._get_market_config(market).get("target_exposure_pct")
+        return float(v) if v is not None else None
+
     def get_market_cash_parking_config(self, market: str) -> dict:
         """Get cash parking config for a specific market.
 
