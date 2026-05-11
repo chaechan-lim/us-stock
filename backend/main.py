@@ -639,6 +639,14 @@ async def lifespan(app: FastAPI):
     )
     app.state.evaluation_loop = evaluation_loop
 
+    # P2 (2026-05-10): cold-start tracker is intentional. A/B backtest
+    # (scripts/compare_signal_quality_seed.py 2026-05-11) showed every
+    # seeded variant — including min_trades=30 filter that keeps only
+    # supertrend+dual_momentum — regressed 2y US backtest by 1.7–2.9pp
+    # Ret. Live 2-month seed data does not generalize to the broader
+    # regime mix. The seed_tracker_from_db helper stays in the codebase
+    # for future backtest snapshots but is NOT called at boot.
+
     # Stock scanner & sector analyzer
     stock_scanner = StockScanner(adapter=adapter, market_data=market_data)
     sector_analyzer = SectorAnalyzer()
