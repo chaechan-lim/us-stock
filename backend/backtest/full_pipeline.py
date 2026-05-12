@@ -317,6 +317,10 @@ class _Position:
     session: str = "regular"  # "regular" or "extended"
     entry_day_count: int = 0  # day_count at entry (for min hold check)
     sector: str = ""  # GICS sector for concentration tracking
+    # Phase 2 (#53): per-strategy trailing-stop overrides. 0.0 = fall
+    # back to cfg.trailing_* in the risk-exit loop.
+    trailing_activation_pct: float = 0.0
+    trailing_trail_pct: float = 0.0
 
 
 @dataclass
@@ -1277,11 +1281,15 @@ class FullPipelineBacktest:
                 continue
 
             # Trailing stop (gap-through: open below trail → fill at open)
+            # Phase 2 (#53): use per-strategy trailing if the BUY captured
+            # it from yaml; otherwise fall back to cfg defaults.
             cfg = self._config
-            if cfg.trailing_activation_pct > 0 and cfg.trailing_trail_pct > 0:
+            t_act = pos.trailing_activation_pct or cfg.trailing_activation_pct
+            t_trail = pos.trailing_trail_pct or cfg.trailing_trail_pct
+            if t_act > 0 and t_trail > 0:
                 gain = (pos.highest_price - pos.avg_price) / pos.avg_price
-                if gain >= cfg.trailing_activation_pct:
-                    trail_price = pos.highest_price * (1 - cfg.trailing_trail_pct)
+                if gain >= t_act:
+                    trail_price = pos.highest_price * (1 - t_trail)
                     if low <= trail_price:
                         if held_days < min_hold and not is_hard_sl:
                             continue
@@ -1531,25 +1539,16 @@ class FullPipelineBacktest:
             if cost > self._cash:
                 continue
 
-            # Determine SL/TP
-            if cfg.dynamic_sl_tp:
-                current_row = data.df.iloc[date_idx]
-                atr_col = None
-                for col in ("atr", "ATRr_14"):
-                    if col in current_row.index and not pd.isna(current_row[col]):
-                        atr_col = col
-                        break
-                if atr_col:
-                    atr_val = float(current_row[atr_col])
-                    sl_pct, tp_pct = self._risk_manager.calculate_dynamic_sl_tp(
-                        open_price, atr_val,
-                    )
-                else:
-                    sl_pct = cfg.default_stop_loss_pct
-                    tp_pct = cfg.default_take_profit_pct
-            else:
-                sl_pct = cfg.default_stop_loss_pct
-                tp_pct = cfg.default_take_profit_pct
+            # Determine SL/TP — Phase 2 (#53): per-strategy yaml first,
+            # ATR-dynamic / flat default as fallback.
+            sl_pct, tp_pct = self._resolve_sl_tp(
+                strategy_name=signal.strategy_name,
+                price=open_price,
+                data_df=data.df,
+                date_idx=date_idx,
+                cfg=cfg,
+            )
+            trail_act, trail_pct = self._resolve_strategy_trailing(signal.strategy_name)
 
             self._cash -= cost
             self._positions[symbol] = _Position(
@@ -1563,6 +1562,8 @@ class FullPipelineBacktest:
                 take_profit_pct=tp_pct,
                 session="extended",
                 entry_day_count=self._day_count,
+                trailing_activation_pct=trail_act,
+                trailing_trail_pct=trail_pct,
             )
             active_positions += 1
             ext_count += 1
@@ -1746,25 +1747,19 @@ class FullPipelineBacktest:
                 if (sector_value + cost) / equity > cfg.max_sector_pct:
                     return
 
-        # Determine dynamic SL/TP
-        if cfg.dynamic_sl_tp:
-            atr_col = None
-            row = data.df.iloc[date_idx]
-            for col in ("atr", "ATRr_14"):
-                if col in row.index and not pd.isna(row[col]):
-                    atr_col = col
-                    break
-            if atr_col:
-                atr_val = float(row[atr_col])
-                sl_pct, tp_pct = self._risk_manager.calculate_dynamic_sl_tp(
-                    price, atr_val,
-                )
-            else:
-                sl_pct = cfg.default_stop_loss_pct
-                tp_pct = cfg.default_take_profit_pct
-        else:
-            sl_pct = cfg.default_stop_loss_pct
-            tp_pct = cfg.default_take_profit_pct
+        # Determine SL/TP.
+        # Phase 2 (#53, 2026-05-11): honour per-strategy yaml stop_loss /
+        # take_profit blocks via the shared resolver — matches live engine
+        # behaviour. Falls through to dynamic ATR / flat defaults when the
+        # strategy has no yaml block.
+        sl_pct, tp_pct = self._resolve_sl_tp(
+            strategy_name=strategy_name,
+            price=price,
+            data_df=data.df,
+            date_idx=date_idx,
+            cfg=cfg,
+        )
+        trail_act, trail_pct = self._resolve_strategy_trailing(strategy_name)
 
         # Execute
         self._cash -= cost
@@ -1779,7 +1774,69 @@ class FullPipelineBacktest:
             take_profit_pct=tp_pct,
             entry_day_count=self._day_count,
             sector=self._get_sector(symbol) if cfg.max_sector_pct < 1.0 else "",
+            trailing_activation_pct=trail_act,
+            trailing_trail_pct=trail_pct,
         )
+
+    def _resolve_strategy_trailing(self, strategy_name: str) -> tuple[float, float]:
+        """Per-strategy trailing config from yaml. Returns (act, trail) or
+        (0, 0) when the strategy doesn't enable trailing → caller falls
+        back to cfg.trailing_*."""
+        from engine.sl_tp_resolver import resolve_strategy_trailing
+
+        if hasattr(self._registry, "get_trailing_stop_config"):
+            t_cfg = self._registry.get_trailing_stop_config(strategy_name)
+            out = resolve_strategy_trailing(t_cfg)
+            if out is not None:
+                return out
+        return (0.0, 0.0)
+
+    def _resolve_sl_tp(
+        self,
+        *,
+        strategy_name: str,
+        price: float,
+        data_df,
+        date_idx: int,
+        cfg,
+    ) -> tuple[float, float]:
+        """Resolve SL/TP for a backtest BUY — yaml per-strategy first,
+        then ATR-dynamic, then flat defaults. Mirrors live engine path."""
+        from engine.sl_tp_resolver import (
+            resolve_strategy_sl_pct,
+            resolve_strategy_tp_pct,
+        )
+
+        # Extract ATR (if available) — used both by the resolver's
+        # type=atr / type=supertrend branches and the fallback path.
+        atr_val: float | None = None
+        if date_idx < len(data_df):
+            row = data_df.iloc[date_idx]
+            for col in ("atr", "ATRr_14"):
+                if col in row.index and not pd.isna(row[col]):
+                    atr_val = float(row[col])
+                    break
+
+        # Slice df up to current bar so supertrend line lookup uses past data
+        df_slice = data_df.iloc[: date_idx + 1] if date_idx >= 0 else data_df
+
+        # Per-strategy yaml first
+        if hasattr(self._registry, "get_stop_loss_config"):
+            sl_cfg = self._registry.get_stop_loss_config(strategy_name)
+            tp_cfg = (
+                self._registry.get_take_profit_config(strategy_name)
+                if hasattr(self._registry, "get_take_profit_config")
+                else {}
+            )
+            sl_pct = resolve_strategy_sl_pct(sl_cfg, price, atr_val, df_slice)
+            if sl_pct is not None:
+                tp_pct = resolve_strategy_tp_pct(tp_cfg, sl_pct)
+                return sl_pct, tp_pct
+
+        # Fallback: ATR-dynamic or flat default
+        if cfg.dynamic_sl_tp and atr_val is not None:
+            return self._risk_manager.calculate_dynamic_sl_tp(price, atr_val)
+        return cfg.default_stop_loss_pct, cfg.default_take_profit_pct
 
     def _execute_sell(
         self,
