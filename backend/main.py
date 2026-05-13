@@ -110,6 +110,13 @@ def _apply_kr_eval_overrides(
     v = kr_eval_cfg.get("min_hold_days")
     kr_loop.set_min_hold_secs(int(v * 86400) if v is not None else default_min_hold_secs)
 
+    # P1 (#55): time-based stale exit. Disabled by default (KR not yet
+    # backtested — US-only initial rollout).
+    kr_loop.set_stale_time_exit(
+        days=kr_eval_cfg.get("stale_time_days"),
+        pnl_threshold=kr_eval_cfg.get("stale_time_pnl_threshold"),
+    )
+
     v = kr_eval_cfg.get("min_confidence")
     kr_loop.set_min_confidence(float(v) if v is not None else None)
 
@@ -194,6 +201,13 @@ def _apply_us_eval_overrides(
     # Opening-minute BUY avoidance (2026-04-24).
     v = us_eval_cfg.get("opening_avoidance_minutes")
     us_loop.set_opening_avoidance_minutes(int(v) if v is not None else 0)
+
+    # P1 (#55) time-based stale exit. Backtest V3 (2d, -2%):
+    # +6.8pp Ret, +0.55 Sharpe, MDD even improved.
+    us_loop.set_stale_time_exit(
+        days=us_eval_cfg.get("stale_time_days"),
+        pnl_threshold=us_eval_cfg.get("stale_time_pnl_threshold"),
+    )
 
     # Daily buy budget + escalation. US relaxes to 10/0.50/0.60 per yaml
     # (compare_daily_buy_limit.py V1: Cash 34→31% with no alpha cost).

@@ -262,6 +262,13 @@ class PipelineConfig:
     held_min_confidence: float = 0.50  # Lower threshold for held exits (=min_confidence → no effect)
     stale_pnl_threshold: float = 0.0  # Sell on indifference below this PnL (<=0 disables)
     profit_protection_pct: float = 0.0  # Secure gains above this PnL (0=disabled)
+    # P1 (#55) time-based stale exit — targets the live "bounce_die"
+    # cleanup bucket (high reached only +1%, drifted down to -5%). When
+    # >0, the cleanup also fires after `stale_time_days` of hold if pnl
+    # is below `stale_time_pnl_threshold` (default 0 = exit any non-
+    # profitable stagnant position).
+    stale_time_days: int = 0
+    stale_time_pnl_threshold: float = 0.0
 
     # Extended hours simulation (backtest-optimized)
     extended_hours_enabled: bool = False
@@ -785,19 +792,36 @@ class FullPipelineBacktest:
                 if (
                     is_held
                     and combined.signal_type == SignalType.HOLD
-                    and cfg.stale_pnl_threshold < 0
                 ):
                     pos = self._positions[symbol]
                     data = stock_data[symbol]
                     if date_idx < len(data.df):
                         cur_price = float(data.df.iloc[date_idx]["close"])
                         pnl_pct = (cur_price - pos.avg_price) / pos.avg_price
-                        if pnl_pct < cfg.stale_pnl_threshold:
+                        # 1) Original: cumulative loss past threshold
+                        loss_trigger = (
+                            cfg.stale_pnl_threshold < 0
+                            and pnl_pct < cfg.stale_pnl_threshold
+                        )
+                        # 2) P1 (#55): held too long without making progress
+                        held_days = self._day_count - pos.entry_day_count
+                        time_trigger = (
+                            cfg.stale_time_days > 0
+                            and held_days >= cfg.stale_time_days
+                            and pnl_pct < cfg.stale_time_pnl_threshold
+                        )
+                        if loss_trigger or time_trigger:
+                            reason = (
+                                f"Sell on indifference: P&L={pnl_pct:.1%}"
+                                if loss_trigger
+                                else f"Stale time exit: held {held_days}d "
+                                     f"P&L={pnl_pct:.1%}"
+                            )
                             combined = Signal(
                                 signal_type=SignalType.SELL,
                                 confidence=0.50,
                                 strategy_name="position_cleanup",
-                                reason=f"Sell on indifference: P&L={pnl_pct:.1%}",
+                                reason=reason,
                             )
 
                 # Profit protection: secure gains above threshold

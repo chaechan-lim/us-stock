@@ -660,6 +660,17 @@ markets:
       daily_buy_limit: 10
       daily_buy_escalation_low: 0.50
       daily_buy_escalation_high: 0.60
+      # P1 (#55, 2026-05-13): time-based stale exit — clears positions
+      # held ≥N days with non-trivial loss but no strategy SELL signal.
+      # Targets the live "bounce_die" cleanup bucket (positions that
+      # touched only +1% high and drifted to -5% with no profit-mechanism
+      # ever firing). Backtest compare_stale_time_exit.py V3 (2d, -2%):
+      #   V0_off:       Ret +20.6% Sharpe +1.44 MDD -5.1% PF 1.61
+      #   V3_2d_-2%:    Ret +27.3% Sharpe +1.99 MDD -5.0% PF 1.75  ✓ adopt
+      # +6.8pp Ret, +0.55 Sharpe, MDD unchanged (slightly better).
+      # KR is NOT yet backtested — left at 0 until separate sweep.
+      stale_time_days: 2
+      stale_time_pnl_threshold: -0.02
     # 2026-05-09 (F2): target investment ratio. Operator's review flagged
     # that the system has no explicit exposure goal — it just buys when
     # signals trigger. Target lets the dashboard show an Exposure Gap so
