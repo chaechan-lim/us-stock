@@ -805,6 +805,11 @@ class EvaluationLoop:
         (-6.72%) where supertrend's tight line-based SL never fired.
         See ``docs/IMPROVEMENT_PLAN.md`` §1 for the full diagnosis.
         """
+        from engine.sl_tp_resolver import (
+            resolve_strategy_sl_pct,
+            resolve_strategy_tp_pct,
+        )
+
         # Try strategy-specific SL config first
         sl_cfg = self._registry.get_stop_loss_config(strategy_name) if hasattr(
             self._registry, "get_stop_loss_config"
@@ -813,46 +818,7 @@ class EvaluationLoop:
             self._registry, "get_take_profit_config"
         ) else {}
 
-        sl_type = sl_cfg.get("type") if isinstance(sl_cfg, dict) else None
-
-        sl_pct: float | None = None
-
-        if sl_type == "fixed_pct":
-            max_pct = sl_cfg.get("max_pct")
-            if isinstance(max_pct, (int, float)) and max_pct > 0:
-                sl_pct = float(max_pct)
-
-        elif sl_type == "atr":
-            mult = sl_cfg.get("atr_multiplier", 2.0)
-            if atr_val and atr_val > 0 and price > 0:
-                sl_pct = float(mult) * float(atr_val) / float(price)
-
-        elif sl_type == "supertrend":
-            # Look for the supertrend line in the indicators dataframe.
-            # pandas-ta usually names it SUPERTl_<period>_<mult> for the long
-            # line, plus a generic 'supertrend' or 'supertrend_long' may exist.
-            line_value: float | None = None
-            for col in (
-                "supertrend_long", "supertrend",
-                "SUPERTl_7_2.0", "SUPERTl_10_3.0", "SUPERTl_14_3.0",
-            ):
-                if col in df.columns:
-                    try:
-                        v = float(df[col].iloc[-1])
-                        if v > 0 and v < price:
-                            line_value = v
-                            break
-                    except (ValueError, TypeError):
-                        continue
-            if line_value is not None:
-                sl_pct = (price - line_value) / price
-            elif atr_val and atr_val > 0 and price > 0:
-                # Fallback: tight ATR-based SL (2x ATR)
-                sl_pct = 2.0 * float(atr_val) / float(price)
-
-        # Sanitize: clamp to a sane range so we never end up with 0 or absurd values
-        if sl_pct is not None:
-            sl_pct = max(0.02, min(sl_pct, 0.20))  # 2% .. 20%
+        sl_pct = resolve_strategy_sl_pct(sl_cfg, price, atr_val, df)
 
         # If strategy SL config didn't yield a value, fall back to dynamic ATR
         if sl_pct is None:
@@ -866,26 +832,11 @@ class EvaluationLoop:
             return sl_pct, tp_pct
 
         # SL came from strategy config — pair it with a TP
-        tp_type = tp_cfg.get("type") if isinstance(tp_cfg, dict) else None
-        tp_pct: float | None = None
-        if tp_type == "fixed_pct":
-            mp = tp_cfg.get("max_pct")
-            if isinstance(mp, (int, float)) and mp > 0:
-                tp_pct = float(mp)
-        elif tp_type == "ratio":
-            ratio = tp_cfg.get("risk_multiple", 2.0)
-            tp_pct = float(ratio) * sl_pct
-
-        if tp_pct is None:
-            # Default: 2x risk (1:2 RR) as a sensible burst-catcher TP
-            tp_pct = 2.0 * sl_pct
-
-        # Clamp TP too
-        tp_pct = max(0.04, min(tp_pct, 0.50))
+        tp_pct = resolve_strategy_tp_pct(tp_cfg, sl_pct)
 
         logger.info(
             "SL/TP from strategy YAML for %s: type=%s sl=%.1f%% tp=%.1f%%",
-            strategy_name, sl_type, sl_pct * 100, tp_pct * 100,
+            strategy_name, (sl_cfg or {}).get("type"), sl_pct * 100, tp_pct * 100,
         )
         return sl_pct, tp_pct
 
