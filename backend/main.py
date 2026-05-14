@@ -357,9 +357,14 @@ async def lifespan(app: FastAPI):
     # Rollback STOCK-77: walk-forward validated conservative params
     # STOCK-77 was overfit (backtest +30.5% but walk-forward 80% OVERFIT).
     # Conservative: 2x return, 7x Sharpe vs STOCK-77 in pipeline backtest.
+    # P1-C (2026-05-14): max_position_pct from yaml markets.US.risk
+    # (compare_max_position_pct.py: V2_15 wins 4-dim — Ret +1.1pp,
+    # Sharpe +0.09). Fallback 0.10 = prior hardcoded live value.
+    _us_risk_pre = registry.config_loader.get_market_risk_config("US")
+    _us_max_position_pct = float(_us_risk_pre.get("max_position_pct", 0.10))
     risk_params = RiskParams(
         market_allocations=market_allocs,
-        max_position_pct=0.10,  # 10% per position (compare_position_sizing VA)
+        max_position_pct=_us_max_position_pct,
         max_positions=20,  # Broad diversification
         default_stop_loss_pct=0.12,  # 12% SL (wider, less whipsaw)
         default_take_profit_pct=0.20,  # 20% TP (let winners run)

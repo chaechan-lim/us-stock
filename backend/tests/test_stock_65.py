@@ -302,10 +302,13 @@ class TestStrategyConfigLoaderMarketMethods:
         assert us_disabled == ["dual_momentum"]
         assert "trend_following" not in us_disabled
         assert "supertrend" not in us_disabled
-        # P1-B (2026-05-14): US risk overrides kelly_fraction + min_position_pct
+        # P1-B/P1-C (2026-05-14): US risk overrides
         us_risk = loader.get_market_risk_config("US")
-        assert set(us_risk.keys()) == {"kelly_fraction", "min_position_pct"}
+        assert set(us_risk.keys()) == {
+            "kelly_fraction", "min_position_pct", "max_position_pct",
+        }
         assert us_risk["kelly_fraction"] == pytest.approx(0.50)
+        assert us_risk["max_position_pct"] == pytest.approx(0.15)
         us_eval = loader.get_market_evaluation_loop_config("US")
         # 2026-05-07: sector_boost_weight + opening_avoidance_minutes +
         # daily_buy_limit relax (compare_daily_buy_limit V1 — 4/4 OK).
