@@ -622,6 +622,19 @@ markets:
     risk:
       kelly_fraction: 0.50
       min_position_pct: 0.03
+      # P1-C (#55, 2026-05-14) max_position_pct bump. compare_max_position_pct.py
+      # US 2y on Phase 2 + P1 baseline (cap was previously hardcoded 0.10):
+      #   V0_10  Ret +27.3% Sharpe +1.99 MDD -5.0% PF 1.75
+      #   V1_12  Ret +28.2% Sharpe +2.04 MDD -5.8% PF 1.76
+      #   V2_15  Ret +28.4% Sharpe +2.08 MDD -4.9% PF 1.78  ← ✓ adopt
+      #   V3_18  Ret +24.7% Sharpe +1.82 MDD -5.5% PF 1.68
+      #   V4_20  Ret +24.7% Sharpe +1.82 MDD -5.5% PF 1.68
+      # 0.15 wins 4-dim (Ret +1.1pp, Sharpe +0.09, MDD ~flat, PF +0.03).
+      # 0.18-0.20 over-concentrates (Ret -2.6pp, Sharpe -0.17). AvgAlloc
+      # plateaus at ~$5,400 across all variants — cap raise doesn't grow
+      # average position size meaningfully, just improves selection of
+      # which signals get full cap.
+      max_position_pct: 0.15
     # Cash parking — recovers ~13pp alpha by parking idle cash in SPY
     # instead of letting it sit through low-conviction periods.
     # Source: backend/scripts/validate_cash_parking.py V1_park_30 (US 2y, wide universe).
