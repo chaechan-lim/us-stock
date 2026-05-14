@@ -72,7 +72,7 @@ class EquityMetrics:
     sortino_ratio: float         # like sharpe but only downside vol
     exposure_pct: float          # avg fraction of equity invested over time
     sample_days: int = 0         # daily samples used (0 means metrics zeroed)
-    sufficient_samples: bool = False  # ≥7 days needed for Sharpe/Calmar
+    sufficient_samples: bool = False  # ≥30 days needed for Sharpe/Calmar (P1-E)
     # P4: intraday MDD computed from the full sub-daily series (hourly or
     # finer). Captures peaks-and-troughs the EOD-only daily MDD misses.
     # Always ≤ max_drawdown_pct (intraday is more conservative).
@@ -286,6 +286,14 @@ def compute_equity_metrics(
     end = equity_series[-1][1]
     days = (equity_series[-1][0] - equity_series[0][0]).days
 
+    # P1-E (2026-05-14): minimum window for annualized stats. Annualizing
+    # 9 days of data via (1+r)^(365/9) explodes any non-trivial return
+    # to thousands of percent (Sharpe also ×√252 → noise). Require ≥30
+    # days of window before showing annualized return / Sharpe / Sortino /
+    # Calmar — under that, daily-basis net_return is still shown but
+    # derived ratios stay 0.
+    MIN_DAYS_FOR_ANNUALIZED = 30
+
     # TWR path: build a synthetic equity curve where cash-flow days don't
     # produce a return. Then run MDD / Sharpe / etc on the synthetic curve.
     use_twr = (
@@ -306,7 +314,7 @@ def compute_equity_metrics(
             synth.append((equity_series[i][0], synth[-1][1] * (1.0 + r)))
         # Returns + total from synthetic curve.
         net_return = synth[-1][1] - 1.0
-        if days >= 7:
+        if days >= MIN_DAYS_FOR_ANNUALIZED:
             cagr = ((1.0 + net_return) ** (365.0 / days)) - 1.0
         else:
             cagr = 0.0
@@ -317,7 +325,7 @@ def compute_equity_metrics(
             cagr = 0.0
         else:
             net_return = (end - start) / start
-            if days >= 7 and start > 0:
+            if days >= MIN_DAYS_FOR_ANNUALIZED and start > 0:
                 cagr = ((end / start) ** (365.0 / days)) - 1
             else:
                 cagr = 0.0
@@ -359,10 +367,12 @@ def compute_equity_metrics(
                 returns.append((cur - cf - prev) / prev)
             else:
                 returns.append((cur - prev) / prev)
-    # Need ≥7 daily returns to compute meaningful Sharpe/Sortino —
-    # otherwise the std is too noisy and the annualization (×√252)
-    # explodes (e.g. 9.28 Sharpe on 1-day sample).
-    if len(returns) >= 7:
+    # P1-E (2026-05-14): annualized ratios (×√252) need ≥30 daily returns
+    # to be even loosely meaningful — under that, the √252 scaling turns
+    # a few lucky days into a Sharpe of 6+. The 7-day floor stays as
+    # `sufficient_samples` (raw daily-return computation), but Sharpe /
+    # Sortino are zeroed below 30 to avoid misleading the operator.
+    if len(returns) >= MIN_DAYS_FOR_ANNUALIZED:
         mu = sum(returns) / len(returns)
         var = sum((r - mu) ** 2 for r in returns) / max(1, len(returns) - 1)
         std = math.sqrt(var)
@@ -395,7 +405,7 @@ def compute_equity_metrics(
         sortino_ratio=round(sortino, 2),
         exposure_pct=0.0,  # populated by caller from snapshots
         sample_days=n,
-        sufficient_samples=(len(returns) >= 7),
+        sufficient_samples=(len(returns) >= MIN_DAYS_FOR_ANNUALIZED),
         intraday_max_drawdown_pct=intraday_dd,
         intraday_sample_count=len(intraday_values) if intraday_values else 0,
     )

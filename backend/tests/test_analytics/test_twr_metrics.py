@@ -37,17 +37,14 @@ class TestTwrCorrection:
 
     def test_deposit_plus_real_gain(self):
         """Deposit on day 2 + 5% gain on subsequent days → return ≈ 5%."""
-        # Start 100. Day 1: still 100. Day 2: deposit 100 → 200. Days 3-9:
-        # +5% trading on the 200 base. So end_equity = 210, deposit = 100.
-        # Raw net = (210 - 100)/100 = +110%. TWR should be ~+5%.
         eq = _series([100, 100, 200, 202, 204, 206, 208, 210, 210, 210])
         cf = [0, 0, 100, 0, 0, 0, 0, 0, 0, 0]
         m = compute_equity_metrics(eq, cash_flows=cf)
-        # TWR: day 1-2 ratio = 100/100 = 1.0
-        # day 2-3 ratio = (200-100)/100 = 1.0 (deposit excluded)
-        # day 3-4 ratio = 202/200 = 1.01
-        # ... cumulative gain matches the 5% trading on the 200 base.
         assert 4.0 <= m.net_return_pct <= 6.0
+        # P1-E: 10 days < 30 → annualized stats stay 0 to avoid
+        # ((1+r)^(365/9))-1 explosion.
+        assert m.annualized_return_pct == 0.0
+        assert m.sharpe_ratio == 0.0
 
     def test_sharpe_finite_with_deposit(self):
         """Deposit-day large jump must not cause Sharpe to explode."""
@@ -57,7 +54,9 @@ class TestTwrCorrection:
         m = compute_equity_metrics(eq, cash_flows=cf)
         # All returns zero → Sharpe should be 0, not 5+
         assert abs(m.sharpe_ratio) < 0.01
-        assert m.sufficient_samples is True
+        # P1-E: 10 samples < 30 → sufficient_samples=False (annualized
+        # stats need ≥30 days of daily returns to be meaningful).
+        assert m.sufficient_samples is False
 
     def test_mdd_on_twr_curve(self):
         """MDD ignores deposit jumps; uses synthetic equity curve."""
