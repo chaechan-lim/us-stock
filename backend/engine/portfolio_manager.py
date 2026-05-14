@@ -20,39 +20,51 @@ logger = logging.getLogger(__name__)
 # fraction vs the previous snapshot (e.g. 0.5 = 50% drop).
 ANOMALY_DROP_THRESHOLD = 0.5
 
-# STOCK-46: Cash flow detection threshold (fraction of total equity).
-# If abs(raw_cash_flow) > threshold * prev_total_equity, treat as deposit/withdrawal.
-CASH_FLOW_THRESHOLD = 0.05  # 5%
+# STOCK-46 / P1-F (2026-05-15): Cash flow detection thresholds.
+# Old single-threshold (5% for US, 10% for KR) generated noise records —
+# intraday position-value swings 5-15% routinely produced 1-2M KRW false
+# deposit/withdrawal entries, distorting the TWR metrics that subtract
+# them. Examples (live, 2026-05-07~13): −1.03M, +1.66M, −0.89M, +1.13M /
+# −1.15M same day — none real. Real deposit on 2026-05-14 was +17.4M.
+#
+# New: BOTH a relative AND absolute threshold must be exceeded. Real
+# deposits are typically large in both. Noise is small in absolute terms
+# even when relative threshold trips.
+CASH_FLOW_REL_THRESHOLD = 0.20    # 20% of prev_equity (was 5%/10%)
+CASH_FLOW_ABS_THRESHOLD_US = 5_000      # $5,000
+CASH_FLOW_ABS_THRESHOLD_KR = 5_000_000  # ₩5,000,000
 
 
 def detect_cash_flow(
     prev_total: float,
     new_total: float,
-    threshold: float | None = None,
+    rel_threshold: float | None = None,
+    abs_threshold: float | None = None,
 ) -> float:
     """Detect external deposit/withdrawal between two snapshots.
 
-    Uses total portfolio equity change rather than (cash + invested_cost_basis).
-    This correctly handles profitable sells: selling a position at a gain does NOT
-    change total equity (unrealized PnL is simply converted to cash), so it is
-    never misclassified as a deposit.
+    P1-F (2026-05-15): requires BOTH relative AND absolute thresholds to
+    be exceeded. The relative-only test from STOCK-46 generated false
+    positives from normal intraday position-value swings (a KR portfolio
+    that drops 14% in one hour was always classified as a 1M-KRW
+    withdrawal, even when nothing was deposited or withdrawn).
 
-    Genuine deposits/withdrawals directly change total equity:
-      raw_cf = new_total - prev_total
+    Uses total portfolio equity change rather than (cash + invested).
+    Profitable sells do NOT change total equity (unrealized → cash is
+    a no-op), so they are never misclassified as deposits.
 
-    Normal market appreciation may also appear here, but is typically below the
-    threshold within a single snapshot interval (default 5% for US, 10% for KR).
-
-    Returns the detected cash flow amount (positive=deposit, negative=withdrawal).
+    Returns the detected cash flow amount (positive=deposit, negative=
+    withdrawal). 0.0 when noise threshold not exceeded.
     """
     if prev_total <= 0:
         return 0.0
 
     raw_cf = new_total - prev_total
-    effective_threshold = threshold if threshold is not None else CASH_FLOW_THRESHOLD
-    threshold_amount = effective_threshold * prev_total
+    eff_rel = rel_threshold if rel_threshold is not None else CASH_FLOW_REL_THRESHOLD
+    eff_abs = abs_threshold if abs_threshold is not None else CASH_FLOW_ABS_THRESHOLD_US
 
-    if abs(raw_cf) > threshold_amount:
+    rel_amount = eff_rel * prev_total
+    if abs(raw_cf) > rel_amount and abs(raw_cf) > eff_abs:
         return raw_cf
     return 0.0
 
@@ -160,18 +172,22 @@ class PortfolioManager:
 
         daily_pnl = await self._calculate_daily_pnl(total_equity)
 
-        # STOCK-46: Detect external cash flow (deposit/withdrawal).
-        # 2026-04-14: KR balance.total can fluctuate >10% between snapshots
-        # when buy orders fill (cash drops, stock value adds back with delay).
-        # Use a higher threshold for KR to avoid false "deposit" detection
-        # that was inflating dashboard returns (+500만 false 1d return).
+        # P1-F (2026-05-15): dual-threshold cash-flow detection. Old
+        # single-threshold (10% KR / 5% US) was triggering on intraday
+        # position-value swings. New: BOTH relative (20%) AND absolute
+        # (₩5M for KR, $5K for US) must be exceeded.
         cash_flow = 0.0
-        cf_threshold = 0.10 if self._market == "KR" else CASH_FLOW_THRESHOLD
+        abs_thr = (
+            CASH_FLOW_ABS_THRESHOLD_KR
+            if self._market == "KR"
+            else CASH_FLOW_ABS_THRESHOLD_US
+        )
         if prev is not None and prev.total_value_usd > 0:
             cash_flow = detect_cash_flow(
                 prev_total=prev.total_value_usd,
                 new_total=total_equity,
-                threshold=cf_threshold,
+                rel_threshold=CASH_FLOW_REL_THRESHOLD,
+                abs_threshold=abs_thr,
             )
             if cash_flow != 0.0:
                 action = "deposit" if cash_flow > 0 else "withdrawal"
