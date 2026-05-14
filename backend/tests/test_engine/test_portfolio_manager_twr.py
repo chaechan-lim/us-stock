@@ -18,7 +18,9 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from core.models import Base, PortfolioSnapshot
 from engine.portfolio_manager import (
-    CASH_FLOW_THRESHOLD,
+    CASH_FLOW_ABS_THRESHOLD_KR,
+    CASH_FLOW_ABS_THRESHOLD_US,
+    CASH_FLOW_REL_THRESHOLD,
     PortfolioManager,
     detect_cash_flow,
 )
@@ -101,17 +103,45 @@ class TestDetectCashFlow:
         result = detect_cash_flow(prev_total=115_000, new_total=115_000)
         assert result == 0.0
 
-    def test_threshold_boundary_below(self):
-        """Cash flow exactly at threshold boundary (below) returns 0."""
-        # 4.9% of 100,000 = 4,900 → below 5% threshold
-        result = detect_cash_flow(prev_total=100_000, new_total=104_900)
+    def test_relative_below_threshold_returns_zero(self):
+        """Below 20% relative threshold returns 0 (P1-F)."""
+        # 19% on 100k = 19k. Abs > 5k threshold but rel < 20%.
+        result = detect_cash_flow(prev_total=100_000, new_total=119_000)
         assert result == 0.0
 
-    def test_threshold_boundary_above(self):
-        """Cash flow just above threshold is detected."""
-        # 5.1% of 100,000 = 5,100 → above 5% threshold
-        result = detect_cash_flow(prev_total=100_000, new_total=105_100)
-        assert result == pytest.approx(5_100.0)
+    def test_relative_above_threshold_detected(self):
+        """Above 20% relative AND $5k absolute → detected (P1-F)."""
+        # 21% on 100k = 21k → both thresholds exceeded
+        result = detect_cash_flow(prev_total=100_000, new_total=121_000)
+        assert result == pytest.approx(21_000.0)
+
+    def test_absolute_below_threshold_returns_zero(self):
+        """High relative but tiny absolute → noise. Returns 0 (P1-F)."""
+        # 50% on 1,000 base = 500. Rel > 20% but abs < $5k default.
+        result = detect_cash_flow(prev_total=1_000, new_total=1_500)
+        assert result == 0.0
+
+    def test_dual_threshold_both_must_exceed(self):
+        """Real deposit: 96% rel + 17M KRW abs (matches 2026-05-14 live)."""
+        result = detect_cash_flow(
+            prev_total=18_000_000,
+            new_total=35_400_000,
+            rel_threshold=0.20,
+            abs_threshold=CASH_FLOW_ABS_THRESHOLD_KR,
+        )
+        assert result == pytest.approx(17_400_000.0)
+
+    def test_noise_case_from_live(self):
+        """2026-05-07 false positive: -14% drop, 1M KRW abs. Now suppressed.
+        Old single-threshold (10% KR) classified this as -1M withdrawal."""
+        result = detect_cash_flow(
+            prev_total=7_150_000,
+            new_total=6_120_000,
+            rel_threshold=0.20,  # new KR rel
+            abs_threshold=CASH_FLOW_ABS_THRESHOLD_KR,
+        )
+        # 14.4% rel < 20% → suppressed (also 1.03M < 5M abs)
+        assert result == 0.0
 
     def test_zero_prev_total_returns_zero(self):
         """Zero previous total equity returns 0 (no division by zero)."""
@@ -138,9 +168,11 @@ class TestDetectCashFlow:
         result = detect_cash_flow(prev_total=10_000_000, new_total=17_000_000)
         assert result == pytest.approx(7_000_000.0)
 
-    def test_threshold_constant_is_five_percent(self):
-        """Verify the threshold constant is 0.05 (5%)."""
-        assert CASH_FLOW_THRESHOLD == 0.05
+    def test_threshold_constants(self):
+        """P1-F: dual-threshold constants."""
+        assert CASH_FLOW_REL_THRESHOLD == 0.20  # 20% (was 5%)
+        assert CASH_FLOW_ABS_THRESHOLD_US == 5_000      # $5k
+        assert CASH_FLOW_ABS_THRESHOLD_KR == 5_000_000  # ₩5M
 
 
 # ── save_snapshot integration tests (cash_flow persisted) ──────────────
