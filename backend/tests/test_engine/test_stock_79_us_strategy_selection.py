@@ -157,9 +157,13 @@ class TestUSConfigLoader:
         assert enabled == _US_ENABLED
 
     def test_us_no_risk_overrides(self):
-        """US risk params are not overridden in config — use code defaults."""
+        """US risk overrides: kelly_fraction + min_position_pct only
+        (P1-B 2026-05-14). Other params still use code defaults."""
         loader = StrategyConfigLoader()
-        assert loader.get_market_risk_config("US") == {}
+        cfg = loader.get_market_risk_config("US")
+        assert set(cfg.keys()) == {"kelly_fraction", "min_position_pct"}
+        assert cfg["kelly_fraction"] == pytest.approx(0.50)
+        assert cfg["min_position_pct"] == pytest.approx(0.03)
 
     def test_us_eval_loop_has_expected_overrides(self):
         """2026-05-07: US eval-loop overrides include sector_boost_weight (D1),

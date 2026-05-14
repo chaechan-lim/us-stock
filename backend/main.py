@@ -392,9 +392,18 @@ async def lifespan(app: FastAPI):
         },
     )
     risk_manager = RiskManager(params=risk_params)
-    # Conservative Kelly: 0.35x fraction, 3% min position
-    risk_manager._kelly._kelly_fraction = 0.35
-    risk_manager._kelly._min_position_pct = 0.03
+    # Kelly fraction + min_position_pct from yaml markets.US.risk
+    # (P1-B 2026-05-14): backtest compare_kelly_fraction.py US 2y showed
+    # V2_50 (0.50) Sharpe 2.03 / Ret +28.5% beat V1_40 (0.40) Sharpe 1.99
+    # / Ret +27.3% on all 4 dims. Defaults fall back to the prior
+    # conservative live values (0.35 / 0.03) when yaml has no override.
+    us_risk_cfg = registry.config_loader.get_market_risk_config("US")
+    risk_manager._kelly._kelly_fraction = float(
+        us_risk_cfg.get("kelly_fraction", 0.35)
+    )
+    risk_manager._kelly._min_position_pct = float(
+        us_risk_cfg.get("min_position_pct", 0.03)
+    )
 
     # KR-specific risk params: STOCK-65 grid-search optimized settings
     kr_risk_cfg = registry.config_loader.get_market_risk_config("KR")

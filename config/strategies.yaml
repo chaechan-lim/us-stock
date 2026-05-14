@@ -607,6 +607,21 @@ markets:
     # US-disabled (live bleeder, -2.28% avg 10 trades + backtest -$3,865).
     disabled_strategies:
       - dual_momentum
+    # P1-B (#55, 2026-05-14) Kelly fraction bump. compare_kelly_fraction.py
+    # US 2y on Phase 2 + P1 baseline:
+    #   V0_30  Ret +22.8% Sharpe +1.69 MDD -5.5% PF 1.63
+    #   V1_40  Ret +27.3% Sharpe +1.99 MDD -5.0% PF 1.75  ← prior live
+    #   V2_50  Ret +28.5% Sharpe +2.03 MDD -4.0% PF 1.77  ← ✓ adopt
+    #   V3_60  Ret +29.4% Sharpe +2.03 MDD -4.3% PF 1.75
+    #   V4_70  Ret +25.9% Sharpe +1.75 MDD -4.4% PF 1.66
+    # 0.50 wins on all 4 dims vs 0.40 (Ret +1.2pp, Sharpe +0.04,
+    # MDD -1.0pp, PF +0.02). 0.60 marginal extra Ret but slightly worse
+    # MDD. Sweet spot is 0.50-0.60; we adopt 0.50 (conservative).
+    # min_position_pct stays at the prior live 0.03 (allow_one_share path
+    # for cheap-stock buys).
+    risk:
+      kelly_fraction: 0.50
+      min_position_pct: 0.03
     # Cash parking — recovers ~13pp alpha by parking idle cash in SPY
     # instead of letting it sit through low-conviction periods.
     # Source: backend/scripts/validate_cash_parking.py V1_park_30 (US 2y, wide universe).
