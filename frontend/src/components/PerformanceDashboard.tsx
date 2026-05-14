@@ -87,7 +87,7 @@ export default function PerformanceDashboard() {
 
   const insufficient = !e.sufficient_samples
   const sampleHint = insufficient
-    ? `데이터 ${e.sample_days}/7일`
+    ? `데이터 ${e.sample_days}/30일`
     : null
 
   return (
@@ -148,7 +148,7 @@ export default function PerformanceDashboard() {
           value={fmtPct(e.net_return_pct)}
           sub={
             insufficient
-              ? `연환산: 데이터 ${e.sample_days}/7일`
+              ? `연환산: 데이터 ${e.sample_days}/30일`
               : `연환산 ${fmtPct(e.annualized_return_pct)}`
           }
           toneVal={tone(e.net_return_pct)}
@@ -187,7 +187,7 @@ export default function PerformanceDashboard() {
           value={insufficient ? '—' : fmtNum(e.calmar_ratio)}
           sub={
             insufficient
-              ? `데이터 ${e.sample_days}/7일 필요`
+              ? `데이터 ${e.sample_days}/30일 필요`
               : '연수익률 / |MDD|'
           }
           toneVal={
@@ -201,7 +201,7 @@ export default function PerformanceDashboard() {
           value={insufficient ? '—' : fmtNum(e.sharpe_ratio)}
           sub={
             insufficient
-              ? `데이터 ${e.sample_days}/7일 필요`
+              ? `데이터 ${e.sample_days}/30일 필요`
               : '일간 수익률 기반 (×√252)'
           }
           toneVal={insufficient ? 'neu' : tone(e.sharpe_ratio)}
@@ -211,7 +211,7 @@ export default function PerformanceDashboard() {
           value={insufficient ? '—' : fmtNum(e.sortino_ratio)}
           sub={
             insufficient
-              ? `데이터 ${e.sample_days}/7일 필요`
+              ? `데이터 ${e.sample_days}/30일 필요`
               : '하락 변동성만'
           }
           toneVal={insufficient ? 'neu' : tone(e.sortino_ratio)}
