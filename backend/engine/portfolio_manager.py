@@ -353,6 +353,9 @@ class PortfolioManager:
                 "date": s.recorded_at.strftime("%Y-%m-%d %H:%M") if s.recorded_at else None,
                 "total_value_krw": s.integrated_total_krw,
                 "usd_krw_rate": s.usd_krw_rate,
+                # P1-D (2026-05-14): forward cash_flow so the TWR metrics
+                # path can exclude deposit/withdrawal effects.
+                "cash_flow": getattr(s, "cash_flow", 0.0) or 0.0,
             }
             for s in snapshots
         ]
