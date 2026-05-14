@@ -313,6 +313,9 @@ class TestStrategyConfigLoaderMarketMethods:
             "daily_buy_limit",
             "daily_buy_escalation_low",
             "daily_buy_escalation_high",
+            # P1 (#55, 2026-05-13): time-based stale exit
+            "stale_time_days",
+            "stale_time_pnl_threshold",
         }
         assert us_eval["sector_boost_weight"] == pytest.approx(0.2)
         assert us_eval["opening_avoidance_minutes"] == 30

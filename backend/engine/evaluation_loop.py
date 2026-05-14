@@ -113,6 +113,11 @@ class EvaluationLoop:
         self._min_hold_secs: int = 4 * 3600
         # Hard stop-loss threshold that bypasses min hold (aligned with YAML -15%)
         self._hard_sl_pct: float = -0.15
+        # P1 (#55, 2026-05-13): time-based stale exit. Backtest V3 (2d, -2%)
+        # showed +6.8pp Ret, +0.55 Sharpe with MDD unchanged. Disabled by
+        # default (0); enabled per-market via _apply_*_eval_overrides.
+        self._stale_time_days: int = 0
+        self._stale_time_pnl_threshold: float = 0.0
         # STOCK-47: Whipsaw counter — track loss sell timestamps per symbol
         self._loss_sell_history: dict[str, list[float]] = {}  # {symbol: [timestamps]}
         self._max_loss_sells: int = 2  # block re-entry after N loss sells in 7 days
@@ -296,6 +301,37 @@ class EvaluationLoop:
         logger.info(
             "Market %s: min_hold_secs=%d (%.2fh)", self._market, value, value / 3600
         )
+
+    def set_stale_time_exit(
+        self,
+        days: int | None,
+        pnl_threshold: float | None = None,
+    ) -> None:
+        """P1 (#55) time-based stale exit. Set days=0 to disable.
+
+        When days > 0, cleanup also fires for held positions where
+        elapsed_days >= days AND pnl_pct < pnl_threshold (default 0%),
+        even if loss hasn't reached the standard stale_pnl_threshold.
+
+        Targets the live "bounce_die" cleanup bucket (positions that
+        touched only +1% high then drifted to -5%, missing profit_taking
+        / trailing / breakeven thresholds).
+        """
+        days = int(days or 0)
+        if days < 0:
+            raise ValueError(f"stale_time_days must be >= 0, got {days}")
+        thr = float(pnl_threshold) if pnl_threshold is not None else 0.0
+        if not -0.20 <= thr <= 0.20:
+            raise ValueError(f"stale_time_pnl_threshold out of [-0.20, 0.20]: {thr}")
+        self._stale_time_days = days
+        self._stale_time_pnl_threshold = thr
+        if days > 0:
+            logger.info(
+                "Market %s: stale_time_exit enabled (≥%dd, pnl<%.0f%%)",
+                self._market, days, thr * 100,
+            )
+        else:
+            logger.info("Market %s: stale_time_exit disabled", self._market)
 
     def set_max_sector_pct(self, value: float) -> None:
         """Set maximum portfolio concentration per sector."""
@@ -1042,30 +1078,53 @@ class EvaluationLoop:
                 # (HOLD) and the held position is losing beyond threshold,
                 # free up capital by selling (STOCK-7).
                 # STOCK-47: threshold -3% → -5%, add min hold check
+                # P1 (#55, 2026-05-13): add second trigger based on hold
+                # time — targets the "bounce_die" cleanup bucket (positions
+                # that touched only +1% high then drifted to -5%, missing
+                # all existing profit mechanisms). Backtest V3 (2d, -2%):
+                # +6.8pp Ret, +0.55 Sharpe, MDD even improved.
                 if is_held and combined.signal_type == SignalType.HOLD and symbol in position_map:
                     pos = position_map[symbol]
                     if hasattr(pos, "avg_price") and pos.avg_price > 0:
                         pnl_pct = (pos.current_price - pos.avg_price) / pos.avg_price
                         _spt = getattr(self, "_stale_pnl_threshold", -0.05)
-                        if pnl_pct < _spt:
+                        loss_trigger = pnl_pct < _spt
+                        # Time trigger: held >= N days + below pnl floor.
+                        time_trigger = False
+                        st_days = getattr(self, "_stale_time_days", 0)
+                        st_thr = getattr(self, "_stale_time_pnl_threshold", 0.0)
+                        if (
+                            st_days > 0
+                            and self._position_tracker is not None
+                            and symbol in self._position_tracker._tracked
+                            and pnl_pct < st_thr
+                        ):
+                            tracked = self._position_tracker._tracked[symbol]
+                            hold_secs = time.monotonic() - tracked.tracked_at
+                            time_trigger = hold_secs >= st_days * 86400
+
+                        if loss_trigger or time_trigger:
                             # STOCK-47: Check min hold (skip for hard SL)
                             hold_ok = True
                             if pnl_pct >= self._hard_sl_pct:
                                 hold_ok = self._check_min_hold(symbol)
                             if hold_ok:
+                                reason = (
+                                    f"Sell on indifference: P&L={pnl_pct:.1%},"
+                                    f" no strategy recommends"
+                                    if loss_trigger
+                                    else f"Stale time exit: held ≥{st_days}d,"
+                                         f" P&L={pnl_pct:.1%} below {st_thr:.0%}"
+                                )
                                 combined = Signal(
                                     signal_type=SignalType.SELL,
                                     confidence=0.50,
                                     strategy_name="position_cleanup",
-                                    reason=(
-                                        f"Sell on indifference: P&L={pnl_pct:.1%},"
-                                        f" no strategy recommends"
-                                    ),
+                                    reason=reason,
                                 )
                                 logger.info(
-                                    "Position cleanup SELL for %s: P&L=%.1f%%",
-                                    symbol,
-                                    pnl_pct * 100,
+                                    "Position cleanup SELL for %s: %s",
+                                    symbol, reason,
                                 )
 
                 # STOCK-34: Profit protection — sell on high profit when

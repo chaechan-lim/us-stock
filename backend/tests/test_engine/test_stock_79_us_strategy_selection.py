@@ -173,12 +173,17 @@ class TestUSConfigLoader:
             "daily_buy_limit",
             "daily_buy_escalation_low",
             "daily_buy_escalation_high",
+            # P1 (#55, 2026-05-13): time-based stale exit
+            "stale_time_days",
+            "stale_time_pnl_threshold",
         }
         assert cfg["sector_boost_weight"] == pytest.approx(0.2)
         assert cfg["opening_avoidance_minutes"] == 30
         assert cfg["daily_buy_limit"] == 10
         assert cfg["daily_buy_escalation_low"] == pytest.approx(0.50)
         assert cfg["daily_buy_escalation_high"] == pytest.approx(0.60)
+        assert cfg["stale_time_days"] == 2
+        assert cfg["stale_time_pnl_threshold"] == pytest.approx(-0.02)
 
 
 # ---------------------------------------------------------------------------

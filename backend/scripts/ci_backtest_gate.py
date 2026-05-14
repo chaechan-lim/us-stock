@@ -94,6 +94,13 @@ async def _run(market: str) -> dict:
     weight = eval_cfg.get("sector_boost_weight")
     if weight is not None:
         kw["sector_boost_weight"] = float(weight)
+    # P1 (#55) time-based stale exit — mirror live yaml in baseline.
+    st_days = eval_cfg.get("stale_time_days")
+    if st_days is not None:
+        kw["stale_time_days"] = int(st_days)
+    st_thr = eval_cfg.get("stale_time_pnl_threshold")
+    if st_thr is not None:
+        kw["stale_time_pnl_threshold"] = float(st_thr)
     cfg = PipelineConfig(**kw)
     eng = FullPipelineBacktest(cfg)
     t0 = time.time()
