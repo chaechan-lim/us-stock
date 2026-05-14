@@ -806,6 +806,11 @@ async def performance_metrics(
         history = []
 
     intraday_values: list[float] = []
+    # P1-D (2026-05-14): track per-day cash_flow so compute_equity_metrics
+    # can use TWR. SUM within a day (multiple snapshots can both detect
+    # the deposit on different sides — but detect_cash_flow normally fires
+    # once and the rest report 0, so summing is safe).
+    per_day_cf: OrderedDict[_date, float] = OrderedDict()
     for p in history:
         ds = (p.get("date", "") or "")[:10]
         if not ds:
@@ -819,7 +824,11 @@ async def performance_metrics(
             v_f = float(v)
             per_day[d] = v_f       # last value of day overrides
             intraday_values.append(v_f)
+        cf = float(p.get("cash_flow", 0.0) or 0.0)
+        if cf != 0.0:
+            per_day_cf[d] = per_day_cf.get(d, 0.0) + cf
     equity_series = list(per_day.items())
+    cash_flows = [per_day_cf.get(d, 0.0) for d, _ in equity_series]
 
     # Exposure uses the per-market series (has cash + invested fields).
     if not market or market.upper() == "ALL":
@@ -843,7 +852,11 @@ async def performance_metrics(
         except Exception:
             pass
 
-    equity_metrics = compute_equity_metrics(equity_series, intraday_values=intraday_values)
+    equity_metrics = compute_equity_metrics(
+        equity_series,
+        intraday_values=intraday_values,
+        cash_flows=cash_flows,
+    )
     equity_metrics.exposure_pct = compute_exposure_pct(snapshots)
 
     # 2. Trade-level metrics (cost-adjusted)

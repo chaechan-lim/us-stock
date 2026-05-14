@@ -250,17 +250,24 @@ def _compute_intraday_dd(intraday_series: list[float]) -> float:
 def compute_equity_metrics(
     equity_series: list[tuple[date, float]],
     intraday_values: list[float] | None = None,
+    cash_flows: list[float] | None = None,
 ) -> EquityMetrics:
     """Compute equity-curve-based metrics from daily snapshots.
 
     Args:
         equity_series: list of (date, equity_value) sorted ascending — one
                        point per trading day (last sample of the day).
-                       Used for daily-return-based stats (CAGR, Sharpe,
-                       Sortino, daily MDD).
         intraday_values: optional ordered list of equity values at higher
-                       frequency (hourly or finer). Used for intraday MDD
-                       which catches peaks/troughs the daily series misses.
+                       frequency. Used for intraday MDD.
+        cash_flows: optional list aligned with equity_series — external
+                       deposit (+) / withdrawal (-) amount that landed in
+                       the equity between the prior snapshot and this one.
+                       When provided, metrics are computed via Time-
+                       Weighted Return (TWR), excluding the dollar impact
+                       of deposits/withdrawals from the strategy's return.
+                       P1-D (2026-05-14) fix — without this, a single
+                       deposit doubling equity makes net_return read +100%
+                       and Sharpe explode.
     """
     n = len(equity_series)
     if n < 2:
@@ -270,7 +277,6 @@ def compute_equity_metrics(
                              intraday_sample_count=0)
         if equity_series:
             zero.start_equity = zero.end_equity = equity_series[0][1]
-        # Even with <2 daily samples, intraday series may have lots
         if intraday_values and len(intraday_values) >= 2:
             zero.intraday_max_drawdown_pct = _compute_intraday_dd(intraday_values)
             zero.intraday_sample_count = len(intraday_values)
@@ -279,53 +285,80 @@ def compute_equity_metrics(
     start = equity_series[0][1]
     end = equity_series[-1][1]
     days = (equity_series[-1][0] - equity_series[0][0]).days
-    if days <= 0 or start <= 0:
-        net_return = 0.0
-        cagr = 0.0
-    else:
-        net_return = (end - start) / start
-        # Annualization needs enough daily samples to avoid blowing up.
-        # With < 7 days the projection is meaningless (any 1-day move
-        # extrapolates to thousands of percent), so don't extrapolate.
-        if days >= 7 and start > 0:
-            cagr = ((end / start) ** (365.0 / days)) - 1
+
+    # TWR path: build a synthetic equity curve where cash-flow days don't
+    # produce a return. Then run MDD / Sharpe / etc on the synthetic curve.
+    use_twr = (
+        cash_flows is not None
+        and len(cash_flows) == n
+        and any(cf != 0.0 for cf in cash_flows)
+    )
+    if use_twr:
+        synth: list[tuple[date, float]] = [(equity_series[0][0], 1.0)]
+        for i in range(1, n):
+            prev_eq = equity_series[i - 1][1]
+            cur_eq = equity_series[i][1]
+            cf = float(cash_flows[i])
+            if prev_eq <= 0:
+                synth.append((equity_series[i][0], synth[-1][1]))
+                continue
+            r = (cur_eq - cf - prev_eq) / prev_eq
+            synth.append((equity_series[i][0], synth[-1][1] * (1.0 + r)))
+        # Returns + total from synthetic curve.
+        net_return = synth[-1][1] - 1.0
+        if days >= 7:
+            cagr = ((1.0 + net_return) ** (365.0 / days)) - 1.0
         else:
             cagr = 0.0
+        curve_for_mdd = synth
+    else:
+        if days <= 0 or start <= 0:
+            net_return = 0.0
+            cagr = 0.0
+        else:
+            net_return = (end - start) / start
+            if days >= 7 and start > 0:
+                cagr = ((end / start) ** (365.0 / days)) - 1
+            else:
+                cagr = 0.0
+        curve_for_mdd = equity_series
 
-    # Max drawdown + recovery
-    peak = start
+    # Max drawdown + recovery on whichever curve we're using.
+    peak = curve_for_mdd[0][1]
     peak_idx = 0
     max_dd = 0.0
     max_dd_idx = 0
-    for i, (_, v) in enumerate(equity_series):
+    for i, (_, v) in enumerate(curve_for_mdd):
         if v > peak:
             peak = v
             peak_idx = i
         if peak > 0:
-            dd = (v - peak) / peak  # ≤ 0
+            dd = (v - peak) / peak
             if dd < max_dd:
                 max_dd = dd
                 max_dd_idx = i
 
-    # DD recovery: days from trough to first equity ≥ peak
     recovery_days = 0
     if max_dd_idx > 0:
-        recovery_target = equity_series[peak_idx][1]
-        for j in range(max_dd_idx + 1, len(equity_series)):
-            if equity_series[j][1] >= recovery_target:
-                recovery_days = (equity_series[j][0] - equity_series[max_dd_idx][0]).days
+        recovery_target = curve_for_mdd[peak_idx][1]
+        for j in range(max_dd_idx + 1, len(curve_for_mdd)):
+            if curve_for_mdd[j][1] >= recovery_target:
+                recovery_days = (curve_for_mdd[j][0] - curve_for_mdd[max_dd_idx][0]).days
                 break
         else:
-            # Not yet recovered: count days from trough to series end
-            recovery_days = (equity_series[-1][0] - equity_series[max_dd_idx][0]).days
+            recovery_days = (curve_for_mdd[-1][0] - curve_for_mdd[max_dd_idx][0]).days
 
-    # Daily returns for Sharpe / Sortino
+    # Daily returns for Sharpe / Sortino. For TWR, exclude cash-flow effect.
     returns = []
     for i in range(1, len(equity_series)):
         prev = equity_series[i - 1][1]
         cur = equity_series[i][1]
         if prev > 0:
-            returns.append((cur - prev) / prev)
+            if use_twr:
+                cf = float(cash_flows[i])
+                returns.append((cur - cf - prev) / prev)
+            else:
+                returns.append((cur - prev) / prev)
     # Need ≥7 daily returns to compute meaningful Sharpe/Sortino —
     # otherwise the std is too noisy and the annualization (×√252)
     # explodes (e.g. 9.28 Sharpe on 1-day sample).
