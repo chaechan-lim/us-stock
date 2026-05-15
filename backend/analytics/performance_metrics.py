@@ -415,33 +415,74 @@ _BENCHMARK_CACHE: dict[str, tuple[float, float]] = {}  # key → (return_pct, fe
 _BENCHMARK_TTL_SEC = 300  # 5 min
 
 
-def benchmark_return_pct(symbol: str, days: int) -> float | None:
-    """Fetch the benchmark's % return over the trailing `days` window.
+def benchmark_return_pct(
+    symbol: str,
+    days: int,
+    start_date: date | None = None,
+    end_date: date | None = None,
+) -> float | None:
+    """Fetch the benchmark's % return over a window.
+
+    P1-G (2026-05-15): when ``start_date`` and ``end_date`` are provided,
+    use them as the EXACT comparison window — overriding ``days``. This
+    aligns the benchmark to the actual data range so alpha = our_return -
+    benchmark_return is an apples-to-apples comparison. Without alignment,
+    a 9-day live history compared against SPY's 30d return falsely showed
+    -7% alpha when same-window comparison was +5% alpha.
+
+    ``days`` is kept for backward compat / caching key + fallback when
+    date range isn't available.
 
     Cached for 5 min so the dashboard's 60s refetch doesn't hammer yfinance.
     Returns None on fetch failure.
     """
     import time as _t
-    key = f"{symbol}|{days}"
-    cached = _BENCHMARK_CACHE.get(key)
+    cache_key = (
+        f"{symbol}|{start_date.isoformat()}|{end_date.isoformat()}"
+        if start_date and end_date
+        else f"{symbol}|{days}"
+    )
+    cached = _BENCHMARK_CACHE.get(cache_key)
     if cached and (_t.time() - cached[1]) < _BENCHMARK_TTL_SEC:
         return cached[0]
 
     try:
-        import yfinance as yf  # local import — yfinance load is slow
-        # Pull a few extra days to handle weekends/holidays around boundaries.
-        t = yf.Ticker(symbol)
-        hist = t.history(period=f"{max(days + 7, 14)}d", interval="1d")
-        if hist is None or hist.empty or len(hist) < 2:
-            return None
-        # Window: last `days` trading sessions (or what we have)
-        window = hist.tail(days + 1) if len(hist) > days + 1 else hist
-        first = float(window["Close"].iloc[0])
-        last = float(window["Close"].iloc[-1])
+        import yfinance as yf
+
+        if start_date and end_date:
+            # Fetch the exact window. Pad +/- a few days to handle
+            # weekends/holidays — pick first/last close inside the range.
+            pad_start = start_date - timedelta(days=5)
+            pad_end = end_date + timedelta(days=2)
+            hist = yf.download(
+                symbol, start=pad_start, end=pad_end,
+                progress=False, auto_adjust=False, threads=False,
+            )
+            if hist is None or hist.empty:
+                return None
+            if hasattr(hist.columns, "nlevels") and hist.columns.nlevels > 1:
+                hist.columns = hist.columns.get_level_values(0)
+            # Closes on or before start_date for first, on or before end_date for last
+            import pandas as _pd
+            idx = _pd.to_datetime(hist.index).date
+            in_window = [(d, p) for d, p in zip(idx, hist["Close"]) if start_date <= d <= end_date]
+            if len(in_window) < 2:
+                return None
+            first = float(in_window[0][1])
+            last = float(in_window[-1][1])
+        else:
+            t = yf.Ticker(symbol)
+            hist = t.history(period=f"{max(days + 7, 14)}d", interval="1d")
+            if hist is None or hist.empty or len(hist) < 2:
+                return None
+            window = hist.tail(days + 1) if len(hist) > days + 1 else hist
+            first = float(window["Close"].iloc[0])
+            last = float(window["Close"].iloc[-1])
+
         if first <= 0:
             return None
         ret = (last - first) / first * 100
-        _BENCHMARK_CACHE[key] = (ret, _t.time())
+        _BENCHMARK_CACHE[cache_key] = (ret, _t.time())
         return round(ret, 2)
     except Exception:
         return None
