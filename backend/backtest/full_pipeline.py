@@ -294,6 +294,7 @@ class PipelineConfig:
     cash_parking_min_hold_days: int = 0       # 0=no minimum, 10=~2 weeks
     cash_parking_enable_unpark: bool = False   # sell parking when BUY needs cash
     cash_parking_max_pct: float = 1.0          # cap parking value as fraction of equity
+    cash_parking_per_cycle_pct: float = 1.0    # P3-A: max single buy as fraction of equity
 
     # Leveraged ETF allocation
     enable_leveraged_etf: bool = False
@@ -1018,15 +1019,19 @@ class FullPipelineBacktest:
             price = float(data.df.iloc[date_idx]["close"])
             if price <= 0:
                 return
-            # Cap: existing parking value + park_amount ≤ max_pct * equity
+            # Cap: existing parking value + park_amount ≤ max_pct * equity.
+            # P3-A: also clamp to per_cycle_pct × equity (averaging-in).
             existing_pos = self._positions[parking_sym]
             existing_val = existing_pos.quantity * price
             max_park_value = equity * cfg.cash_parking_max_pct
             headroom = max_park_value - existing_val
             if headroom <= 0:
                 return
+            per_cycle_cap = equity * cfg.cash_parking_per_cycle_pct
             if park_amount > headroom:
                 park_amount = headroom
+            if park_amount > per_cycle_cap:
+                park_amount = per_cycle_cap
             exec_price = price * (1 + cfg.slippage_pct / 100)
             add_qty = int(park_amount / exec_price)
             if add_qty <= 0:
@@ -1055,13 +1060,17 @@ class FullPipelineBacktest:
         if cash_pct < cfg.cash_parking_threshold:
             return
 
-        # Initial buy: split_ratio of excess, capped by max_pct
+        # Initial buy: split_ratio of excess, capped by max_pct and per_cycle.
+        # P3-A: per_cycle ensures the first buy isn't a one-shot 40% dump.
         park_amount = (self._cash - equity * 0.10) * cfg.cash_parking_split_ratio
         if park_amount <= 0:
             return
         max_park_value = equity * cfg.cash_parking_max_pct
         if park_amount > max_park_value:
             park_amount = max_park_value
+        per_cycle_cap = equity * cfg.cash_parking_per_cycle_pct
+        if park_amount > per_cycle_cap:
+            park_amount = per_cycle_cap
 
         price = float(data.df.iloc[date_idx]["close"])
         if price <= 0:

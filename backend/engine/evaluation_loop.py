@@ -1297,15 +1297,11 @@ class EvaluationLoop:
         # per-cycle chunk towards the cap (averaging-in).
         try:
             positions = await self._get_positions()
-            existing_qty = sum(
-                p.quantity for p in positions if p.symbol == sym and p.quantity > 0
-            )
-            existing_price = next(
-                (getattr(p, "current_price", 0) or 0
-                 for p in positions if p.symbol == sym and p.quantity > 0),
-                0.0,
-            )
-            existing_value = float(existing_qty * existing_price)
+            existing_value = float(sum(
+                p.quantity * (getattr(p, "current_price", 0) or 0)
+                for p in positions
+                if p.symbol == sym and p.quantity > 0
+            ))
         except Exception as e:
             logger.debug("park: position check failed: %s", e)
             return
@@ -1340,10 +1336,12 @@ class EvaluationLoop:
         if cash_after_buffer <= 0:
             return
         per_cycle = equity * self._cash_parking_per_cycle_pct
-        park_amount = min(headroom, cash_after_buffer, per_cycle)
+        non_chunk_cap = min(headroom, cash_after_buffer)
+        park_amount = min(non_chunk_cap, per_cycle)
         if park_amount <= 0:
             return
-        if park_amount < min(headroom, cash_after_buffer):
+        if park_amount < non_chunk_cap:
+            # per_cycle was the binding constraint — log for visibility.
             logger.debug(
                 "Cash parking: per-cycle chunk %.0f (headroom=%.0f, cap=%.0f%%, "
                 "existing=%.0f)",
