@@ -4695,6 +4695,21 @@ class TestCashParking:
         with pytest.raises(ValueError):
             loop.set_cash_parking_config(enabled=True, threshold=-0.1)
 
+    def test_set_config_max_pct(self, loop):
+        """P3 (2026-05-15): max_pct cap setter."""
+        loop.set_cash_parking_config(enabled=True, max_pct=0.40)
+        assert loop._cash_parking_max_pct == pytest.approx(0.40)
+
+    def test_set_config_validates_max_pct(self, loop):
+        with pytest.raises(ValueError):
+            loop.set_cash_parking_config(enabled=True, max_pct=1.5)
+        with pytest.raises(ValueError):
+            loop.set_cash_parking_config(enabled=True, max_pct=-0.1)
+
+    def test_default_max_pct(self, loop):
+        """P3 default: 25% (conservative starting point before yaml override)."""
+        assert loop._cash_parking_max_pct == pytest.approx(0.25)
+
     def test_set_config_validates_buffer(self, loop):
         with pytest.raises(ValueError):
             loop.set_cash_parking_config(enabled=True, buffer=1.5)

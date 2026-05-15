@@ -293,6 +293,7 @@ class PipelineConfig:
     cash_parking_split_ratio: float = 1.0     # 1.0=lump, 0.25=buy 25% per cycle
     cash_parking_min_hold_days: int = 0       # 0=no minimum, 10=~2 weeks
     cash_parking_enable_unpark: bool = False   # sell parking when BUY needs cash
+    cash_parking_max_pct: float = 1.0          # cap parking value as fraction of equity
 
     # Leveraged ETF allocation
     enable_leveraged_etf: bool = False
@@ -1017,6 +1018,15 @@ class FullPipelineBacktest:
             price = float(data.df.iloc[date_idx]["close"])
             if price <= 0:
                 return
+            # Cap: existing parking value + park_amount ≤ max_pct * equity
+            existing_pos = self._positions[parking_sym]
+            existing_val = existing_pos.quantity * price
+            max_park_value = equity * cfg.cash_parking_max_pct
+            headroom = max_park_value - existing_val
+            if headroom <= 0:
+                return
+            if park_amount > headroom:
+                park_amount = headroom
             exec_price = price * (1 + cfg.slippage_pct / 100)
             add_qty = int(park_amount / exec_price)
             if add_qty <= 0:
@@ -1045,10 +1055,13 @@ class FullPipelineBacktest:
         if cash_pct < cfg.cash_parking_threshold:
             return
 
-        # Initial buy: split_ratio of excess
+        # Initial buy: split_ratio of excess, capped by max_pct
         park_amount = (self._cash - equity * 0.10) * cfg.cash_parking_split_ratio
         if park_amount <= 0:
             return
+        max_park_value = equity * cfg.cash_parking_max_pct
+        if park_amount > max_park_value:
+            park_amount = max_park_value
 
         price = float(data.df.iloc[date_idx]["close"])
         if price <= 0:

@@ -155,6 +155,7 @@ def _apply_kr_eval_overrides(
             buffer=kr_park.get("buffer"),
             min_hold_days=kr_park.get("min_hold_days"),
             enable_unpark=kr_park.get("enable_unpark"),
+            max_pct=kr_park.get("max_pct"),
         )
     else:
         kr_loop.set_cash_parking_config(enabled=False)
@@ -191,6 +192,7 @@ def _apply_us_eval_overrides(
         buffer=us_park.get("buffer"),
         min_hold_days=us_park.get("min_hold_days"),
         enable_unpark=us_park.get("enable_unpark"),
+        max_pct=us_park.get("max_pct"),
     )
 
     # D1 sector-strength boost on BUY (yaml-driven, hot-reloadable).
