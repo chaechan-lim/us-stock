@@ -898,7 +898,16 @@ async def performance_metrics(
     else:
         bench_symbol = "SPY"
         bench_label = "SPY"
-    bench_ret = benchmark_return_pct(bench_symbol, days)
+    # P1-G (2026-05-15): align benchmark window to our actual data range
+    # so alpha is apples-to-apples (when our snapshots span fewer days than
+    # the requested window, falling back to `days` would compare full-window
+    # SPY against partial-window us). Fall back to days when we lack 2+
+    # snapshots.
+    bench_start = equity_series[0][0] if len(equity_series) >= 2 else None
+    bench_end = equity_series[-1][0] if len(equity_series) >= 2 else None
+    bench_ret = benchmark_return_pct(
+        bench_symbol, days, start_date=bench_start, end_date=bench_end
+    )
     alpha_pct = None
     if bench_ret is not None and equity_metrics.net_return_pct is not None:
         alpha_pct = round(equity_metrics.net_return_pct - bench_ret, 2)
