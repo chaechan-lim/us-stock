@@ -669,6 +669,11 @@ markets:
       threshold: 0.30
       buffer: 0.10
       max_pct: 0.40
+      # P3-A (2026-05-15): per-cycle chunk to avoid one-shot 40% buy.
+      # 10% per cycle × 1h cooldown = 4 hours of averaging-in to reach
+      # the 40% cap. Protects against single-day SPY adverse move
+      # immediately after parking activates.
+      per_cycle_pct: 0.10
       min_hold_days: 10
       enable_unpark: true
     evaluation_loop:

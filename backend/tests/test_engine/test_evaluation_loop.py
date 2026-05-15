@@ -4710,6 +4710,24 @@ class TestCashParking:
         """P3 default: 25% (conservative starting point before yaml override)."""
         assert loop._cash_parking_max_pct == pytest.approx(0.25)
 
+    def test_set_config_per_cycle_pct(self, loop):
+        """P3-A (2026-05-15): per-cycle chunk setter."""
+        loop.set_cash_parking_config(enabled=True, per_cycle_pct=0.05)
+        assert loop._cash_parking_per_cycle_pct == pytest.approx(0.05)
+
+    def test_set_config_validates_per_cycle_pct(self, loop):
+        with pytest.raises(ValueError):
+            loop.set_cash_parking_config(enabled=True, per_cycle_pct=1.5)
+        with pytest.raises(ValueError):
+            loop.set_cash_parking_config(enabled=True, per_cycle_pct=0)  # must be > 0
+        with pytest.raises(ValueError):
+            loop.set_cash_parking_config(enabled=True, per_cycle_pct=-0.1)
+
+    def test_default_per_cycle_pct(self, loop):
+        """P3-A default: 10% — 4 chunks reaches 40% cap with 1h cooldown
+        spreading the build-up over ~4 hours."""
+        assert loop._cash_parking_per_cycle_pct == pytest.approx(0.10)
+
     def test_set_config_validates_buffer(self, loop):
         with pytest.raises(ValueError):
             loop.set_cash_parking_config(enabled=True, buffer=1.5)
@@ -4773,15 +4791,38 @@ class TestCashParking:
         assert call_kwargs["symbol"] == "SPY"
         assert call_kwargs["quantity"] > 0
 
-    async def test_park_skipped_if_already_holding_spy(self, loop, mock_adapter, mock_market_data):
-        loop.set_cash_parking_config(enabled=True)
+    async def test_park_skipped_if_at_cap(self, loop, mock_adapter, mock_market_data):
+        """P3-A (2026-05-15): skip new buy only when existing SPY value
+        already at/over max_pct cap. Previously skipped on any holding —
+        which prevented averaging-in across cycles."""
+        loop.set_cash_parking_config(enabled=True, max_pct=0.25)
+        # mock balance equity = $100k → cap = $25k. Hold $30k of SPY (at cap).
+        mock_market_data.get_positions = AsyncMock(
+            return_value=[Position(
+                symbol="SPY", quantity=300, avg_price=100, current_price=100, exchange="NASD",
+            )]
+        )
+        await loop._park_excess_cash()
+        mock_adapter.create_buy_order.assert_not_called()
+
+    async def test_park_adds_chunk_when_holding_below_cap(self, loop, mock_adapter, mock_market_data):
+        """P3-A: when existing holding < cap, add a per-cycle chunk."""
+        loop.set_cash_parking_config(enabled=True, max_pct=0.40, per_cycle_pct=0.10)
+        # equity = $100k, cap = $40k. Hold $10k of SPY (well below cap).
         mock_market_data.get_positions = AsyncMock(
             return_value=[Position(
                 symbol="SPY", quantity=100, avg_price=100, current_price=100, exchange="NASD",
             )]
         )
+        mock_adapter.create_buy_order = AsyncMock(
+            return_value=OrderResult(
+                order_id="PARK_ADD", symbol="SPY", side="BUY", order_type="limit",
+                quantity=10, price=100.0, status="filled", filled_price=100.0,
+            )
+        )
         await loop._park_excess_cash()
-        mock_adapter.create_buy_order.assert_not_called()
+        # per_cycle_pct=10% × $100k = $10k chunk → should fire
+        assert mock_adapter.create_buy_order.call_count == 1
 
     async def test_park_cooldown_prevents_rapid_repeat(self, loop, mock_adapter, mock_market_data):
         """2026-04-11: park should fire at most once per hour (cooldown).

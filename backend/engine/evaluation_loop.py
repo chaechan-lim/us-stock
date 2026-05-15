@@ -190,6 +190,12 @@ class EvaluationLoop:
         # cause — parking grew to 57% of US positions, blocking strategy
         # BUYs). When existing parking value ≥ this cap, skip new park.
         self._cash_parking_max_pct: float = 0.25     # 25% of equity max
+        # P3-A (2026-05-15) per-cycle split: cap a single buy to this
+        # fraction of equity so a 40% target isn't dumped in one order
+        # (averaging-in vs one-shot single-day exposure to SPY).
+        # Default 10% → 4 cycles minimum to reach 40% cap; with 1h
+        # cooldown that's 4 hours of averaging.
+        self._cash_parking_per_cycle_pct: float = 0.10
         # Per-cycle position cache — set at start of _evaluate_all, cleared after.
         # Downstream methods use _get_positions() which returns this cache when fresh.
         self._cycle_positions: list | None = None
@@ -238,6 +244,7 @@ class EvaluationLoop:
         min_hold_days: int | None = None,
         enable_unpark: bool | None = None,
         max_pct: float | None = None,
+        per_cycle_pct: float | None = None,
     ) -> None:
         """Configure cash parking (idle cash → SPY/KODEX 200).
 
@@ -250,6 +257,9 @@ class EvaluationLoop:
             enable_unpark: Allow selling parking when BUY needs cash.
             max_pct: Hard cap on parking value as fraction of equity
                 (default 0.25). Skip new parks when at/over cap.
+            per_cycle_pct: Max fraction of equity to buy in a single
+                cycle (default 0.10). Splits the build-up to max_pct
+                across multiple cycles for averaging-in.
         """
         self._cash_parking_enabled = bool(enabled)
         if symbol:
@@ -270,6 +280,12 @@ class EvaluationLoop:
             if not (0.0 <= max_pct <= 1.0):
                 raise ValueError(f"cash_parking max_pct must be in [0,1], got {max_pct}")
             self._cash_parking_max_pct = float(max_pct)
+        if per_cycle_pct is not None:
+            if not (0.0 < per_cycle_pct <= 1.0):
+                raise ValueError(
+                    f"cash_parking per_cycle_pct must be in (0,1], got {per_cycle_pct}"
+                )
+            self._cash_parking_per_cycle_pct = float(per_cycle_pct)
         logger.info(
             "Market %s: cash_parking enabled=%s symbol=%s threshold=%.2f buffer=%.2f "
             "min_hold=%dd unpark=%s",
@@ -1276,22 +1292,25 @@ class EvaluationLoop:
             return
 
         # Already holding? skip (parking is one-shot).
-        # Also enforce max_pct cap: skip if any existing parking value
-        # already at/over the cap (2026-05-15 P3 — prevents the 4-28
-        # disable scenario where parking ate 57% of US positions).
+        # P3-A (2026-05-15): existing parking value vs cap.
+        # Skip new buy if already at/over max_pct cap. Otherwise add a
+        # per-cycle chunk towards the cap (averaging-in).
         try:
             positions = await self._get_positions()
-            if any(p.symbol == sym and p.quantity > 0 for p in positions):
-                return
-            # Compute current parking exposure (in case another parking
-            # symbol exists in the future). Currently single-symbol so
-            # this is just the parking symbol itself, but guards against
-            # multi-symbol parking in future.
+            existing_qty = sum(
+                p.quantity for p in positions if p.symbol == sym and p.quantity > 0
+            )
+            existing_price = next(
+                (getattr(p, "current_price", 0) or 0
+                 for p in positions if p.symbol == sym and p.quantity > 0),
+                0.0,
+            )
+            existing_value = float(existing_qty * existing_price)
         except Exception as e:
             logger.debug("park: position check failed: %s", e)
             return
 
-        # Pending BUY order for parking symbol? skip
+        # Pending BUY order for parking symbol? skip (don't stack orders)
         if self._order_manager.has_pending_order(sym, "BUY"):
             return
 
@@ -1309,20 +1328,28 @@ class EvaluationLoop:
         if cash_pct < self._cash_parking_threshold:
             return
 
-        # Compute park amount, then cap to (max_pct * equity) so parking
-        # never crowds out strategy BUYs by eating the exposure cap.
-        park_amount = cash - equity * self._cash_parking_buffer
-        if park_amount <= 0:
-            return
+        # Caps:
+        #   1. headroom = max_pct × equity − existing_value  (don't exceed cap)
+        #   2. per-cycle = per_cycle_pct × equity            (averaging-in)
+        #   3. cash-buffer = cash − buffer × equity         (keep some cash)
         max_park_value = equity * self._cash_parking_max_pct
-        if park_amount > max_park_value:
-            logger.info(
-                "Cash parking: clamping park_amount %.0f → %.0f (max_pct=%.0f%%)",
-                park_amount, max_park_value, self._cash_parking_max_pct * 100,
-            )
-            park_amount = max_park_value
+        headroom = max_park_value - existing_value
+        if headroom <= 0:
+            return  # Already at/over cap
+        cash_after_buffer = cash - equity * self._cash_parking_buffer
+        if cash_after_buffer <= 0:
+            return
+        per_cycle = equity * self._cash_parking_per_cycle_pct
+        park_amount = min(headroom, cash_after_buffer, per_cycle)
         if park_amount <= 0:
             return
+        if park_amount < min(headroom, cash_after_buffer):
+            logger.debug(
+                "Cash parking: per-cycle chunk %.0f (headroom=%.0f, cap=%.0f%%, "
+                "existing=%.0f)",
+                park_amount, headroom,
+                self._cash_parking_max_pct * 100, existing_value,
+            )
 
         try:
             df = await self._market_data.get_ohlcv(sym, limit=2)
