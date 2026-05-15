@@ -184,6 +184,12 @@ class EvaluationLoop:
         self._cash_parking_symbol: str = "SPY" if market == "US" else "069500"
         self._cash_parking_threshold: float = 0.30  # park if cash > 30% of equity
         self._cash_parking_buffer: float = 0.10     # keep 10% cash buffer for opportunities
+        # P3 (2026-05-15) re-enable safety: hard cap on total parking
+        # exposure as a fraction of total equity. Prevents parking from
+        # eating the US BUY exposure cap (was the 2026-04-28 disable
+        # cause — parking grew to 57% of US positions, blocking strategy
+        # BUYs). When existing parking value ≥ this cap, skip new park.
+        self._cash_parking_max_pct: float = 0.25     # 25% of equity max
         # Per-cycle position cache — set at start of _evaluate_all, cleared after.
         # Downstream methods use _get_positions() which returns this cache when fresh.
         self._cycle_positions: list | None = None
@@ -231,6 +237,7 @@ class EvaluationLoop:
         buffer: float | None = None,
         min_hold_days: int | None = None,
         enable_unpark: bool | None = None,
+        max_pct: float | None = None,
     ) -> None:
         """Configure cash parking (idle cash → SPY/KODEX 200).
 
@@ -241,6 +248,8 @@ class EvaluationLoop:
             buffer: Keep this fraction of equity in cash (default 0.10).
             min_hold_days: Minimum days before unpark allowed (default 10).
             enable_unpark: Allow selling parking when BUY needs cash.
+            max_pct: Hard cap on parking value as fraction of equity
+                (default 0.25). Skip new parks when at/over cap.
         """
         self._cash_parking_enabled = bool(enabled)
         if symbol:
@@ -257,6 +266,10 @@ class EvaluationLoop:
             self._cash_parking_min_hold_days = int(min_hold_days)
         if enable_unpark is not None:
             self._cash_parking_enable_unpark = bool(enable_unpark)
+        if max_pct is not None:
+            if not (0.0 <= max_pct <= 1.0):
+                raise ValueError(f"cash_parking max_pct must be in [0,1], got {max_pct}")
+            self._cash_parking_max_pct = float(max_pct)
         logger.info(
             "Market %s: cash_parking enabled=%s symbol=%s threshold=%.2f buffer=%.2f "
             "min_hold=%dd unpark=%s",
@@ -1262,11 +1275,18 @@ class EvaluationLoop:
         if now - last < 3600:
             return
 
-        # Already holding? skip
+        # Already holding? skip (parking is one-shot).
+        # Also enforce max_pct cap: skip if any existing parking value
+        # already at/over the cap (2026-05-15 P3 — prevents the 4-28
+        # disable scenario where parking ate 57% of US positions).
         try:
             positions = await self._get_positions()
             if any(p.symbol == sym and p.quantity > 0 for p in positions):
                 return
+            # Compute current parking exposure (in case another parking
+            # symbol exists in the future). Currently single-symbol so
+            # this is just the parking symbol itself, but guards against
+            # multi-symbol parking in future.
         except Exception as e:
             logger.debug("park: position check failed: %s", e)
             return
@@ -1289,8 +1309,18 @@ class EvaluationLoop:
         if cash_pct < self._cash_parking_threshold:
             return
 
-        # Compute park amount
+        # Compute park amount, then cap to (max_pct * equity) so parking
+        # never crowds out strategy BUYs by eating the exposure cap.
         park_amount = cash - equity * self._cash_parking_buffer
+        if park_amount <= 0:
+            return
+        max_park_value = equity * self._cash_parking_max_pct
+        if park_amount > max_park_value:
+            logger.info(
+                "Cash parking: clamping park_amount %.0f → %.0f (max_pct=%.0f%%)",
+                park_amount, max_park_value, self._cash_parking_max_pct * 100,
+            )
+            park_amount = max_park_value
         if park_amount <= 0:
             return
 

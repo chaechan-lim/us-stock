@@ -652,18 +652,23 @@ markets:
     #   - Pending-order check prevents duplicate BUY orders
     #   - SPY position is sold only by strategy signals or manual action
     cash_parking:
-      # 2026-04-28: disabled outright. SPY parking ate US exposure cap
-      # (~57% of US positions), every BUY rejected with "Max exposure 86%",
-      # 0 fills on 4/24 + 4/27 US sessions. PR #118 (unpark on exposure
-      # rejection) reintroduced the 4/11 churn pattern (parking → unpark
-      # → repark loop, 1-hour cooldown only). Cleanest exit: stop parking,
-      # accept idle-cash drag (~13pp alpha per validate_cash_parking V1)
-      # over predictable trading. Re-enable after parking_max_pct cap is
-      # designed (parking can't exceed e.g. 25% of US allocation).
-      enabled: false
+      # 2026-05-15 (P3): re-enabled with parking_max_pct cap (the 4-28
+      # block-reason). Backtest sweep compare_parking_cap.py US 2y on
+      # Phase 2+P1 baseline:
+      #   V0_off:       Ret +28.1% Sharpe +1.94 MDD -5.7% PF 1.77 (no parking)
+      #   V1_cap_15:    Ret +32.8% Sharpe +2.23 MDD -4.0% PF 1.89 (+4.6pp)
+      #   V2_cap_25:    Ret +29.2% Sharpe +1.94 MDD -5.0% PF 1.66 (+1.1pp)
+      #   V3_cap_40:    Ret +43.3% Sharpe +2.85 MDD -4.4% PF 2.06 (+15.2pp) ← ✓ adopt
+      #   V4_uncapped:  Ret +41.0% Sharpe +2.57 MDD -6.7% PF 1.88 (+12.9pp, 4-28 risk)
+      # V3 (40% cap)이 모든 4-dim 압도. uncapped도 비슷하지만 4-28 churn
+      # 위험. 40% cap이 sweet spot. threshold 0.30 (cash > 30% 시 park) +
+      # buffer 0.10 (10%는 항상 cash로 keep) + max_pct 0.40 (parking 최대
+      # 40% of equity, 나머지 60%는 strategy + cash buffer로 보존).
+      enabled: true
       symbol: SPY
-      threshold: 0.70
+      threshold: 0.30
       buffer: 0.10
+      max_pct: 0.40
       min_hold_days: 10
       enable_unpark: true
     evaluation_loop:
