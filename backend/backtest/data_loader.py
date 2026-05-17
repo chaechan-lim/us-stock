@@ -169,12 +169,17 @@ class BacktestDataLoader:
         symbols: list[str],
         period: str = "3y",
         interval: str = "1d",
+        start: str | None = None,
+        end: str | None = None,
     ) -> dict[str, BacktestData]:
-        """Load data for multiple symbols."""
+        """Load data for multiple symbols. Custom start/end override period."""
         result = {}
         for symbol in symbols:
             try:
-                result[symbol] = self.load(symbol, period=period, interval=interval)
+                result[symbol] = self.load(
+                    symbol, period=period, interval=interval,
+                    start=start, end=end,
+                )
             except Exception as e:
                 logger.warning("Failed to load data for %s: %s", symbol, e)
         return result
