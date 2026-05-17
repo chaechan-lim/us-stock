@@ -296,6 +296,19 @@ class PipelineConfig:
     cash_parking_max_pct: float = 1.0          # cap parking value as fraction of equity
     cash_parking_per_cycle_pct: float = 1.0    # P3-A: max single buy as fraction of equity
 
+    # ETF Engine integration (2026-05-15) — regime-based bull/bear + sector
+    # rotation, sharing the same cash pool as strategy positions + cash_parking.
+    # Tests realistic capital competition (parking 40% + ETF 20% scenario).
+    enable_etf_engine: bool = False
+    etf_max_portfolio_pct: float = 0.10        # total ETF value cap (fraction of equity)
+    etf_max_single_pct: float = 0.05           # per-ETF cap
+    etf_max_hold_days: int = 20
+    etf_max_regime_etfs: int = 2
+    etf_max_sector_etfs: int = 3
+    etf_bear_min_distance_pct: float = -5.0    # SPY ≥5% below SMA200 for bear ETF
+    etf_bear_min_confidence: float = 0.7
+    etf_universe_config_path: str | None = None
+
     # Leveraged ETF allocation
     enable_leveraged_etf: bool = False
     etf_symbol: str = "TQQQ"           # Leveraged ETF to trade
@@ -464,6 +477,12 @@ class FullPipelineBacktest:
         self._recovery_watch: dict[str, int] = {}
         self._day_count: int = 0
 
+        # ETF Engine integration (2026-05-15). Lazy-init when enabled so
+        # unrelated tests don't load the universe yaml.
+        self._etf_universe = None
+        self._etf_detector = None
+        self._etf_prices: dict[str, "pd.Series"] = {}
+
         # Trading gates (matching live evaluation_loop)
         self._sell_cooldown: dict[str, int] = {}  # symbol → day_count when sold
         self._loss_sell_history: dict[str, list[int]] = {}  # symbol → [day_counts]
@@ -579,17 +598,33 @@ class FullPipelineBacktest:
         parking_symbols = []
         if cfg.enable_cash_parking and cfg.cash_parking_symbol:
             parking_symbols = [cfg.cash_parking_symbol]
+        # ETF Engine universe loading (2026-05-15)
+        etf_engine_symbols: list[str] = []
+        if cfg.enable_etf_engine:
+            from scanner.etf_universe import ETFUniverse
+            from data.market_state import MarketStateDetector
+
+            self._etf_universe = ETFUniverse(cfg.etf_universe_config_path)
+            self._etf_detector = MarketStateDetector()
+            etf_engine_symbols = list(self._etf_universe.all_etf_symbols)
         all_symbols = list(dict.fromkeys(
-            [regime_sym] + cfg.universe + etf_symbols + parking_symbols
+            [regime_sym] + cfg.universe + etf_symbols
+            + parking_symbols + etf_engine_symbols
         ))
         all_data = self._data_loader.load_multiple(
-            all_symbols, period=period,
+            all_symbols, period=period, start=start, end=end,
         )
 
         if regime_sym not in all_data:
             raise ValueError(
                 f"Failed to load {regime_sym} data (required for market state)"
             )
+
+        # Stash ETF Engine close-price series for daily decisions
+        if cfg.enable_etf_engine and etf_engine_symbols:
+            for sym in etf_engine_symbols:
+                if sym in all_data:
+                    self._etf_prices[sym] = all_data[sym].df["close"]
 
         spy_data = all_data[regime_sym]
         # Keep regime symbol out of stock_data for screening, BUT keep
@@ -734,6 +769,12 @@ class FullPipelineBacktest:
 
             # 4d2. Check SL/TP/trailing stop on existing positions (regular)
             self._check_risk_exits(stock_data, date_idx, date)
+
+            # 4d3. ETF Engine daily decision (2026-05-15 integrated harness).
+            #      Shares the same cash pool — competes with strategy +
+            #      cash_parking for capital deployment.
+            if cfg.enable_etf_engine:
+                self._manage_etf_engine(date_idx, date)
 
             # 4e. Evaluate signals and execute
             buy_candidates: list[tuple[float, str, Signal]] = []
@@ -971,6 +1012,199 @@ class FullPipelineBacktest:
 
         logger.info("\n%s", result.summary())
         return result
+
+    # ------------------------------------------------------------------
+    # ETF Engine (2026-05-15) — daily decision for bull/bear + sector
+    # rotation, sharing the same cash pool as strategy positions + parking.
+    # ------------------------------------------------------------------
+
+    def _manage_etf_engine(self, date_idx: int, date) -> None:
+        """Daily ETF Engine decision step, mutating self._positions /
+        self._cash like every other path. Position metadata uses
+        strategy_name="etf_regime_bull"/"etf_regime_bear"/"etf_sector"
+        for downstream attribution.
+        """
+        cfg = self._config
+        if not cfg.enable_etf_engine or self._etf_universe is None:
+            return
+        if not self._etf_prices:
+            return
+
+        # 1) Regime detection on the same SPY series the rest of the
+        #    pipeline uses (date_idx-1 to avoid look-ahead since we're
+        #    executing at this bar's close-ish).
+        from data.market_state import MarketRegime
+        spy_series = self._etf_prices.get("SPY")
+        if spy_series is None or date_idx >= len(spy_series) or date_idx < 200:
+            return
+        spy_window = spy_series.iloc[: date_idx + 1].rename("close").to_frame()
+        vix_series = self._etf_prices.get("^VIX")
+        vix_val = (
+            float(vix_series.iloc[date_idx])
+            if vix_series is not None and date_idx < len(vix_series)
+            else None
+        )
+        state = self._etf_detector.detect(spy_window, vix_level=vix_val)
+        regime = state.regime
+
+        equity = self._calculate_equity({sym: None for sym in []}, date_idx)  # dummy
+
+        # 2) Equity calc: cash + sum(positions × current price)
+        equity = self._cash
+        for sym, pos in self._positions.items():
+            px = self._latest_etf_price(sym, date_idx)
+            if px is None:
+                px = pos.avg_price
+            equity += pos.quantity * px
+
+        # 3) Hold-too-long: sell ETF positions held ≥ max_hold_days
+        for sym in list(self._positions):
+            pos = self._positions[sym]
+            if not pos.strategy_name.startswith("etf_"):
+                continue
+            held = self._day_count - pos.entry_day_count
+            if held >= cfg.etf_max_hold_days:
+                price = self._latest_etf_price(sym, date_idx)
+                if price is not None:
+                    self._close_position(sym, price, date, "etf_max_hold")
+
+        # 4) Bear ETF guards (match live)
+        is_bear_regime = regime in (
+            MarketRegime.WEAK_DOWNTREND, MarketRegime.DOWNTREND
+        )
+        bear_ok = (
+            not is_bear_regime
+            or (state.spy_distance_pct <= cfg.etf_bear_min_distance_pct
+                and state.confidence >= cfg.etf_bear_min_confidence)
+        )
+
+        regime_etfs = self._etf_universe.get_regime_etfs(regime.value)[
+            : cfg.etf_max_regime_etfs
+        ]
+        desired_regime = set(regime_etfs) if bear_ok else set()
+
+        # 5) Sector rotation (multi-horizon score, matches sector_analyzer)
+        desired_sector = self._pick_etf_top_sectors(date_idx)
+
+        desired = desired_regime | set(desired_sector)
+
+        # 6) Sell ETF positions no longer in desired set
+        for sym in list(self._positions):
+            pos = self._positions[sym]
+            if not pos.strategy_name.startswith("etf_"):
+                continue
+            if sym in desired:
+                continue
+            price = self._latest_etf_price(sym, date_idx)
+            if price is not None:
+                self._close_position(sym, price, date, "etf_rotation")
+
+        # 7) Buy new desired ETFs (subject to portfolio + single caps)
+        for sym in desired:
+            if sym in self._positions:
+                continue
+            price = self._latest_etf_price(sym, date_idx)
+            if price is None or price <= 0:
+                continue
+            # Recompute equity each iteration (positions changed above)
+            cur_equity = self._cash
+            for s, p in self._positions.items():
+                px = self._latest_etf_price(s, date_idx) or p.avg_price
+                cur_equity += p.quantity * px
+            if cur_equity <= 0:
+                continue
+
+            # Caps: single ETF + total ETF portfolio
+            single_cap = cur_equity * cfg.etf_max_single_pct
+            total_etf_value = sum(
+                p.quantity * (self._latest_etf_price(s, date_idx) or p.avg_price)
+                for s, p in self._positions.items()
+                if p.strategy_name.startswith("etf_")
+            )
+            portfolio_cap = cur_equity * cfg.etf_max_portfolio_pct
+            portfolio_room = portfolio_cap - total_etf_value
+            if portfolio_room <= 0:
+                break  # No more room for any ETF
+            target_value = min(single_cap, portfolio_room)
+            if target_value <= 0:
+                continue
+            exec_price = price * (1 + cfg.slippage_pct / 100)
+            quantity = int(target_value / exec_price)
+            if quantity <= 0:
+                continue
+            cost = quantity * exec_price + cfg.commission_per_order
+            if cost > self._cash:
+                continue
+            self._cash -= cost
+            reason = (
+                "etf_regime_bear"
+                if is_bear_regime and sym in desired_regime
+                else "etf_regime_bull"
+                if sym in desired_regime
+                else "etf_sector"
+            )
+            self._positions[sym] = _Position(
+                symbol=sym, quantity=quantity, avg_price=exec_price,
+                entry_date=str(date), strategy_name=reason,
+                highest_price=exec_price,
+                stop_loss_pct=0.99,  # No SL — ETF Engine manages exits
+                take_profit_pct=9.99,
+                entry_day_count=self._day_count,
+            )
+
+    def _latest_etf_price(self, symbol: str, date_idx: int) -> float | None:
+        s = self._etf_prices.get(symbol)
+        if s is None or date_idx >= len(s):
+            return None
+        try:
+            return float(s.iloc[date_idx])
+        except Exception:
+            return None
+
+    def _pick_etf_top_sectors(self, date_idx: int) -> list[str]:
+        """Top-N sector ETFs by weighted multi-horizon return (live parity)."""
+        cfg = self._config
+        if self._etf_universe is None:
+            return []
+        sector_symbols = self._etf_universe.get_sector_etf_symbols()
+        w_1w, w_1m, w_3m = 0.20, 0.40, 0.40
+        min_score = 60.0
+        lb_1w, lb_1m, lb_3m = 5, 21, 63
+        raw: list[tuple[str, float]] = []
+        for sym in sector_symbols:
+            s = self._etf_prices.get(sym)
+            if s is None or date_idx >= len(s) or date_idx < lb_3m:
+                continue
+            try:
+                cur = float(s.iloc[date_idx])
+                p1w = float(s.iloc[date_idx - lb_1w])
+                p1m = float(s.iloc[date_idx - lb_1m])
+                p3m = float(s.iloc[date_idx - lb_3m])
+                if min(p1w, p1m, p3m) <= 0:
+                    continue
+                r1w = (cur / p1w - 1) * 100
+                r1m = (cur / p1m - 1) * 100
+                r3m = (cur / p3m - 1) * 100
+                raw.append((sym, r1w * w_1w + r1m * w_1m + r3m * w_3m))
+            except Exception:
+                continue
+        if not raw:
+            return []
+        vals = [v for _, v in raw]
+        min_v, max_v = min(vals), max(vals)
+        spread = max_v - min_v
+        scored: list[tuple[str, float]] = []
+        if spread == 0:
+            for sym, v in raw:
+                scored.append((sym, 100.0 if v > 0 else 0.0))
+        else:
+            for sym, v in raw:
+                scored.append((sym, (v - min_v) / spread * 100))
+        scored.sort(key=lambda x: -x[1])
+        return [
+            sym for sym, sc in scored[: cfg.etf_max_sector_etfs]
+            if sc >= min_score
+        ]
 
     # ------------------------------------------------------------------
     # Cash parking (invest idle cash in SPY)
