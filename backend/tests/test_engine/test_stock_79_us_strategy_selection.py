@@ -189,7 +189,8 @@ class TestUSConfigLoader:
         assert cfg["daily_buy_limit"] == 10
         assert cfg["daily_buy_escalation_low"] == pytest.approx(0.50)
         assert cfg["daily_buy_escalation_high"] == pytest.approx(0.60)
-        assert cfg["stale_time_days"] == 2
+        # P1 disabled 2026-05-19 (whipsaw in live, see strategies.yaml comment)
+        assert cfg["stale_time_days"] == 0
         assert cfg["stale_time_pnl_threshold"] == pytest.approx(-0.02)
 
 
