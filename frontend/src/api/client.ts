@@ -333,6 +333,38 @@ export const fetchPerformanceMetrics = (days = 30, market?: string) =>
     params: { days, ...(market ? { market } : {}) },
   }).then(r => r.data)
 
+// Daily post-market analysis artifacts
+export interface DailyAnalysisArtifact {
+  version: number
+  date: string
+  generated_at: string
+  title: string
+  body: string
+  level: string  // "info" | "warning" | "critical"
+  daily: {
+    date: string
+    buys: number
+    sells: number
+    cleanups: number
+    pnl_usd: number
+    cleanup_pnl_usd: number
+    baseline_5d_avg: {
+      sells_per_day: number
+      cleanups_per_day: number
+      pnl_per_day: number
+    }
+  }
+  spy_pct: number | null
+  positions: { total?: number; gain?: number; flat?: number; loss?: number }
+  funnel: Record<string, any>
+}
+export interface DailyAnalysisList {
+  artifacts: DailyAnalysisArtifact[]
+  count: number
+}
+export const fetchDailyAnalyses = (days = 7) =>
+  api.get<DailyAnalysisList>('/analysis/daily', { params: { days } }).then(r => r.data)
+
 // F1 attribution funnel
 export interface RejectionFunnelMarket {
   buy_signals_total: number

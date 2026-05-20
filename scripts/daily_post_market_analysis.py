@@ -255,6 +255,38 @@ def _format_report(daily: dict, spy_pct: float | None,
     return title, body, fields, level
 
 
+def _save_artifact(target: date, daily: dict, spy_pct: float | None,
+                   positions: dict, funnel: dict,
+                   title: str, body: str, level: AlertLevel) -> str:
+    """Persist a JSON artifact for the dashboard to read.
+
+    Writes to data/daily_analyses/{date}.json. Atomic write via tmp+rename
+    so a partial write never corrupts what the API serves.
+    """
+    import json
+    repo_root = os.path.join(os.path.dirname(__file__), "..")
+    out_dir = os.path.join(repo_root, "data", "daily_analyses")
+    os.makedirs(out_dir, exist_ok=True)
+    payload = {
+        "version": 1,
+        "date": str(target),
+        "generated_at": datetime.now(KST).isoformat(),
+        "title": title,
+        "body": body,
+        "level": level.value if hasattr(level, "value") else str(level),
+        "daily": daily,
+        "spy_pct": spy_pct,
+        "positions": positions,
+        "funnel": funnel,
+    }
+    out = os.path.join(out_dir, f"{target}.json")
+    tmp = out + ".tmp"
+    with open(tmp, "w") as fh:
+        json.dump(payload, fh, indent=2, default=str)
+    os.replace(tmp, out)
+    return out
+
+
 async def main() -> None:
     # Target = previous trading day (US close was ~5 hours ago at 06:00 KST)
     now_kst = datetime.now(KST)
@@ -266,6 +298,12 @@ async def main() -> None:
     funnel = await _funnel_today()
 
     title, body, fields, level = _format_report(daily, spy_pct, positions, funnel)
+
+    # Persist artifact for the dashboard
+    artifact_path = _save_artifact(
+        target, daily, spy_pct, positions, funnel, title, body, level,
+    )
+    print(f"Artifact: {artifact_path}")
 
     # Console output (for systemd journal)
     print(f"{'=' * 70}")
