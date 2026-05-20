@@ -1548,9 +1548,16 @@ async def lifespan(app: FastAPI):
         phases=None,  # always — manages its own phase logic
     )
 
-    # Trade review: review completed trades after hours
+    # Trade review: review completed trades after hours.
+    # 2026-05-20: LLM trade_review replaced by daily_post_market_analysis
+    # (deterministic SQL + Discord). LLM proposed_changes recommendations
+    # were inconsistent; deterministic metrics are sufficient for daily.
+    # See scripts/daily_post_market_analysis.py + docs/CLAUDE_WEEKLY_ANALYSIS.md
+    # for the weekly LLM analysis pattern.
     async def task_trade_review():
-        """Review recent completed trades using AI trade review agent."""
+        """[DISABLED 2026-05-20] LLM trade review replaced by deterministic
+        daily script. Kept as no-op for backward compat."""
+        return
         if not trade_review_agent:
             return
         try:

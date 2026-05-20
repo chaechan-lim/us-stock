@@ -1,0 +1,12 @@
+[Unit]
+Description=Daily post-market analysis (06:00 KST, after US close)
+
+[Timer]
+# 06:00 KST = US 17:00 EST = 1h after US close (16:00 EST regular session).
+# Runs every day; analysis script uses the prior trading day's data so
+# weekend runs simply re-analyze Friday and that's fine.
+OnCalendar=*-*-* 06:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
