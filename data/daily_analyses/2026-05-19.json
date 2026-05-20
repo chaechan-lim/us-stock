@@ -1,0 +1,46 @@
+{
+  "version": 1,
+  "date": "2026-05-19",
+  "generated_at": "2026-05-20T20:33:34.724214+09:00",
+  "title": "\ud83d\udcca Daily post-market \u2014 2026-05-19",
+  "body": "**Daily PnL**: `$-146.01` (vs 5d avg `$-38.71` \u2192 `\u2193 $107`)\n**Cleanups**: `9` (vs 5d avg `1.2/day` \u2192 `\u2191 7.8`)\n**Cleanup PnL**: `$-116.72`\n**Buys / Sells**: `12` / `15`\n**SPY same day**: `-0.67%`\n\n**Top strategies (by |PnL|):**\n  `position_cleanup` \u00d7 9: `$-117`\n  `supertrend:stop_loss` \u00d7 3: `$-18`\n  `supertrend` \u00d7 1: `$-17`\n\n\u26a0\ufe0f cleanup count elevated \u2014 check P1 / market state",
+  "level": "warning",
+  "daily": {
+    "date": "2026-05-19",
+    "buys": 12,
+    "sells": 15,
+    "cleanups": 9,
+    "pnl_usd": -146.01,
+    "cleanup_pnl_usd": -116.72,
+    "by_strat": {
+      "position_cleanup": {
+        "n": 9,
+        "pnl": -116.71919708029196
+      },
+      "supertrend": {
+        "n": 1,
+        "pnl": -16.934306569343065
+      },
+      "supertrend:stop_loss": {
+        "n": 3,
+        "pnl": -18.248175182481752
+      },
+      "supertrend:tiered_trailing_stop": {
+        "n": 1,
+        "pnl": 0.0
+      },
+      "trend_following": {
+        "n": 1,
+        "pnl": 5.89
+      }
+    },
+    "baseline_5d_avg": {
+      "sells_per_day": 5.75,
+      "cleanups_per_day": 1.25,
+      "pnl_per_day": -38.70919708029197
+    }
+  },
+  "spy_pct": -0.6660859382243095,
+  "positions": {},
+  "funnel": {}
+}

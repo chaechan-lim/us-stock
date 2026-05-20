@@ -167,6 +167,15 @@ export function usePerformanceMetrics(days = 30, market?: string) {
   })
 }
 
+export function useDailyAnalyses(days = 7) {
+  return useQuery({
+    queryKey: ['analysis', 'daily', days],
+    queryFn: () => api.fetchDailyAnalyses(days),
+    refetchInterval: 300_000,  // 5 min — analyses written once/day
+    staleTime: 60_000,
+  })
+}
+
 export function useRejectionFunnel() {
   return useQuery({
     queryKey: ['engine', 'rejection-funnel'],

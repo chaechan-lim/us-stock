@@ -15,6 +15,7 @@ import EventsCalendar from './EventsCalendar'
 import PerformanceDashboard from './PerformanceDashboard'
 import RecommendationsPanel from './RecommendationsPanel'
 import RejectionFunnelPanel from './RejectionFunnelPanel'
+import DailyAnalysisPanel from './DailyAnalysisPanel'
 import MarketToggle from './MarketToggle'
 import AccountSelector from './AccountSelector'
 import { AccountProvider } from '../contexts/AccountContext'
@@ -87,6 +88,12 @@ function AppContent({ tab, setTab }: { tab: Tab; setTab: (t: Tab) => void }) {
             <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-4">
               <h2 className="text-sm font-semibold text-gray-900 mb-3">📊 성과 지표</h2>
               <PerformanceDashboard />
+            </div>
+            <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-4">
+              <h2 className="text-sm font-semibold text-gray-900 mb-3">
+                📰 일일 분석 (장 마감 후 자동 생성)
+              </h2>
+              <DailyAnalysisPanel />
             </div>
             <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-4">
               <h2 className="text-sm font-semibold text-gray-900 mb-3">

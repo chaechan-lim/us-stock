@@ -3,6 +3,7 @@
 from fastapi import APIRouter
 
 from api.accounts import router as accounts_router
+from api.analysis import router as analysis_router
 from api.backtest_api import router as backtest_router
 from api.engine_api import router as engine_router
 from api.market import router as market_router
@@ -33,3 +34,4 @@ api_router.include_router(backtest_router)
 api_router.include_router(ws_router)
 api_router.include_router(news_router)
 api_router.include_router(recommendations_router)
+api_router.include_router(analysis_router)
