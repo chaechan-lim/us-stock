@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily LLM recommendations (06:30 KST, after daily post-market)
+
+[Timer]
+# Runs every day at 06:30 KST — 30 min after the deterministic daily
+# analysis writes its artifact, so the LLMs see the freshest data.
+OnCalendar=*-*-* 06:30:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
