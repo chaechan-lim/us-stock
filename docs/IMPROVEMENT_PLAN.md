@@ -296,6 +296,26 @@ KIS US 수수료 0.25%/건 → round trip 0.50%. **수익 0.50% 이하 거래는
 - [ ] time-based exit 룰 추가
 - **착수 조건**: supertrend 승률 하락 또는 GAVE_BACK 15% 초과 시
 
+### Phase 4 — 자기진화 클로즈드 루프 (완료 2026-05-22)
+- [x] 결정적 daily 분석 (#156, scripts/daily_post_market_analysis.py) — 5d baseline 대비 PnL/cleanup, Discord, JSON 아티팩트
+- [x] Frontend DailyAnalysisPanel (#157) — Dashboard 상단에 verdict + 7일 heatmap
+- [x] LLM 추천 생성기 (#160) — Claude CLI + Codex CLI 병렬, balanced-brace JSON 파싱, whitelist+dedupe+merge
+- [x] yaml_mutator 핫리로드 (기존) + recommendation_validator (기존, 2y 자동 백테스트)
+- [x] 일일/주간 스케줄: 별도 timer 안 만들고 daily-post-market에 subprocess chain (사용자 피드백: "기존 서비스의 훅으로 돌리는게 더 낫지 않다")
+- 설계 상세: [docs/OPS_RECOMMENDATIONS.md](OPS_RECOMMENDATIONS.md)
+- **다음**: 자동 적용 후 7일 추이 추적 + 메트릭 악화 시 자동 revert (Phase 4-B)
+
+### Phase 4.5 — KR 예수금 배치 (완료 2026-05-22)
+- 라이브 89.9% 현금(target 50%) → 3-track fix (#159):
+  - (A) `markets.KR.evaluation_loop.daily_buy_limit` 5 → 10 (conf_bar 거절 66% 풀림)
+  - (B) `RiskParams.allow_one_share_round_up=False` for KR (1주 placeholder 영구 고착 차단)
+  - (C) `sizing_up.enabled=true` (already_held → add-on if undersized)
+- 백테스트 conflict 있으나 라이브가 백테스트 환경과 너무 다름 (cash 22% vs 89.9%)을 명시. 5일 모니터링 후 롤백 또는 유지 판단.
+
+### Phase 4.6 — 페니스톡 universe 필터 (완료 2026-05-22)
+- ACONW($0.04) 매수 후 −$149 stop_loss 사례. ScannerPipeline Layer 1에 min_price=5.0 (`markets.US.scanner.min_price`) 적용 (#158).
+- 따라온 버그(`config_loader` 스코프) #161 hotfix.
+
 ---
 
 ## 9. 참조

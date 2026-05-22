@@ -325,6 +325,32 @@ async def main() -> None:
     else:
         print("Discord webhook not configured — skipped push")
 
+    # Chain the LLM recommendation generators (#60). Spawned non-blocking
+    # so the systemd unit returns promptly; recommendations write into
+    # agent_recommendations and the dashboard surfaces them. Weekly only
+    # fires on Monday runs (KST). Failures are logged but never fatal —
+    # the deterministic report above is the source-of-truth.
+    _spawn_llm_recommendations(now_kst)
+
+
+def _spawn_llm_recommendations(now_kst: datetime) -> None:
+    import subprocess
+
+    script_path = os.path.join(os.path.dirname(__file__), "generate_recommendations.py")
+    venv_python = sys.executable
+    for mode in ("daily",) + (("weekly",) if now_kst.weekday() == 0 else ()):
+        try:
+            subprocess.Popen(
+                [venv_python, script_path, "--mode", mode],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                close_fds=True,
+                start_new_session=True,
+            )
+            print(f"LLM {mode} recommendations: spawned")
+        except Exception as e:
+            print(f"LLM {mode} spawn failed: {e}")
+
 
 if __name__ == "__main__":
     asyncio.run(main())
