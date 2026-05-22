@@ -302,6 +302,12 @@ def compute_equity_metrics(
         and any(cf != 0.0 for cf in cash_flows)
     )
     if use_twr:
+        # P1-F.3 (2026-05-23): cap per-period return at -100% so a missing
+        # cash-flow detection can't push the synthetic curve negative,
+        # which would make CAGR's fractional-power expression yield NaN
+        # ((1 + r) ** (365/d) for 1+r<0 is complex). With current dual-
+        # detection the cap should never fire on real data; it's a
+        # numerical safety rail.
         synth: list[tuple[date, float]] = [(equity_series[0][0], 1.0)]
         for i in range(1, n):
             prev_eq = equity_series[i - 1][1]
@@ -311,10 +317,12 @@ def compute_equity_metrics(
                 synth.append((equity_series[i][0], synth[-1][1]))
                 continue
             r = (cur_eq - cf - prev_eq) / prev_eq
-            synth.append((equity_series[i][0], synth[-1][1] * (1.0 + r)))
+            r = max(r, -0.9999)  # clamp so 1+r stays positive
+            new_synth = max(synth[-1][1] * (1.0 + r), 1e-9)
+            synth.append((equity_series[i][0], new_synth))
         # Returns + total from synthetic curve.
         net_return = synth[-1][1] - 1.0
-        if days >= MIN_DAYS_FOR_ANNUALIZED:
+        if days >= MIN_DAYS_FOR_ANNUALIZED and (1.0 + net_return) > 0:
             cagr = ((1.0 + net_return) ** (365.0 / days)) - 1.0
         else:
             cagr = 0.0

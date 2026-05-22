@@ -1,6 +1,16 @@
 import { useState } from 'react'
-import { usePerformanceMetrics } from '../hooks/useApi'
+import { usePerformanceMetrics, useEquityHistory } from '../hooks/useApi'
 import clsx from 'clsx'
+import {
+  AreaChart,
+  Area,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
+  ResponsiveContainer,
+  ReferenceLine,
+} from 'recharts'
 
 const WINDOWS = [
   { days: 7, label: '7d' },
@@ -266,10 +276,274 @@ export default function PerformanceDashboard() {
         />
       </div>
 
+      {/* Health checklist */}
+      <HealthChecklist
+        netReturnPct={e.net_return_pct}
+        maxDrawdownPct={e.max_drawdown_pct}
+        netPf={t.net_pf}
+        expectancy={t.expectancy}
+        sharpe={insufficient ? null : e.sharpe_ratio}
+        exposureGapPct={tg.exposure_gap_pct}
+      />
+
+      {/* Net equity curve — respects the same market+window selector */}
+      <EquityCurve days={days} market={market} />
+
       <div className="text-[11px] text-gray-500 px-2">
         💡 Net Equity Curve 우상향 + MDD 감당 가능 + Net PF &gt; 1.2 + Expectancy 양수가
         건강한 봇의 4가지 조건. 수수료/슬리피지 추정 (KR 0.10%, US 0.05% per side).
       </div>
+    </div>
+  )
+}
+
+
+interface HealthRow {
+  label: string
+  status: 'pass' | 'warn' | 'fail' | 'na'
+  detail: string
+}
+
+function HealthChecklist({
+  netReturnPct, maxDrawdownPct, netPf, expectancy, sharpe, exposureGapPct,
+}: {
+  netReturnPct: number
+  maxDrawdownPct: number
+  netPf: number | null
+  expectancy: number
+  sharpe: number | null
+  exposureGapPct: number | null | undefined
+}) {
+  const rows: HealthRow[] = [
+    {
+      label: 'Net Equity Curve 우상향',
+      status: netReturnPct > 2 ? 'pass' : netReturnPct >= 0 ? 'warn' : 'fail',
+      detail: `Net 수익률 ${netReturnPct >= 0 ? '+' : ''}${netReturnPct.toFixed(2)}%`,
+    },
+    {
+      label: 'MDD 감당 가능 (< 20%)',
+      status:
+        maxDrawdownPct >= -10
+          ? 'pass'
+          : maxDrawdownPct >= -20
+          ? 'warn'
+          : 'fail',
+      detail: `최대 낙폭 ${maxDrawdownPct.toFixed(2)}%`,
+    },
+    {
+      label: 'Net PF > 1.2',
+      status:
+        netPf == null
+          ? 'pass'  // ∞ — only winning trades, treat as healthy
+          : netPf >= 1.2
+          ? 'pass'
+          : netPf > 1
+          ? 'warn'
+          : 'fail',
+      detail: `Net Profit Factor ${netPf == null ? '∞' : netPf.toFixed(2)}`,
+    },
+    {
+      label: 'Expectancy 양수',
+      status:
+        expectancy > 0 ? 'pass' : expectancy === 0 ? 'warn' : 'fail',
+      detail: `Expectancy ${expectancy >= 0 ? '+' : ''}${expectancy.toFixed(2)}`,
+    },
+    {
+      label: 'Sharpe > 1.0',
+      status:
+        sharpe == null
+          ? 'na'
+          : sharpe >= 1.0
+          ? 'pass'
+          : sharpe >= 0.5
+          ? 'warn'
+          : 'fail',
+      detail: sharpe == null ? '데이터 부족' : `Sharpe ${sharpe.toFixed(2)}`,
+    },
+    {
+      label: 'Exposure Gap < 20pp',
+      status:
+        exposureGapPct == null
+          ? 'na'
+          : Math.abs(exposureGapPct) <= 10
+          ? 'pass'
+          : Math.abs(exposureGapPct) <= 20
+          ? 'warn'
+          : 'fail',
+      detail:
+        exposureGapPct == null
+          ? '목표 미설정'
+          : `Gap ${exposureGapPct > 0 ? '+' : ''}${exposureGapPct.toFixed(0)}pp`,
+    },
+  ]
+
+  const counts = {
+    pass: rows.filter(r => r.status === 'pass').length,
+    warn: rows.filter(r => r.status === 'warn').length,
+    fail: rows.filter(r => r.status === 'fail').length,
+    na: rows.filter(r => r.status === 'na').length,
+  }
+  const total = rows.length - counts.na
+  const score = total > 0 ? counts.pass + counts.warn * 0.5 : 0
+
+  return (
+    <div className="rounded-xl border border-gray-100 bg-white p-3">
+      <div className="flex items-center justify-between mb-2">
+        <div className="text-[11px] uppercase tracking-wide text-gray-500">
+          🏥 건강한 봇 조건
+        </div>
+        <div className="text-[11px] text-gray-500">
+          충족 {counts.pass}/{total}{counts.warn ? ` · 주의 ${counts.warn}` : ''}
+          {counts.fail ? ` · 실패 ${counts.fail}` : ''}
+        </div>
+      </div>
+      {/* Score bar */}
+      <div className="w-full h-1.5 bg-gray-100 rounded-full mb-3 overflow-hidden">
+        <div
+          className={clsx(
+            'h-full transition-all',
+            score / total >= 0.8
+              ? 'bg-emerald-500'
+              : score / total >= 0.5
+              ? 'bg-amber-500'
+              : 'bg-red-500'
+          )}
+          style={{ width: total > 0 ? `${(score / total) * 100}%` : '0%' }}
+        />
+      </div>
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
+        {rows.map(r => (
+          <HealthLine key={r.label} {...r} />
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function HealthLine({ label, status, detail }: HealthRow) {
+  const icon =
+    status === 'pass' ? '✓' : status === 'warn' ? '!' : status === 'fail' ? '✗' : '—'
+  const iconClass =
+    status === 'pass'
+      ? 'bg-emerald-100 text-emerald-700'
+      : status === 'warn'
+      ? 'bg-amber-100 text-amber-700'
+      : status === 'fail'
+      ? 'bg-red-100 text-red-700'
+      : 'bg-gray-100 text-gray-500'
+  const textClass = status === 'na' ? 'text-gray-400' : 'text-gray-800'
+  return (
+    <div className="flex items-center gap-2 text-xs">
+      <span
+        className={clsx(
+          'w-5 h-5 rounded-full flex items-center justify-center text-[11px] font-bold flex-shrink-0',
+          iconClass,
+        )}
+      >
+        {icon}
+      </span>
+      <div className="flex-1 min-w-0">
+        <div className={clsx('font-medium', textClass)}>{label}</div>
+        <div className="text-[10px] text-gray-500">{detail}</div>
+      </div>
+    </div>
+  )
+}
+
+
+function EquityCurve({ days, market }: { days: number; market: string }) {
+  // Backend get_equity_history accepts a market filter; '' (ALL) defaults
+  // to the US series in the existing hook signature. Pass US or KR
+  // explicitly so the curve matches the selector above.
+  const effectiveMarket = market || 'US'
+  const { data, isLoading, error } = useEquityHistory(days, effectiveMarket)
+
+  if (isLoading) {
+    return (
+      <div className="rounded-xl border border-gray-100 bg-white p-3 text-xs text-gray-500">
+        Equity curve 로딩 중...
+      </div>
+    )
+  }
+  if (error || !data || data.length === 0) {
+    return (
+      <div className="rounded-xl border border-gray-100 bg-white p-3 text-xs text-gray-500">
+        Equity curve 데이터 없음.
+      </div>
+    )
+  }
+
+  // Dedupe by date — keep the last value per day (one point/day).
+  // Note: the API returns numeric balance.total under `total_value_usd`
+  // regardless of market — for KR the unit is actually KRW (the column
+  // name is legacy). We just treat it as the market's native currency.
+  const byDate = new Map<string, number>()
+  for (const p of data) {
+    const d = (p.date ?? '').slice(0, 10)
+    if (!d) continue
+    const v = (p as { total_value_usd?: number }).total_value_usd ?? 0
+    if (v) byDate.set(d, v)
+  }
+  const series = Array.from(byDate.entries()).map(([date, value]) => ({ date, value }))
+  if (series.length === 0) return null
+
+  const startValue = series[0].value
+  const isKr = effectiveMarket === 'KR'
+  const currencySymbol = isKr ? '₩' : '$'
+  const yFormatter = (v: number) => {
+    if (isKr) return `${currencySymbol}${(v / 1_000_000).toFixed(1)}M`
+    return `${currencySymbol}${(v / 1_000).toFixed(0)}k`
+  }
+  const tooltipFormatter = (v: number) => {
+    if (isKr) return [`${currencySymbol}${v.toLocaleString()}`, '총자산']
+    return [`${currencySymbol}${v.toLocaleString(undefined, { maximumFractionDigits: 0 })}`, '총자산']
+  }
+
+  return (
+    <div className="rounded-xl border border-gray-100 bg-white p-3">
+      <div className="flex items-center justify-between mb-2">
+        <div className="text-[11px] uppercase tracking-wide text-gray-500">
+          📈 Net Equity Curve · {effectiveMarket} · {days}d
+        </div>
+        <div className="text-[11px] text-gray-500">
+          {series.length} points
+        </div>
+      </div>
+      <ResponsiveContainer width="100%" height={220}>
+        <AreaChart data={series} margin={{ top: 4, right: 12, bottom: 0, left: 0 }}>
+          <defs>
+            <linearGradient id="eq-curve" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="5%" stopColor="#10b981" stopOpacity={0.3} />
+              <stop offset="95%" stopColor="#10b981" stopOpacity={0} />
+            </linearGradient>
+          </defs>
+          <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
+          <XAxis dataKey="date" tick={{ fontSize: 10, fill: '#6b7280' }} minTickGap={30} />
+          <YAxis
+            tick={{ fontSize: 10, fill: '#6b7280' }}
+            tickFormatter={yFormatter}
+            domain={['auto', 'auto']}
+          />
+          <Tooltip
+            contentStyle={{ background: '#fff', border: '1px solid #e5e7eb', borderRadius: 8 }}
+            formatter={tooltipFormatter}
+            labelStyle={{ color: '#374151', fontSize: 11 }}
+          />
+          <ReferenceLine
+            y={startValue}
+            stroke="#9ca3af"
+            strokeDasharray="3 3"
+            label={{ value: 'start', fontSize: 10, fill: '#6b7280', position: 'left' }}
+          />
+          <Area
+            type="monotone"
+            dataKey="value"
+            stroke="#10b981"
+            strokeWidth={2}
+            fill="url(#eq-curve)"
+          />
+        </AreaChart>
+      </ResponsiveContainer>
     </div>
   )
 }

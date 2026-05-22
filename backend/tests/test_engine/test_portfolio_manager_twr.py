@@ -115,11 +115,49 @@ class TestDetectCashFlow:
         result = detect_cash_flow(prev_total=100_000, new_total=121_000)
         assert result == pytest.approx(21_000.0)
 
-    def test_absolute_below_threshold_returns_zero(self):
-        """High relative but tiny absolute → noise. Returns 0 (P1-F)."""
-        # 50% on 1,000 base = 500. Rel > 20% but abs < $5k default.
-        result = detect_cash_flow(prev_total=1_000, new_total=1_500)
+    def test_absolute_below_strong_floor_returns_zero(self):
+        """Tiny absolute swing → noise. Returns 0 (P1-F.2 strong floor)."""
+        # 50% on $100 base = $50. Above strong rel (30%) but below
+        # strong abs floor ($100 US default), so still suppressed.
+        result = detect_cash_flow(prev_total=100, new_total=150)
         assert result == 0.0
+
+    def test_strong_rel_triggers_even_below_dual_abs(self):
+        """P1-F.2: ≥30% single-snapshot swing always counts when above the
+        token strong floor, even if below the dual-threshold abs floor.
+
+        Repros the KR live 5-22 case: ₩9.85M → ₩5.48M (-44%, -₩4.37M).
+        Dual rule (rel 20% + abs ₩5M) fails because |Δ| < ₩5M; strong
+        rel rule (≥30% + ₩100k floor) catches it.
+        """
+        result = detect_cash_flow(
+            prev_total=9_847_491,
+            new_total=5_476_251,
+            rel_threshold=0.20,
+            abs_threshold=CASH_FLOW_ABS_THRESHOLD_KR,
+            strong_rel_threshold=0.30,
+            strong_abs_threshold=100_000,
+        )
+        assert result == pytest.approx(-4_371_240.0)
+
+    def test_strong_rel_deposit_under_dual_abs(self):
+        """Mirror of withdrawal case but on the deposit side."""
+        result = detect_cash_flow(
+            prev_total=5_870_501,
+            new_total=8_445_000,  # +44% on 5.87M = +2.57M (under ₩5M)
+            rel_threshold=0.20,
+            abs_threshold=CASH_FLOW_ABS_THRESHOLD_KR,
+            strong_rel_threshold=0.30,
+            strong_abs_threshold=100_000,
+        )
+        assert result == pytest.approx(2_574_499.0)
+
+    def test_strong_rel_default_thresholds_us(self):
+        """Default US strong floor ($100) catches small-account moves."""
+        # $200 → $300: +50% rel, +$100 abs. Strong rule requires abs > $100,
+        # so this is at the boundary; bump to $310 to clear.
+        result = detect_cash_flow(prev_total=200, new_total=310)
+        assert result == pytest.approx(110.0)
 
     def test_dual_threshold_both_must_exceed(self):
         """Real deposit: 96% rel + 17M KRW abs (matches 2026-05-14 live)."""
@@ -169,10 +207,18 @@ class TestDetectCashFlow:
         assert result == pytest.approx(7_000_000.0)
 
     def test_threshold_constants(self):
-        """P1-F: dual-threshold constants."""
+        """P1-F: dual-threshold constants. P1-F.2: strong-rel constants."""
+        from engine.portfolio_manager import (
+            CASH_FLOW_STRONG_ABS_THRESHOLD_KR,
+            CASH_FLOW_STRONG_ABS_THRESHOLD_US,
+            CASH_FLOW_STRONG_REL_THRESHOLD,
+        )
         assert CASH_FLOW_REL_THRESHOLD == 0.20  # 20% (was 5%)
         assert CASH_FLOW_ABS_THRESHOLD_US == 5_000      # $5k
         assert CASH_FLOW_ABS_THRESHOLD_KR == 5_000_000  # ₩5M
+        assert CASH_FLOW_STRONG_REL_THRESHOLD == 0.30
+        assert CASH_FLOW_STRONG_ABS_THRESHOLD_US == 100
+        assert CASH_FLOW_STRONG_ABS_THRESHOLD_KR == 100_000
 
 
 # ── save_snapshot integration tests (cash_flow persisted) ──────────────

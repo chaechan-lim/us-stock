@@ -953,7 +953,7 @@ async def performance_metrics(
             target_exposure_pct - equity_metrics.exposure_pct, 1
         )
 
-    # JSON-friendly: replace inf with a large sentinel
+    # JSON-friendly: replace inf/NaN with None so json.dumps doesn't blow up.
     def _safe(v):
         if isinstance(v, float) and (v != v or v == float("inf") or v == float("-inf")):
             return None
@@ -967,17 +967,17 @@ async def performance_metrics(
         "benchmark": {
             "symbol": bench_symbol,
             "label": bench_label,
-            "return_pct": bench_ret,
-            "alpha_pct": alpha_pct,
+            "return_pct": _safe(bench_ret),
+            "alpha_pct": _safe(alpha_pct),
             # F3: exposure-adjusted comparison
-            "adjusted_return_pct": adjusted_bench_ret,
-            "adjusted_alpha_pct": adjusted_alpha_pct,
+            "adjusted_return_pct": _safe(adjusted_bench_ret),
+            "adjusted_alpha_pct": _safe(adjusted_alpha_pct),
         },
         # F2: portfolio target + gap
         "target": {
-            "target_exposure_pct": target_exposure_pct,
-            "current_exposure_pct": equity_metrics.exposure_pct,
-            "exposure_gap_pct": exposure_gap_pct,
+            "target_exposure_pct": _safe(target_exposure_pct),
+            "current_exposure_pct": _safe(equity_metrics.exposure_pct),
+            "exposure_gap_pct": _safe(exposure_gap_pct),
         },
     }
 
