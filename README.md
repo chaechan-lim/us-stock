@@ -245,7 +245,30 @@ cd backend
 - **백업**: `deploy/db-backup.timer` 일일 로컬 + `deploy/db-backup-remote.timer` 주간 GitHub
 
 테이블 (10+):
-`accounts, trades, positions, portfolio_snapshots, strategy_states, signals, factor_scores, signal_quality, agent_contexts, watchlists, ...`
+`accounts, trades, positions, portfolio_snapshots, strategy_states, signals, factor_scores, signal_quality, agent_contexts, watchlists, agent_recommendations, ...`
+
+---
+
+## 일일 운용 루프 (자동)
+
+매일 06:00 KST에 하나의 systemd 타이머가 모든 후속 작업을 트리거:
+
+```
+06:00 KST  daily-post-market-analysis.timer
+           └─ scripts/daily_post_market_analysis.py
+              ├─ 결정적 SQL 집계 (PnL/cleanup vs 5d baseline, top 전략)
+              ├─ data/daily_analyses/{date}.json (Dashboard 표시)
+              ├─ Discord embed
+              └─ subprocess.Popen → scripts/generate_recommendations.py
+                 ├─ --mode daily (매일)
+                 └─ --mode weekly (월요일만, weekday() == 0)
+                    ├─ Claude CLI + Codex CLI 병렬 호출
+                    ├─ JSON 파싱 + yaml_mutator whitelist 필터 + dedupe
+                    └─ AgentRecommendation insert → 자동 백테스트 (validator)
+```
+
+Dashboard `🤖 에이전트 권고` 패널에서 operator가 Accept → yaml_mutator
+가 .bak 백업 후 핫리로드. 상세: [docs/OPS_RECOMMENDATIONS.md](docs/OPS_RECOMMENDATIONS.md).
 
 ---
 

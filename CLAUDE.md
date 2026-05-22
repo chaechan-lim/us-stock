@@ -103,8 +103,19 @@ Architecture inherited from ~/coin project (crypto trading bot). **Live trading*
 - Scheduler tasks: 31 total (22 US + 7 KR + system tasks)
 - Donchian breakout: uses previous bar's channel (pandas-ta donchian includes current bar)
 - Bollinger squeeze: squeeze_min_bars=3 (daily timeframe; 6 was too strict)
-- AI agent integration: RiskAssessmentAgent pre-trade check in evaluation_loop (non-blocking), TradeReviewAgent daily review (after-hours), agent memory cleanup (daily)
+- AI agent integration: RiskAssessmentAgent pre-trade check in evaluation_loop (non-blocking), TradeReviewAgent daily review disabled 2026-05-20 (LLM JSON unreliable; replaced by deterministic scripts/daily_post_market_analysis.py)
 - Agent persistent memory: AgentContextService (DB-backed, token budget, auto-expiry, importance-based eviction)
+- Daily ops loop (2026-05-22): one systemd timer triggers everything.
+  - 06:00 KST daily-post-market-analysis.timer → scripts/daily_post_market_analysis.py
+    → writes data/daily_analyses/{date}.json artifact (frontend Dashboard reads via /api/v1/analysis/daily)
+    → posts Discord embed (PnL vs 5d baseline, cleanup count, top strategies, verdict)
+    → spawns scripts/generate_recommendations.py --mode daily (always) + --mode weekly (Monday KST only)
+  - Recommendation generator: Claude CLI + Codex CLI in parallel, balanced-brace JSON parse, whitelist (services.yaml_mutator.ALLOWED_PARAM_PREFIXES), dedupe vs existing pending rows, insert AgentRecommendation
+  - services.recommendation_validator runs 2y full-pipeline backtest per row (baseline vs proposed delta, passes_floor flag), sequential via process-wide lock
+  - Frontend RecommendationsPanel: operator clicks Accept → POST /recommendations/{id}/accept → services.yaml_mutator (whitelist + type check + .bak backup + atomic write) → hot-reload via _apply_us/kr_eval_overrides
+  - Raw LLM stdout saved to data/llm_recommendations/{stamp}-{source}-{mode}.txt for audit
+- Scanner pipeline penny-stock guard: ScannerPipeline.__init__ min_price (default 5.0, US yaml override at markets.US.scanner.min_price). Layer 1 rejects symbols below the floor before scoring. KR side already excludes via KRScreener.min_market_cap (₩500B)
+- KR sizing-up (2026-05-22): markets.KR.evaluation_loop.sizing_up.enabled = true. Already-held BUY converts to add-on when current position value < threshold × min_position_pct × equity, signal confidence ≥ min_confidence, and per-symbol cooldown elapsed. Paired with allow_one_share_round_up=False for KR to stop 1-share placeholder accumulation (RiskParams in main.py — not hot-reload)
 
 ### Reference
 - ~/coin: Crypto trading bot (architecture reference)

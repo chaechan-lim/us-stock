@@ -12,9 +12,11 @@ Usage:
     python scripts/generate_recommendations.py --mode weekly
     python scripts/generate_recommendations.py --mode daily --dry-run
 
-Daily mode = yesterday's 24h + 7d context, fired ~06:30 KST after the
-daily post-market script. Weekly mode = 7d + 30d context, fired Mon
-07:00 KST. Both LLMs always run unless their CLI is missing.
+Trigger: chained from scripts/daily_post_market_analysis.py once the
+deterministic report finishes. Daily fires every run; weekly fires
+additionally on Monday-KST runs. There is no separate systemd timer
+for this script — the goal is one schedule (daily-post-market) so the
+operator only has to think about one moving part.
 
 Each surviving row gets `agent_type` of `llm_<source>_<mode>` (e.g.
 `llm_claude_weekly`). Same param_path from two sources is collapsed
