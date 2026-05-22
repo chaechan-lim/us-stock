@@ -341,6 +341,17 @@ class TestStrategyConfigLoaderMarketMethods:
         eval_cfg = loader.get_market_evaluation_loop_config("UNKNOWN")
         assert eval_cfg == {}
 
+    def test_get_market_scanner_config_us(self):
+        """#58: US scanner overrides include min_price for penny-stock filter."""
+        loader = StrategyConfigLoader()
+        us_scanner = loader.get_market_scanner_config("US")
+        assert us_scanner["min_price"] == pytest.approx(5.0)
+
+    def test_get_market_scanner_config_unknown_market(self):
+        loader = StrategyConfigLoader()
+        scanner_cfg = loader.get_market_scanner_config("UNKNOWN")
+        assert scanner_cfg == {}
+
 
 # ---------------------------------------------------------------------------
 # EvaluationLoop: disabled strategies filtering

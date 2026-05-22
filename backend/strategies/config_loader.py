@@ -167,3 +167,13 @@ class StrategyConfigLoader:
 
     def get_screening_config(self) -> dict:
         return self._config.get("screening", {})
+
+    def get_market_scanner_config(self, market: str) -> dict:
+        """Get scanner overrides for a specific market.
+
+        Schema (under markets.<MARKET>.scanner):
+            min_price: float  — reject symbols below this price in Layer 1
+
+        Returns empty dict if no overrides are set.
+        """
+        return dict(self._get_market_config(market).get("scanner", {}))

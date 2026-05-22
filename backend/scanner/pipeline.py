@@ -56,6 +56,7 @@ class ScannerPipeline:
         enricher: FundamentalEnricher,
         ai_agent: MarketAnalystAgent | None = None,
         news_enricher: NewsEnricher | None = None,
+        min_price: float = 5.0,
     ):
         self._market_data = market_data
         self._indicator_svc = indicator_svc
@@ -64,6 +65,10 @@ class ScannerPipeline:
         self._news_enricher = news_enricher
         self._screener = IndicatorScreener()
         self._last_news_summary: NewsSentimentSummary | None = None
+        # Reject penny stocks at Layer 1. ACONW ($0.04) precedent (2026-05-20):
+        # technical pattern scored well, fundamental enricher saw no data, but
+        # min tick (~$0.01) → forced 25% slippage and -$149.58 stop_loss.
+        self._min_price = float(min_price)
 
     def set_news_summary(self, summary: NewsSentimentSummary) -> None:
         """Set pre-fetched news sentiment for use in next scan."""
@@ -100,17 +105,31 @@ class ScannerPipeline:
         logger.info("Layer 1: Screening %d symbols (yfinance)", len(symbols))
         screener_scores = []
         last_prices: dict[str, float] = {}  # Cache prices from Layer 1
+        penny_rejected = 0
         for symbol in symbols:
             try:
                 df = await asyncio.to_thread(_fetch_yfinance_ohlcv, symbol, period="1y")
                 if df.empty or len(df) < 50:
                     continue
-                last_prices[symbol] = float(df.iloc[-1]["close"])
+                last_price = float(df.iloc[-1]["close"])
+                if last_price < self._min_price:
+                    penny_rejected += 1
+                    logger.debug(
+                        "Penny stock rejected: %s @ $%.2f (min=$%.2f)",
+                        symbol, last_price, self._min_price,
+                    )
+                    continue
+                last_prices[symbol] = last_price
                 df = self._indicator_svc.add_all_indicators(df)
                 score = self._screener.score(df, symbol)
                 screener_scores.append(score)
             except Exception as e:
                 logger.warning("Layer 1 failed for %s: %s", symbol, e)
+        if penny_rejected:
+            logger.info(
+                "Layer 1: %d symbols rejected by min_price=$%.2f",
+                penny_rejected, self._min_price,
+            )
 
         # Filter by grade (pass as parameter to avoid mutating screener state)
         filtered = self._screener.filter_candidates(
