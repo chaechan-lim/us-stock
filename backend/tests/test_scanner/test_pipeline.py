@@ -250,6 +250,55 @@ class TestScannerPipeline:
                 # Verify the symbol argument was passed
                 assert call[0][1] in ("AAPL", "MSFT")
 
+    async def test_pipeline_rejects_penny_stocks(
+        self, mock_indicator_svc, mock_enricher,
+    ):
+        """#58: Penny stocks must be rejected in Layer 1.
+
+        Repro of the ACONW ($0.04) live case — pattern looked good but the
+        $0.01 minimum tick caused 25% effective slippage on exit.
+        """
+        market_data = AsyncMock()
+        pipe = ScannerPipeline(
+            market_data=market_data,
+            indicator_svc=mock_indicator_svc,
+            enricher=mock_enricher,
+            min_price=5.0,
+        )
+
+        cheap_df = _make_ohlcv_df()
+        cheap_df = cheap_df.copy()
+        cheap_df["close"] = 0.04  # ACONW-like price
+
+        normal_df = _make_ohlcv_df()  # ~100
+
+        def side_effect(sym, **kw):
+            if sym == "ACONW":
+                return cheap_df
+            return normal_df
+
+        with patch("scanner.pipeline._fetch_yfinance_ohlcv", side_effect=side_effect):
+            results = await pipe.run_full_scan(["ACONW", "AAPL", "MSFT"])
+
+        # Only non-penny names go into the enricher
+        symbols_enriched = [
+            t[0] for t in mock_enricher.enrich_batch.call_args[0][0]
+        ]
+        assert "ACONW" not in symbols_enriched
+        # AAPL/MSFT should still be eligible (penny filter doesn't block them)
+        assert any(s in symbols_enriched for s in ("AAPL", "MSFT"))
+
+    async def test_pipeline_min_price_default_5(
+        self, mock_market_data, mock_indicator_svc, mock_enricher,
+    ):
+        """Default min_price is 5.0 — sanity check on the constructor."""
+        pipe = ScannerPipeline(
+            market_data=mock_market_data,
+            indicator_svc=mock_indicator_svc,
+            enricher=mock_enricher,
+        )
+        assert pipe._min_price == 5.0
+
     async def test_spy_context_dispatched_via_to_thread(
         self, mock_market_data, mock_indicator_svc, mock_enricher, mock_ai_agent,
     ):

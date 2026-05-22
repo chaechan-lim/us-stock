@@ -620,14 +620,19 @@ async def lifespan(app: FastAPI):
     app.state.kr_macro_calendar = kr_macro_calendar
     logger.info("Event calendar services initialized (US + KR)")
 
-    # Scanner pipeline (with AI agent + news enricher if available)
+    # Scanner pipeline (with AI agent + news enricher if available).
+    # US after-hours scan is the only consumer here, so we read US scanner
+    # config (markets.US.scanner.min_price). KR has its own KRScreener with
+    # min_market_cap which already excludes penny stocks.
     enricher = FundamentalEnricher()
+    us_scanner_cfg = config_loader.get_market_scanner_config("US")
     scanner_pipeline = ScannerPipeline(
         market_data=market_data,
         indicator_svc=indicator_svc,
         enricher=enricher,
         ai_agent=ai_agent,
         news_enricher=news_enricher,
+        min_price=float(us_scanner_cfg.get("min_price", 5.0)),
     )
     app.state.scanner_pipeline = scanner_pipeline
 

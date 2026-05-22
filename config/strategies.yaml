@@ -716,6 +716,17 @@ markets:
     # bottleneck. Decision logic to drive toward this target is F4-F7
     # (deferred — needs portfolio-first architecture).
     target_exposure_pct: 0.70
+    # 2026-05-22 (#58): penny-stock universe filter. ACONW ($0.04, 5-20)
+    # passed scanner pipeline (IndicatorScreener saw a technical pattern,
+    # FundamentalEnricher had no data) and was bought at $0.04 × 19,681 =
+    # $761. Min tick (~$0.01) → 25% effective slippage; stop_loss exit
+    # closed for -$149.58 (-19.64%) on next session. Same precedent on
+    # FBYD/BENFW (small caps in same scan window).
+    # Filter applied in ScannerPipeline Layer 1 (real price from yfinance
+    # close, before any technical scoring). KRScreener already excludes
+    # via min_market_cap so this only needs a US key.
+    scanner:
+      min_price: 5.0
   KR:
     # 2026-04-08 — full KR re-evaluation after the KR-currency bug fix
     #   (full_pipeline.py initial_equity now auto-scales to 100M KRW).
