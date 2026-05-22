@@ -33,6 +33,13 @@ ANOMALY_DROP_THRESHOLD = 0.5
 CASH_FLOW_REL_THRESHOLD = 0.20    # 20% of prev_equity (was 5%/10%)
 CASH_FLOW_ABS_THRESHOLD_US = 5_000      # $5,000
 CASH_FLOW_ABS_THRESHOLD_KR = 5_000_000  # ₩5,000,000
+# P1-F.2 (2026-05-22): a single-snapshot swing this large is almost
+# always a cash flow regardless of absolute size. KR live (#?) had two
+# 44% intraday drops that were real withdrawals but fell below the
+# fixed ₩5M abs floor → cash_flow=0 → TWR treated them as -65% MDD.
+CASH_FLOW_STRONG_REL_THRESHOLD = 0.30
+CASH_FLOW_STRONG_ABS_THRESHOLD_US = 100     # $100 — token floor to skip rounding noise
+CASH_FLOW_STRONG_ABS_THRESHOLD_KR = 100_000 # ₩100,000
 
 
 def detect_cash_flow(
@@ -40,21 +47,28 @@ def detect_cash_flow(
     new_total: float,
     rel_threshold: float | None = None,
     abs_threshold: float | None = None,
+    strong_rel_threshold: float | None = None,
+    strong_abs_threshold: float | None = None,
 ) -> float:
     """Detect external deposit/withdrawal between two snapshots.
 
-    P1-F (2026-05-15): requires BOTH relative AND absolute thresholds to
-    be exceeded. The relative-only test from STOCK-46 generated false
-    positives from normal intraday position-value swings (a KR portfolio
-    that drops 14% in one hour was always classified as a 1M-KRW
-    withdrawal, even when nothing was deposited or withdrawn).
+    P1-F.2 (2026-05-22): two-rule detection.
 
-    Uses total portfolio equity change rather than (cash + invested).
-    Profitable sells do NOT change total equity (unrealized → cash is
-    a no-op), so they are never misclassified as deposits.
+    1. **Strong rel rule** — single-snapshot swing ≥ strong_rel_threshold
+       (30%) with a token absolute floor (KR ₩100k, US $100) almost
+       always indicates a cash flow. Position-value swings of 30%+ in
+       one snapshot are rare; legitimate market moves of that
+       magnitude happen over a day, not seconds. KR live (5-22) had
+       two 44% intraday equity drops that were real withdrawals; the
+       previous dual-threshold rule missed them because they were
+       under the fixed ₩5M abs floor (the account was only ~₩10M).
+
+    2. **Dual-threshold rule** — moderate swings (20–30% rel) need to
+       also clear an absolute floor. Preserves the P1-F false-positive
+       protection from STOCK-46.
 
     Returns the detected cash flow amount (positive=deposit, negative=
-    withdrawal). 0.0 when noise threshold not exceeded.
+    withdrawal). 0.0 when neither rule fires.
     """
     if prev_total <= 0:
         return 0.0
@@ -62,9 +76,23 @@ def detect_cash_flow(
     raw_cf = new_total - prev_total
     eff_rel = rel_threshold if rel_threshold is not None else CASH_FLOW_REL_THRESHOLD
     eff_abs = abs_threshold if abs_threshold is not None else CASH_FLOW_ABS_THRESHOLD_US
+    eff_strong_rel = (
+        strong_rel_threshold if strong_rel_threshold is not None
+        else CASH_FLOW_STRONG_REL_THRESHOLD
+    )
+    eff_strong_abs = (
+        strong_abs_threshold if strong_abs_threshold is not None
+        else CASH_FLOW_STRONG_ABS_THRESHOLD_US
+    )
 
-    rel_amount = eff_rel * prev_total
-    if abs(raw_cf) > rel_amount and abs(raw_cf) > eff_abs:
+    abs_cf = abs(raw_cf)
+    rel = abs_cf / prev_total
+
+    # Rule 1: strong relative move — always count.
+    if rel >= eff_strong_rel and abs_cf > eff_strong_abs:
+        return raw_cf
+    # Rule 2: dual-threshold for moderate moves.
+    if abs_cf > eff_rel * prev_total and abs_cf > eff_abs:
         return raw_cf
     return 0.0
 
@@ -176,11 +204,19 @@ class PortfolioManager:
         # single-threshold (10% KR / 5% US) was triggering on intraday
         # position-value swings. New: BOTH relative (20%) AND absolute
         # (₩5M for KR, $5K for US) must be exceeded.
+        # P1-F.2 (2026-05-22): added strong-rel rule (≥30% single-snapshot
+        # swing → always count) so small accounts whose real ₩2-4M cash
+        # flows fell below the fixed ₩5M abs floor aren't silently missed.
         cash_flow = 0.0
         abs_thr = (
             CASH_FLOW_ABS_THRESHOLD_KR
             if self._market == "KR"
             else CASH_FLOW_ABS_THRESHOLD_US
+        )
+        strong_abs_thr = (
+            CASH_FLOW_STRONG_ABS_THRESHOLD_KR
+            if self._market == "KR"
+            else CASH_FLOW_STRONG_ABS_THRESHOLD_US
         )
         if prev is not None and prev.total_value_usd > 0:
             cash_flow = detect_cash_flow(
@@ -188,6 +224,7 @@ class PortfolioManager:
                 new_total=total_equity,
                 rel_threshold=CASH_FLOW_REL_THRESHOLD,
                 abs_threshold=abs_thr,
+                strong_abs_threshold=strong_abs_thr,
             )
             if cash_flow != 0.0:
                 action = "deposit" if cash_flow > 0 else "withdrawal"

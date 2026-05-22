@@ -55,6 +55,7 @@
 - **Notification adapter**: Discord 기본, Telegram/Slack 지원
 - **Backups**: 로컬 일일 (7일) + GitHub 주간 (4주) systemd 타이머
 - **MCP server**: `backend/mcp_server.py` (Claude Desktop/Code 통합용 28 tools)
+- **Dashboard 성과 지표**: KR/US/ALL + 7/30/90d 윈도우. KPI 타일(Net Equity, Net 수익률, vs SPY/KODEX Adj. Alpha, MDD, Sharpe/Sortino/Calmar, Net PF, Expectancy, WR) + **🏥 건강한 봇 체크리스트** (6항목: 우상향 / MDD ≤ 20% / Net PF > 1.2 / Expectancy > 0 / Sharpe > 1.0 / Exposure Gap ≤ 20pp) + **📈 Net Equity Curve area chart**. Cash flow detection: 30%+ single-snapshot 변동은 항상 cash flow로 인식 (소액 계좌의 ₩2-5M 이체 미감지 패턴 차단).
 
 ---
 
