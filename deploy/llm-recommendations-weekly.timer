@@ -1,0 +1,11 @@
+[Unit]
+Description=Weekly LLM recommendations (Mon 07:00 KST)
+
+[Timer]
+# Runs Monday morning, after weekend so the prompt has a clean 7-day
+# window (Mon → previous Mon). Persistent recovers a missed run.
+OnCalendar=Mon *-*-* 07:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
