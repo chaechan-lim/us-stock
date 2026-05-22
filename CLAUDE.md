@@ -8,7 +8,7 @@ Architecture inherited from ~/coin project (crypto trading bot). **Live trading*
 - Backend: Python 3.12+, FastAPI (port 8001), SQLAlchemy 2.0 (asyncpg), PostgreSQL, Redis
 - Frontend: React 18, TypeScript, Vite, TailwindCSS (port 3001)
 - Strategy config: config/strategies.yaml (YAML-based parameter management, runtime hot-reload)
-- Testing: pytest + pytest-asyncio + pytest-cov (1276+ tests)
+- Testing: pytest + pytest-asyncio + pytest-cov (3,193 tests, ~89.6% line coverage as of 2026-05-23)
 - Deploy: Raspberry Pi ARM64, systemd services, nginx HTTPS reverse proxy (port 8443)
 
 ## Core Rules
@@ -51,11 +51,11 @@ Architecture inherited from ~/coin project (crypto trading bot). **Live trading*
 - backend/services/llm/: Multi-provider LLM client (Anthropic + Gemini fallback)
 - backend/services/: Cache, notification, rate limiter, exchange resolver, health monitor
 - backend/analytics/: Quant analytics (factor model, Kelly sizing, signal quality tracker)
-- backend/api/: REST + WebSocket endpoints (13 modules)
+- backend/api/: REST + WebSocket endpoints (17 modules: portfolio, trades, positions, orders, strategies, watchlist, scanner, backtest, engine, market, news, accounts, recommendations, analysis, ws, router, dependencies)
 - backend/backtest/: Backtesting engine (single-strategy + full-pipeline)
 - config/: Strategy & ETF YAML config files (US + KR)
 - deploy/: systemd services, DB setup/backup scripts
-- frontend/src/components/: 20 React components
+- frontend/src/components/: 25 React components
 
 ### Key Architecture Decisions
 - **Dual-market**: US + KR in same process, separate adapter/MarketDataService/OrderManager/PositionTracker per market
@@ -100,7 +100,7 @@ Architecture inherited from ~/coin project (crypto trading bot). **Live trading*
 - MCP server: backend/mcp_server.py (FastMCP, 28 tools for Claude Desktop/Code)
 - DB backup: local daily (7-day retention) + GitHub weekly (4-week), systemd timers
 - API auth: Bearer token middleware (AUTH_API_TOKEN env, empty=disabled)
-- Scheduler tasks: 31 total (22 US + 7 KR + system tasks)
+- Scheduler tasks: 35 total (registered via scheduler.add_task in main.py)
 - Donchian breakout: uses previous bar's channel (pandas-ta donchian includes current bar)
 - Bollinger squeeze: squeeze_min_bars=3 (daily timeframe; 6 was too strict)
 - AI agent integration: RiskAssessmentAgent pre-trade check in evaluation_loop (non-blocking), TradeReviewAgent daily review disabled 2026-05-20 (LLM JSON unreliable; replaced by deterministic scripts/daily_post_market_analysis.py)
