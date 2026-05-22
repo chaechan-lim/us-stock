@@ -645,7 +645,7 @@ async def lifespan(app: FastAPI):
     # config (markets.US.scanner.min_price). KR has its own KRScreener with
     # min_market_cap which already excludes penny stocks.
     enricher = FundamentalEnricher()
-    us_scanner_cfg = config_loader.get_market_scanner_config("US")
+    us_scanner_cfg = registry.config_loader.get_market_scanner_config("US")
     scanner_pipeline = ScannerPipeline(
         market_data=market_data,
         indicator_svc=indicator_svc,
