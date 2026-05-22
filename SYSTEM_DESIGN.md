@@ -301,7 +301,7 @@
 │   │   ├── ws.py                    # WebSocket
 │   │   └── dependencies.py          # DI
 │   │
-│   └── tests/                        # 103 test files, 1276+ tests
+│   └── tests/                        # 146 test files, 3,193 tests (2026-05-23)
 │       ├── conftest.py
 │       ├── test_exchange/ (4)
 │       ├── test_strategies/ (15)
@@ -321,7 +321,7 @@
     │
     └── src/
         ├── main.tsx
-        ├── components/              # 20 components
+        ├── components/              # 25 components
         │   ├── App.tsx
         │   ├── Dashboard.tsx        # 메인 레이아웃 (탭 네비게이션)
         │   ├── PortfolioChart.tsx    # 자산 추이 차트
@@ -2085,6 +2085,39 @@ CREATE TABLE watchlist (
     updated_at      TIMESTAMPTZ DEFAULT NOW()
 );
 
+-- AI 에이전트 영속 메모리 (token budget + importance eviction)
+-- AgentContextService 가 KV 저장으로 사용 — 4 agents 가 공유.
+CREATE TABLE agent_contexts (
+    id              SERIAL PRIMARY KEY,
+    agent_name      VARCHAR(50) NOT NULL,    -- market_analyst | risk | trade_review | news
+    key             VARCHAR(200) NOT NULL,
+    value           JSONB,
+    importance      DOUBLE PRECISION DEFAULT 1.0,
+    expires_at      TIMESTAMPTZ,
+    created_at      TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE (agent_name, key)
+);
+
+-- 자기진화 클로즈드 루프 큐 (LLM/룰 기반 추천이 들어옴 → operator accept/reject)
+-- See docs/OPS_RECOMMENDATIONS.md for the full flow.
+CREATE TABLE agent_recommendations (
+    id              SERIAL PRIMARY KEY,
+    created_at      TIMESTAMP DEFAULT NOW(),
+    agent_type      VARCHAR(50) NOT NULL,    -- llm_claude_daily / llm_codex_weekly / llm_both_daily / …
+    param_path      VARCHAR(200) NOT NULL,   -- yaml dotted path (must be in yaml_mutator whitelist)
+    current_value   JSONB,
+    proposed_value  JSONB,
+    rationale       TEXT,
+    expected_effect TEXT,
+    confidence      VARCHAR(10),             -- low | medium | high
+    risk            VARCHAR(10),             -- low | medium | high
+    backtest_result JSONB,                   -- {baseline,proposed,delta,passes_floor} (validator 채움)
+    status          VARCHAR(20) NOT NULL DEFAULT 'pending',  -- pending | accepted | rejected | superseded
+    applied_at      TIMESTAMP,
+    rejected_reason TEXT,
+    notes           TEXT                     -- dual-source sign-off 등 자유 메모
+);
+
 -- 인덱스
 CREATE INDEX idx_orders_symbol ON orders(symbol);
 CREATE INDEX idx_orders_created ON orders(created_at);
@@ -2094,73 +2127,93 @@ CREATE INDEX idx_snapshots_recorded ON portfolio_snapshots(recorded_at);
 CREATE INDEX idx_strategy_logs_created ON strategy_logs(created_at);
 CREATE INDEX idx_scanner_created ON scanner_results(created_at);
 CREATE INDEX idx_watchlist_active ON watchlist(is_active);
+CREATE INDEX idx_recs_status ON agent_recommendations(status);
+CREATE INDEX idx_recs_created ON agent_recommendations(created_at);
+CREATE INDEX idx_recs_agent_status ON agent_recommendations(agent_type, status);
 ```
 
 ---
 
 ## 13. API 엔드포인트
 
-### REST API
+### REST API (실제 17개 모듈 — `backend/api/`)
 
 ```
 /api/v1/
 ├── portfolio/
-│   ├── GET  /summary              # 포트폴리오 요약
+│   ├── GET  /summary              # 포트폴리오 요약 (?market=US|KR|ALL, ?account_id=…)
 │   ├── GET  /positions            # 보유 종목 목록
-│   ├── GET  /history              # 자산 추이 (스냅샷)
-│   ├── GET  /daily-pnl            # 일별 PnL
-│   └── GET  /performance          # 성과 지표 (Sharpe, MDD 등)
+│   ├── GET  /returns              # daily/weekly/monthly realized return
+│   ├── GET  /equity-history       # 자산 추이 (?days=N, ?market=…)
+│   ├── GET  /metrics              # 성과 지표 (TWR + cash-flow, Sharpe, MDD, PF, Expectancy, benchmark, target gap)
+│   └── GET  /trade-summary        # 거래 PnL 기간별 (today/week/month/all)
 │
 ├── trades/
-│   ├── GET  /                     # 거래 이력 (페이지네이션)
-│   ├── GET  /:id                  # 개별 거래 상세
+│   ├── GET  /                     # 거래 이력 (페이지네이션, ?market=, ?limit=, ?offset=)
 │   └── GET  /summary              # 거래 통계
+│
+├── orders/                        # KIS 주문 인터페이스 (read-only)
+├── positions/                     # 포지션 보조 endpoints
 │
 ├── strategies/
 │   ├── GET  /                     # 전략 목록 + 상태
-│   ├── GET  /:name/performance    # 전략별 성과
 │   ├── GET  /signals              # 최근 신호 로그
-│   └── GET  /comparison           # 전략 비교
+│   ├── GET  /performance          # 전략별 성과
+│   └── POST /reload               # 핫리로드 (yaml + adapter overrides)
 │
 ├── scanner/
 │   ├── GET  /results              # 최근 스캔 결과
 │   ├── POST /run                  # 수동 스캔 실행
 │   ├── GET  /sectors              # 섹터 분석 결과
-│   └── GET  /sectors/heatmap      # 섹터 히트맵 데이터
+│   └── GET  /sectors/heatmap      # 섹터 히트맵
 │
 ├── watchlist/
 │   ├── GET  /                     # 감시 목록
 │   ├── POST /                     # 종목 추가
-│   ├── DELETE /:symbol            # 종목 제거
-│   └── GET  /universe             # 전체 유니버스 (ETF 포함)
+│   ├── DELETE /:symbol            # 제거
+│   └── GET  /universe             # 전체 유니버스
 │
 ├── backtest/
-│   ├── POST /run                  # 백테스트 실행
-│   ├── GET  /results              # 결과 목록
-│   ├── GET  /results/:id          # 개별 결과 상세
-│   └── GET  /results/:id/chart    # 자산 곡선 데이터
+│   ├── POST /run
+│   ├── GET  /results
+│   ├── GET  /results/:id
+│   └── GET  /results/:id/chart
 │
 ├── engine/
-│   ├── GET  /status               # 엔진 상태 (US Stock + ETF)
-│   ├── POST /start                # 엔진 시작
-│   ├── POST /stop                 # 엔진 정지
-│   └── GET  /market-state         # 현재 시장 상태
+│   ├── GET  /status               # 엔진 상태
+│   ├── POST /start
+│   ├── POST /stop
+│   ├── GET  /market-state
+│   ├── GET  /rejection-funnel     # F1 BUY-flow attribution (오늘 거절 분포)
+│   └── GET  /etf-status           # 통합 ETF 상태
 │
-├── agents/
-│   ├── GET  /market-analysis      # 시장 분석 결과
-│   ├── GET  /risk-assessment      # 리스크 평가
-│   └── GET  /trade-review         # 매매 리뷰
+├── market/
+│   ├── GET  /price/:symbol
+│   ├── GET  /chart/:symbol
+│   ├── GET  /etf/universe
+│   ├── GET  /events               # earnings/macro/insider 캘린더
+│   └── GET  /macro                # FRED 매크로 지표
 │
-├── events/
-│   └── GET  /                     # 시스템 이벤트 로그
+├── news/
+│   └── GET  /sentiment            # 뉴스 감정 분석 결과
 │
-└── market/
-    ├── GET  /price/:symbol        # 현재가 조회
-    ├── GET  /chart/:symbol        # 차트 데이터 (OHLCV)
-    └── GET  /etf/universe         # ETF 유니버스 현황
+├── analysis/                      # 결정적 일일 분석 (2026-05-21~)
+│   ├── GET  /daily                # ?days=N — 최근 N일 아티팩트
+│   └── GET  /daily/latest         # 가장 최근 분석 1건
+│
+├── recommendations/               # 자기진화 클로즈드 루프 큐 (2026-05-22~)
+│   ├── GET  /                     # ?status=pending|accepted|rejected
+│   ├── POST /:id/accept           # yaml_mutator로 즉시 적용 + 핫리로드
+│   └── POST /:id/reject           # 거절 + 사유 기록
+│
+├── accounts/
+│   └── GET  /                     # 다중 계정 (US/KR 각각 select 가능)
+│
+└── (auth, dependencies, router)   # 미들웨어 / DI
 
 WebSocket:
-  WS /ws/dashboard                 # 실시간 대시보드 업데이트
+  WS /api/v1/ws/prices             # 실시간 가격 스트림 (구독형)
+  WS /api/v1/ws/dashboard          # 대시보드 푸시 채널
 ```
 
 ---
@@ -2182,26 +2235,38 @@ WebSocket:
 | 9 | Agents | AI 시장분석, 리스크, 매매 리뷰 | 에이전트 탭 계승 |
 | 10 | System | 시스템 로그, 일일 PnL 통계 | 시스템 로그 탭 계승 |
 
-### 14.2 주요 컴포넌트
+### 14.2 주요 컴포넌트 (`frontend/src/components/` 25개 — 2026-05-23 기준)
 
 ```
-Dashboard.tsx
-├── PortfolioSummary.tsx    # 총 자산, 현금, 투자금, PnL, 보유종목 테이블
-│   └── PortfolioChart.tsx  # 자산 추이 라인차트 (Recharts)
-├── TradeHistory.tsx        # 거래 이력 테이블, 종목/전략 필터
-├── SignalLog.tsx           # 전략 신호 + 지표 데이터
-├── StrategyPerformance.tsx # 전략별 승률, 수익, 비교 바차트
-├── StockScanner.tsx        # 스캔 결과 테이블, 수동 스캔 버튼
-│   └── WatchlistManager   # 감시 목록 추가/제거
-├── SectorHeatmap.tsx       # 11개 섹터 히트맵 (색상 = 강도)
-├── ETFMonitor.tsx          # ETF 유니버스, 현재 레짐, Bull/Bear 포지션
-├── BacktestPanel.tsx       # 전략/기간 선택, 실행, 결과 차트
-│   └── EquityCurve.tsx     # 자산곡선 + 벤치마크 비교
-├── AgentStatus.tsx         # AI 분석 결과 카드
-├── EngineControl.tsx       # 시작/정지 버튼, 상태 표시
-├── CandlestickChart.tsx    # lightweight-charts 캔들차트
-├── DailyPnLStats.tsx       # 일일 PnL 통계
-└── SystemLog.tsx           # 이벤트 로그 (severity별 색상)
+App.tsx                          # 최상위 + 탭 라우팅
+├── Dashboard tab
+│   ├── PerformanceDashboard    # 성과 KPI + 🏥 건강한 봇 체크리스트 + 📈 Net Equity Curve
+│   ├── DailyAnalysisPanel      # 결정적 일일 분석 verdict + 7일 heatmap
+│   ├── RejectionFunnelPanel    # F1 BUY-flow 거절 분포 (오늘)
+│   ├── RecommendationsPanel    # 🤖 에이전트 권고 큐 (accept/reject)
+│   ├── Dashboard               # equity 카드 + 포지션 테이블 + market/macro
+│   ├── PortfolioChart          # 자산 추이 area chart (별도 사용)
+│   └── (MarketToggle / AccountSelector / EngineControl 보조)
+├── Trades tab
+│   ├── TradeHistory            # 거래 이력 + 필터
+│   └── SignalPanel             # 최근 전략 신호 로그
+├── Chart tab
+│   └── StockChart              # lightweight-charts 캔들/이평/지표
+├── Scanner tab
+│   ├── ScannerPanel            # 스캔 결과 + 수동 트리거
+│   └── WatchlistPanel          # 감시 목록 관리
+├── Market tab
+│   ├── SectorHeatmap           # 섹터 강도 히트맵
+│   ├── ETFPanel                # ETF 엔진 상태 + 레짐 + 보유 ETF
+│   └── EventsCalendar          # earnings/macro/insider
+├── Strategies tab
+│   ├── StrategyPanel           # 전략별 상태 + on/off + 파라미터
+│   └── StrategyPerformance     # 전략별 승률 / PnL 그래프
+└── Logs tab
+    └── LogPanel                # 시스템 로그 (severity 색상)
+
+기타 (탭 외 / 보조):
+  - PositionList, BacktestPanel, OptimizePanel, NewsSentiment
 ```
 
 ---
@@ -2299,15 +2364,36 @@ PostgreSQL/Redis는 coin 프로젝트의 Docker 컨테이너를 공유.
 - Phase 1: 기반 구축 — ✅ KIS API, Paper adapter, DB, FastAPI
 - Phase 2: 데이터 파이프라인 — ✅ yfinance, FRED, KIS WebSocket, Redis cache
 - Phase 3: 백테스트 엔진 — ✅ 단일 전략 + 풀 파이프라인 백테스트
-- Phase 4: 전략 구현 — ✅ 14개 전략 + Signal Combiner (Mode B)
+- Phase 4: 전략 구현 — ✅ 17개 전략 등록 (시장별 disabled_strategies로 활성/비활성) + Signal Combiner (Mode B)
 - Phase 5: 매매 엔진 — ✅ 평가 루프, ATR-based SL/TP, Kelly sizing
 - Phase 6: ETF + 스캐너 — ✅ US/KR ETF 엔진, 3-Layer scanner
-- Phase 7: AI + 알림 — ✅ 4 agents (market/risk/review/news), Discord notification
-- Phase 8: 프론트엔드 — ✅ 20 components, US/KR 토글
-- Phase 9: 검증 + 라이브 — ✅ 1276+ tests, 실계좌 운용
+- Phase 7: AI + 알림 — ✅ 4 agents (market/risk/review/news; trade_review 2026-05-20 비활성화 — 결정적 daily 분석으로 대체), Discord notification
+- Phase 8: 프론트엔드 — ✅ 25 components, US/KR 토글, Net Equity Curve / Health Checklist / Daily Analysis / Recommendations 패널
+- Phase 9: 검증 + 라이브 — ✅ 3,193 tests (89.6% line coverage), 실계좌 운용 (US + KR 통합증거금)
 - Phase 10: KR 주식 — ✅ KIS KR adapter, 듀얼마켓, KR 스크리너
 - Phase 11: 뉴스/이벤트 — ✅ Finnhub/Naver 뉴스, 실적/매크로/내부자 캘린더
 - Phase 12: 시스템 고도화 — ✅ MCP 서버, DB 백업, 주문 안전장치
+
+### Phase 13: 자기진화 + 운영 견고성 (2026-05, 완료)
+
+라이브 운용 데이터 기반의 closed-loop 자동화 + 데이터 정확성 보강.
+
+- **#156** 결정적 일일 분석 (`scripts/daily_post_market_analysis.py`):
+  어제 PnL/cleanup count/top 전략 등 SQL 집계 → `data/daily_analyses/{date}.json` + Discord embed. 5d baseline 대비 판정 ✓/⚠️/⚠️ verdict.
+- **#157** 프론트엔드 `DailyAnalysisPanel`: Dashboard 상단에 latest verdict + 7일 heatmap.
+- **#158** 페니스톡 universe 필터: `ScannerPipeline.__init__(min_price=5.0)`, `markets.US.scanner.min_price` yaml. ACONW($0.04, −$149) 재발 차단.
+- **#159** KR 예수금 배치 (라이브 89.9% cash 진단):
+  - daily_buy_limit 5→10
+  - `allow_one_share_round_up=False` for KR (1-share placeholder 영구 고착 차단)
+  - `evaluation_loop.sizing_up` — already_held BUY → undersized 시 add-on (Kelly가 existing_position_value 소비)
+- **#160 / #162** LLM-based AgentRecommendation 생성기 (`scripts/generate_recommendations.py`):
+  Claude CLI + Codex CLI 병렬 → JSON 파싱 → yaml_mutator whitelist + pending dedupe + 양쪽 LLM 합의 시 1행 병합 → 자동 백테스트. 별도 systemd timer 없이 daily-post-market에서 `subprocess.Popen` chain (daily 항상, 월요일 KST에만 weekly 추가).
+- **#163** Cash flow 감지 강화 (`P1-F.2`): 단일 스냅샷 ≥30% 변동은 무조건 cash flow로 인식 (소액 계좌 ₩2-4M 이체 미감지로 KR metrics −30% 오류 차단). NaN safety (synth curve >0, JSON _safe). `PerformanceDashboard` 🏥 건강한 봇 6축 체크리스트 + 📈 Net Equity Curve.
+- **운영 인프라**:
+  - `services/yaml_mutator.py` (whitelist + .bak + atomic write)
+  - `services/recommendation_validator.py` (proposed value로 2y 풀파이프라인 백테스트 → baseline vs proposed delta + passes_floor 채움)
+  - `POST /recommendations/{id}/accept` → 파일 mutation + 핫리로드 (재시작 불필요한 path만)
+- 단일 schedule entry: `daily-post-market-analysis.timer` (06:00 KST). 클로즈드 루프 상세 → [docs/OPS_RECOMMENDATIONS.md](docs/OPS_RECOMMENDATIONS.md).
 
 ---
 
@@ -2956,7 +3042,7 @@ jobs:
 └─────────────────────────────────────────────────────────┘
 
 배포 체크리스트 (prod):
-  ✓ 모든 테스트 통과 (1276+ tests)
+  ✓ 모든 테스트 통과 (3,193 tests)
   ✓ 백테스트 통과 기준 충족
   ✓ 환경 변수 확인 (KIS 실투자 URL, 실계좌)
 

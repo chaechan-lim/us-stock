@@ -19,7 +19,7 @@
 | **Markets** | US (NYSE/NASDAQ), KR (KOSPI/KOSDAQ) — 동시 운영 |
 | **Strategies** | 17개 등록, market별 disabled_strategies로 활성/비활성 제어 |
 | **Backtesting** | 단일 전략 + full pipeline (`backend/backtest/`) |
-| **Tests** | pytest + pytest-asyncio (1276+ tests, coverage 90%+ 목표) |
+| **Tests** | pytest + pytest-asyncio (3,193 tests, ~89.6% line coverage, 90%+ 목표) |
 | **Deploy** | Raspberry Pi ARM64, systemd, nginx HTTPS reverse proxy |
 | **Ports** | Backend `8001`, Frontend `3001`, HTTPS `8443` |
 
@@ -87,7 +87,7 @@ us-stock/
 │   ├── services/              ← LLM client, cache, notifications, rate limiter
 │   ├── backtest/              ← single + full_pipeline backtest
 │   ├── api/                   ← 13 REST + WebSocket 모듈
-│   └── tests/                 ← 1276+ tests (unit, integration, scenario)
+│   └── tests/                 ← 146 files / 3,193 tests (unit, integration, scenario)
 │
 ├── frontend/                  ← React 18 + TypeScript dashboard
 │   └── src/components/        ← 20개 컴포넌트
