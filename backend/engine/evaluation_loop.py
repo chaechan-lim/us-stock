@@ -131,6 +131,18 @@ class EvaluationLoop:
         self._daily_buy_escalation_low: float = 0.65   # ≥60% usage
         self._daily_buy_escalation_high: float = 0.75  # ≥80% usage
         self._daily_buy_override: float = 0.90         # over-cap override
+        # 2026-05-22 (#59-C): sizing-up — allow add-on BUY for symbols
+        # currently held below `sizing_up_threshold × min_position_pct`
+        # of equity. Closes the placeholder gap created by the 1-share
+        # round-up path (KR blue chips) once that path is disabled, by
+        # bringing stuck 1-share positions up to the meaningful size
+        # Kelly would have chosen given enough cash. Disabled by default;
+        # opt in per market via set_sizing_up_enabled(True).
+        self._sizing_up_enabled: bool = False
+        self._sizing_up_threshold: float = 0.5
+        self._sizing_up_min_confidence: float = 0.50
+        self._sizing_up_cooldown_secs: int = 86400  # 24h
+        self._sizing_up_history: dict[str, float] = {}  # symbol -> last add-on ts
         # F1 (2026-05-09) attribution funnel: count BUY-flow rejections by
         # category so the dashboard can answer "why is cash sitting?"
         # Reset daily by _reset_daily_counters_if_needed.
@@ -434,6 +446,66 @@ class EvaluationLoop:
             "Market %s: opening_avoidance_minutes=%d",
             self._market, self._opening_avoidance_minutes,
         )
+
+    def set_sizing_up_config(
+        self,
+        *,
+        enabled: bool,
+        threshold: float | None = None,
+        min_confidence: float | None = None,
+        cooldown_secs: int | None = None,
+    ) -> None:
+        """Configure the sizing-up path (#59-C).
+
+        When enabled, an `already_held` BUY signal becomes an add-on order
+        instead of a reject, provided the current position value sits below
+        `threshold × min_position_pct × equity` and the signal confidence
+        clears `min_confidence`. Cooldown prevents repeated add-ons for the
+        same symbol within `cooldown_secs`.
+        """
+        self._sizing_up_enabled = bool(enabled)
+        if threshold is not None:
+            if not 0.0 < threshold <= 1.0:
+                raise ValueError(f"sizing_up_threshold out of (0,1]: {threshold}")
+            self._sizing_up_threshold = float(threshold)
+        if min_confidence is not None:
+            if not 0.0 <= min_confidence <= 1.0:
+                raise ValueError(f"sizing_up_min_confidence out of [0,1]: {min_confidence}")
+            self._sizing_up_min_confidence = float(min_confidence)
+        if cooldown_secs is not None:
+            if cooldown_secs < 0:
+                raise ValueError(f"sizing_up_cooldown_secs must be >= 0, got {cooldown_secs}")
+            self._sizing_up_cooldown_secs = int(cooldown_secs)
+        logger.info(
+            "Market %s: sizing_up enabled=%s thr=%.2f min_conf=%.2f cd=%ds",
+            self._market, self._sizing_up_enabled, self._sizing_up_threshold,
+            self._sizing_up_min_confidence, self._sizing_up_cooldown_secs,
+        )
+
+    def _is_sizing_up_eligible(
+        self, symbol: str, existing_value: float, equity: float, signal_confidence: float,
+    ) -> tuple[bool, str]:
+        """Return (eligible, reason) for converting an already_held reject
+        into an add-on BUY. Pure function — easy to unit-test."""
+        if not self._sizing_up_enabled:
+            return False, "disabled"
+        if equity <= 0:
+            return False, "no_equity"
+        if existing_value <= 0:
+            return False, "no_existing_position"
+        min_pct = self._risk_manager._params.min_position_pct
+        target_floor = self._sizing_up_threshold * min_pct * equity
+        if existing_value >= target_floor:
+            cur_pct = existing_value / equity * 100
+            return False, f"already_sized ({cur_pct:.1f}% ≥ floor {min_pct*100*self._sizing_up_threshold:.1f}%)"
+        if signal_confidence < self._sizing_up_min_confidence:
+            return False, f"conf {signal_confidence:.2f} < {self._sizing_up_min_confidence:.2f}"
+        last_ts = self._sizing_up_history.get(symbol)
+        if last_ts is not None and self._sizing_up_cooldown_secs > 0:
+            elapsed = time.time() - last_ts
+            if elapsed < self._sizing_up_cooldown_secs:
+                return False, f"cooldown {elapsed/3600:.1f}h < {self._sizing_up_cooldown_secs/3600:.1f}h"
+        return True, "undersized"
 
     def _get_sector(self, symbol: str) -> str:
         """Look up sector for a symbol (cached)."""
@@ -1800,11 +1872,17 @@ class EvaluationLoop:
                 self._bump_reject("pending_order")
                 return
 
-            # Skip if we already hold this symbol (prevent duplicate buys)
+            # Skip if we already hold this symbol (prevent duplicate buys).
+            # #59-C: when sizing_up is enabled, defer the decision to the
+            # exchange-position check below where balance/positions are
+            # available — that check computes full eligibility (undersized
+            # + confidence + cooldown). Sizing-up converts the reject into
+            # an add-on BUY.
             if self._position_tracker and symbol in self._position_tracker.tracked_symbols:
-                logger.debug("Skipping BUY for %s: already held", symbol)
-                self._bump_reject("already_held")
-                return
+                if not self._sizing_up_enabled:
+                    logger.debug("Skipping BUY for %s: already held", symbol)
+                    self._bump_reject("already_held")
+                    return
 
             # STOCK-20: Sell cooldown — block BUY for recently-sold symbols.
             # After a stop-loss or strategy sell, wait at least _sell_cooldown_secs
@@ -1879,13 +1957,45 @@ class EvaluationLoop:
             # Defense-in-depth: block buy if already holding via exchange
             # positions.  This catches duplicates even when position_tracker
             # is empty (e.g. after restart before restore_from_exchange).
-            if any(p.symbol == symbol and p.quantity > 0 for p in positions):
-                logger.info(
-                    "Skipping BUY for %s: already held (exchange positions)",
-                    symbol,
-                )
-                self._bump_reject("already_held_exchange")
-                return
+            # #59-C: sizing_up_enabled converts already_held into an add-on
+            # BUY when the existing position is well below min_position_pct
+            # of equity (placeholder symbol from 1-share round-up path).
+            existing_match = next(
+                (p for p in positions if p.symbol == symbol and p.quantity > 0),
+                None,
+            )
+            if existing_match is not None:
+                sizing_up_taken = False
+                if self._sizing_up_enabled:
+                    cur_value = (
+                        getattr(existing_match, "current_price", 0) or price
+                    ) * existing_match.quantity
+                    eligible, reason = self._is_sizing_up_eligible(
+                        symbol, cur_value, balance.total, signal.confidence,
+                    )
+                    if eligible:
+                        logger.info(
+                            "Sizing-up BUY for %s: existing %.0f → target ≥%.0f (reason=%s)",
+                            symbol,
+                            cur_value,
+                            self._sizing_up_threshold
+                            * self._risk_manager._params.min_position_pct
+                            * balance.total,
+                            reason,
+                        )
+                        self._sizing_up_history[symbol] = time.time()
+                        sizing_up_taken = True
+                    else:
+                        logger.debug(
+                            "Sizing-up declined for %s: %s", symbol, reason,
+                        )
+                if not sizing_up_taken:
+                    logger.info(
+                        "Skipping BUY for %s: already held (exchange positions)",
+                        symbol,
+                    )
+                    self._bump_reject("already_held_exchange")
+                    return
 
             # STOCK-20: Per-symbol position concentration limit.
             # Block additional buys if existing position value exceeds

@@ -5079,3 +5079,84 @@ class TestCashParkingUnpark:
         loop.set_cash_parking_config(enabled=True, min_hold_days=14, enable_unpark=True)
         assert loop._cash_parking_min_hold_days == 14
         assert loop._cash_parking_enable_unpark is True
+
+
+class TestSizingUpEligibility:
+    """#59-C — _is_sizing_up_eligible pure-function tests."""
+
+    @pytest.fixture
+    def loop(self, mock_adapter, mock_market_data, mock_registry):
+        from data.indicator_service import IndicatorService
+        from strategies.combiner import SignalCombiner
+        from engine.order_manager import OrderManager
+        from engine.risk_manager import RiskManager, RiskParams
+        # min_position_pct = 4% to match KR live config
+        risk = RiskManager(params=RiskParams(min_position_pct=0.04))
+        order_mgr = OrderManager(adapter=mock_adapter, risk_manager=risk)
+        return EvaluationLoop(
+            adapter=mock_adapter,
+            market_data=mock_market_data,
+            indicator_svc=IndicatorService(),
+            registry=mock_registry,
+            combiner=SignalCombiner(),
+            order_manager=order_mgr,
+            risk_manager=risk,
+            watchlist=["005380"],
+            market="KR",
+        )
+
+    def test_disabled_returns_false(self, loop):
+        loop.set_sizing_up_config(enabled=False)
+        ok, reason = loop._is_sizing_up_eligible("005380", 652000, 28_800_000, 0.7)
+        assert not ok and reason == "disabled"
+
+    def test_eligible_when_undersized_high_conf(self, loop):
+        loop.set_sizing_up_config(enabled=True, threshold=0.5, min_confidence=0.5)
+        # 현대차 1주 × 652k = 652k, equity 28.8M → 2.26% << 0.5 × 4% = 2.0%? Make it tighter
+        # 0.5 × 4% × 28.8M = 576k, so 652k > 576k → not undersized at threshold 0.5
+        # Use threshold 1.0 to widen the floor
+        loop.set_sizing_up_config(enabled=True, threshold=1.0, min_confidence=0.5)
+        ok, reason = loop._is_sizing_up_eligible("005380", 652000, 28_800_000, 0.7)
+        assert ok, reason
+
+    def test_already_sized_rejected(self, loop):
+        loop.set_sizing_up_config(enabled=True, threshold=0.5, min_confidence=0.5)
+        # 5M (>= 0.5 × 4% × 28.8M = 576k) → not undersized
+        ok, reason = loop._is_sizing_up_eligible("005380", 5_000_000, 28_800_000, 0.7)
+        assert not ok
+        assert "already_sized" in reason
+
+    def test_low_confidence_rejected(self, loop):
+        loop.set_sizing_up_config(enabled=True, threshold=1.0, min_confidence=0.5)
+        ok, reason = loop._is_sizing_up_eligible("005380", 100_000, 28_800_000, 0.3)
+        assert not ok
+        assert "conf" in reason
+
+    def test_cooldown_blocks_repeat(self, loop):
+        import time
+        loop.set_sizing_up_config(enabled=True, threshold=1.0, min_confidence=0.5, cooldown_secs=3600)
+        loop._sizing_up_history["005380"] = time.time() - 600  # 10 min ago
+        ok, reason = loop._is_sizing_up_eligible("005380", 100_000, 28_800_000, 0.7)
+        assert not ok
+        assert "cooldown" in reason
+
+    def test_cooldown_clears_after_window(self, loop):
+        import time
+        loop.set_sizing_up_config(enabled=True, threshold=1.0, min_confidence=0.5, cooldown_secs=3600)
+        loop._sizing_up_history["005380"] = time.time() - 7200  # 2h ago
+        ok, _ = loop._is_sizing_up_eligible("005380", 100_000, 28_800_000, 0.7)
+        assert ok
+
+    def test_no_existing_position_rejected(self, loop):
+        loop.set_sizing_up_config(enabled=True)
+        ok, reason = loop._is_sizing_up_eligible("005380", 0, 28_800_000, 0.7)
+        assert not ok
+        assert "no_existing" in reason
+
+    def test_invalid_threshold_raises(self, loop):
+        with pytest.raises(ValueError):
+            loop.set_sizing_up_config(enabled=True, threshold=1.5)
+        with pytest.raises(ValueError):
+            loop.set_sizing_up_config(enabled=True, threshold=0.0)
+        with pytest.raises(ValueError):
+            loop.set_sizing_up_config(enabled=True, cooldown_secs=-1)

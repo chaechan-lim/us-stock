@@ -141,6 +141,16 @@ def _apply_kr_eval_overrides(
         override=kr_eval_cfg.get("daily_buy_override"),
     )
 
+    # #59-C: sizing-up — promote already_held BUY to add-on when position
+    # is below threshold × min_position_pct of equity. Opt-in per market.
+    su = kr_eval_cfg.get("sizing_up") or {}
+    kr_loop.set_sizing_up_config(
+        enabled=bool(su.get("enabled", False)),
+        threshold=su.get("threshold"),
+        min_confidence=su.get("min_confidence"),
+        cooldown_secs=su.get("cooldown_secs"),
+    )
+
     kr_disabled = config_loader.get_market_disabled_strategies("KR")
     _warn_if_disabled_empty("KR", kr_disabled)
     kr_loop.set_disabled_strategies(kr_disabled)
@@ -452,6 +462,16 @@ async def lifespan(app: FastAPI):
         # compare_sizing_p1_p2.py 2026-05-07: KR Ret +7.7→+11.1, Sharpe
         # +0.33→+0.51, Cash 22→14 with min_position_pct=4% floor.
         enforce_min_position_pct_floor=True,
+        # 2026-05-22 (#59): disable 1-share round-up for KR. The path was
+        # added 2026-05-07 to rescue KR blue-chip BUYs ("Price too high
+        # for allocation" — 18 rejects/16h). But live shows the opposite
+        # failure mode: positions stick at 1 share permanently because
+        # eval_loop's already_held_exchange check (#1882) blocks add-ons.
+        # All 5 KR positions today are 1-share placeholders consuming
+        # 9.8% of equity while 89.9% sits idle. Rejecting "Price too
+        # high" lets the cash flow to symbols that actually fit min_pos
+        # × equity sized allocations. Paired with #59-C sizing-up.
+        allow_one_share_round_up=False,
     )
     kr_risk_manager = RiskManager(params=kr_risk_params)
     order_manager = OrderManager(

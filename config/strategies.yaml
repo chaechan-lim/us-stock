@@ -824,6 +824,29 @@ markets:
       # 2026-04-24: skip BUY in the first 30 minutes after 09:00 KST open
       # (44% of fills land at open, same whipsaw pattern as US).
       opening_avoidance_minutes: 30
+      # 2026-05-22 (#59): KR daily_buy_limit 5 → 10. compare_daily_buy_limit.py
+      # 2026-05-07 had KR 10 hurting -2pp Ret in 2y backtest, BUT the live
+      # state has diverged dramatically: 89.9% cash vs backtest 22% (5-22
+      # measurement), and the conf_bar gate is rejecting 348/532 signals
+      # today after the budget runs out at 5. Apply with monitoring; if
+      # weekly cleanup pattern degrades or PnL trails baseline for 5 days,
+      # revert. escalation_low/high default to KR-specific 0.65/0.75 — those
+      # remain conservative.
+      daily_buy_limit: 10
+      daily_buy_escalation_low: 0.65
+      daily_buy_escalation_high: 0.75
+      # #59-C: sizing-up. Live state had 5 KR positions stuck at 1 share
+      # each (placeholder via the 1-share round-up path) while 90% of
+      # equity sat idle. Now that #59-B disables that round-up path,
+      # this lets the next BUY signal on an undersized symbol convert
+      # from "already_held" reject into an add-on order. Kelly with
+      # existing_position_value sizes the add-on so the total approaches
+      # min_position_pct × equity. 24h cooldown prevents over-stacking.
+      sizing_up:
+        enabled: true
+        threshold: 0.5       # only add-on if current < 0.5 × min_pos × eq
+        min_confidence: 0.50
+        cooldown_secs: 86400
     # 2026-05-09 (F2): see US section for context. KR has historically
     # left ~75% cash idle. 0.50 reflects the dual_momentum-only signal
     # density limit. Raise after F4+F5 unblock cash deployment.
