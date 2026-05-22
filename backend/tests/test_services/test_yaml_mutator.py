@@ -125,3 +125,106 @@ class TestApplyYamlChange:
         # tmp file should be removed (renamed to target)
         tmp = yaml_file.with_suffix(yaml_file.suffix + ".tmp")
         assert not tmp.exists()
+
+    def test_intermediate_path_missing_raises(self, tmp_path):
+        """Whitelisted prefix but an interior key doesn't exist — walk
+        raises before we even reach the leaf check."""
+        p = tmp_path / "s.yaml"
+        # markets.KR exists but markets.KR.risk is missing
+        p.write_text(yaml.safe_dump({"markets": {"KR": {}}}), encoding="utf-8")
+        with pytest.raises(YamlMutationError, match="yaml path not found"):
+            apply_yaml_change(p, "markets.KR.risk.max_positions", 18)
+
+    def test_intermediate_path_not_mapping_raises(self, tmp_path):
+        """Walk hits a scalar where a dict was expected."""
+        p = tmp_path / "s.yaml"
+        # markets.KR.risk is a string, not a dict
+        p.write_text(
+            yaml.safe_dump({"markets": {"KR": {"risk": "broken"}}}),
+            encoding="utf-8",
+        )
+        with pytest.raises(YamlMutationError, match="not a mapping"):
+            apply_yaml_change(p, "markets.KR.risk.max_positions", 18)
+
+    def test_yaml_file_not_found_raises(self, tmp_path):
+        missing = tmp_path / "nope.yaml"
+        with pytest.raises(YamlMutationError, match="yaml file not found"):
+            apply_yaml_change(missing, "markets.KR.risk.max_positions", 18)
+
+    def test_yaml_parse_failure_raises(self, tmp_path):
+        p = tmp_path / "broken.yaml"
+        p.write_text("foo: [unclosed", encoding="utf-8")
+        with pytest.raises(YamlMutationError, match="yaml parse failed"):
+            apply_yaml_change(p, "markets.KR.risk.max_positions", 18)
+
+    def test_yaml_root_not_mapping_raises(self, tmp_path):
+        p = tmp_path / "list.yaml"
+        # Root is a list, not a dict — apply must refuse.
+        p.write_text(yaml.safe_dump(["a", "b"]), encoding="utf-8")
+        with pytest.raises(YamlMutationError, match="root is not a mapping"):
+            apply_yaml_change(p, "markets.KR.risk.max_positions", 18)
+
+
+class TestTypeMatching:
+    """Cover every branch of _types_match (bool / numeric / str / list /
+    dict / None) via apply_yaml_change."""
+
+    def _yaml_with(self, tmp_path, value):
+        p = tmp_path / "s.yaml"
+        p.write_text(
+            yaml.safe_dump({"markets": {"KR": {"evaluation_loop": {"k": value}}}}),
+            encoding="utf-8",
+        )
+        return p
+
+    def test_bool_to_bool_ok(self, tmp_path):
+        p = self._yaml_with(tmp_path, True)
+        apply_yaml_change(p, "markets.KR.evaluation_loop.k", False)
+        assert yaml.safe_load(p.read_text())["markets"]["KR"]["evaluation_loop"]["k"] is False
+
+    def test_bool_to_int_rejected(self, tmp_path):
+        p = self._yaml_with(tmp_path, True)
+        with pytest.raises(YamlMutationError, match="type mismatch"):
+            apply_yaml_change(p, "markets.KR.evaluation_loop.k", 1)
+
+    def test_int_to_bool_rejected(self, tmp_path):
+        p = self._yaml_with(tmp_path, 1)
+        with pytest.raises(YamlMutationError, match="type mismatch"):
+            apply_yaml_change(p, "markets.KR.evaluation_loop.k", True)
+
+    def test_str_to_str_ok(self, tmp_path):
+        p = self._yaml_with(tmp_path, "SPY")
+        apply_yaml_change(p, "markets.KR.evaluation_loop.k", "KODEX")
+        assert yaml.safe_load(p.read_text())["markets"]["KR"]["evaluation_loop"]["k"] == "KODEX"
+
+    def test_str_to_int_rejected(self, tmp_path):
+        p = self._yaml_with(tmp_path, "label")
+        with pytest.raises(YamlMutationError, match="type mismatch"):
+            apply_yaml_change(p, "markets.KR.evaluation_loop.k", 99)
+
+    def test_list_to_list_ok(self, tmp_path):
+        p = self._yaml_with(tmp_path, [1, 2])
+        apply_yaml_change(p, "markets.KR.evaluation_loop.k", [3, 4, 5])
+        assert yaml.safe_load(p.read_text())["markets"]["KR"]["evaluation_loop"]["k"] == [3, 4, 5]
+
+    def test_dict_to_dict_ok(self, tmp_path):
+        p = self._yaml_with(tmp_path, {"x": 1})
+        apply_yaml_change(p, "markets.KR.evaluation_loop.k", {"y": 2})
+        assert yaml.safe_load(p.read_text())["markets"]["KR"]["evaluation_loop"]["k"] == {"y": 2}
+
+    def test_dict_to_list_rejected(self, tmp_path):
+        p = self._yaml_with(tmp_path, {"x": 1})
+        with pytest.raises(YamlMutationError, match="type mismatch"):
+            apply_yaml_change(p, "markets.KR.evaluation_loop.k", [1, 2])
+
+    def test_none_existing_accepts_any(self, tmp_path):
+        """None on either side bypasses type-match (operator initializing)."""
+        p = self._yaml_with(tmp_path, None)
+        apply_yaml_change(p, "markets.KR.evaluation_loop.k", 0.5)
+        assert yaml.safe_load(p.read_text())["markets"]["KR"]["evaluation_loop"]["k"] == 0.5
+
+    def test_none_proposed_accepts(self, tmp_path):
+        """Caller can clear a value by proposing None."""
+        p = self._yaml_with(tmp_path, 42)
+        apply_yaml_change(p, "markets.KR.evaluation_loop.k", None)
+        assert yaml.safe_load(p.read_text())["markets"]["KR"]["evaluation_loop"]["k"] is None

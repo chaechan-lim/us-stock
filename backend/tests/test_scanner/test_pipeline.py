@@ -299,6 +299,177 @@ class TestScannerPipeline:
         )
         assert pipe._min_price == 5.0
 
+    def test_set_news_summary_caches(
+        self, mock_market_data, mock_indicator_svc, mock_enricher,
+    ):
+        """set_news_summary stores for the next scan."""
+        from agents.news_sentiment_agent import NewsSentimentSummary
+        pipe = ScannerPipeline(
+            market_data=mock_market_data,
+            indicator_svc=mock_indicator_svc,
+            enricher=mock_enricher,
+        )
+        s = NewsSentimentSummary(symbol_sentiments={"AAPL": 0.5})
+        pipe.set_news_summary(s)
+        assert pipe._last_news_summary is s
+
+    async def test_pipeline_no_layer1_passes(
+        self, mock_market_data, mock_indicator_svc, mock_enricher,
+    ):
+        """When every symbol has too-short OHLCV, return []."""
+        pipe = ScannerPipeline(
+            market_data=mock_market_data,
+            indicator_svc=mock_indicator_svc,
+            enricher=mock_enricher,
+        )
+        short_df = _make_ohlcv_df(n=30)  # < 50 → skipped
+        with patch(
+            "scanner.pipeline._fetch_yfinance_ohlcv",
+            side_effect=lambda sym, **kw: short_df,
+        ):
+            res = await pipe.run_full_scan(["AAPL", "MSFT"])
+        assert res == []
+
+    async def test_layer1_logs_and_continues_on_exception(
+        self, mock_market_data, mock_indicator_svc, mock_enricher,
+    ):
+        """Per-symbol Layer 1 failures don't abort the scan (the try/except
+        path was uncovered)."""
+        pipe = ScannerPipeline(
+            market_data=mock_market_data,
+            indicator_svc=mock_indicator_svc,
+            enricher=mock_enricher,
+        )
+
+        def side_effect(sym, **kw):
+            if sym == "BOOM":
+                raise RuntimeError("yf timeout")
+            return _make_ohlcv_df()
+
+        with patch("scanner.pipeline._fetch_yfinance_ohlcv", side_effect=side_effect):
+            res = await pipe.run_full_scan(["AAPL", "BOOM", "MSFT"])
+        assert isinstance(res, list)
+
+
+class TestNewsEnricher:
+    """Layer 2.5 path (news_enricher present + active summary)."""
+
+    async def test_news_enricher_called(self):
+        """When news_enricher + summary present, results pass through enrich()."""
+        from agents.news_sentiment_agent import NewsSentimentSummary
+        market_data = AsyncMock()
+        indicator_svc = MagicMock()
+        indicator_svc.add_all_indicators = MagicMock(side_effect=lambda df: df)
+        enricher = AsyncMock()
+        enricher.enrich_batch = AsyncMock(return_value=[
+            EnrichedCandidate(
+                symbol="AAPL", indicator_score=80.0, consensus_score=75.0,
+                fundamental_score=70.0, smart_money_score=65.0,
+                combined_score=72.5, grade="B",
+            ),
+        ])
+        news_enricher = MagicMock()
+        news_enricher.enrich = MagicMock(side_effect=lambda results, summary: [
+            {**r, "news_sentiment": 0.42} for r in results
+        ])
+        pipe = ScannerPipeline(
+            market_data=market_data,
+            indicator_svc=indicator_svc,
+            enricher=enricher,
+            news_enricher=news_enricher,
+        )
+        summary = NewsSentimentSummary(symbol_sentiments={"AAPL": 0.5})
+        with patch(
+            "scanner.pipeline._fetch_yfinance_ohlcv",
+            side_effect=lambda sym, **kw: _make_ohlcv_df(),
+        ):
+            out = await pipe.run_full_scan(["AAPL"], news_summary=summary)
+        assert news_enricher.enrich.called
+        assert out and out[0]["news_sentiment"] == pytest.approx(0.42)
+
+
+class TestLayer3ErrorPaths:
+    """When the AI agent throws, the loop logs and continues; SPY context
+    fetch failure is also non-fatal."""
+
+    async def test_layer3_ai_error_continues(
+        self, mock_market_data, mock_indicator_svc, mock_enricher, mock_ai_agent,
+    ):
+        mock_ai_agent.analyze = AsyncMock(side_effect=RuntimeError("LLM down"))
+        pipe = ScannerPipeline(
+            market_data=mock_market_data,
+            indicator_svc=mock_indicator_svc,
+            enricher=mock_enricher,
+            ai_agent=mock_ai_agent,
+        )
+        with patch(
+            "scanner.pipeline._fetch_yfinance_ohlcv",
+            side_effect=lambda sym, **kw: _make_ohlcv_df(),
+        ):
+            res = await pipe.run_full_scan(["AAPL", "MSFT"])
+        # No ai fields populated because every call raised, but the scan
+        # itself succeeded.
+        assert res
+        assert "ai_recommendation" not in res[0]
+
+    async def test_layer3_spy_context_failure_non_fatal(
+        self, mock_market_data, mock_indicator_svc, mock_enricher, mock_ai_agent,
+    ):
+        pipe = ScannerPipeline(
+            market_data=mock_market_data,
+            indicator_svc=mock_indicator_svc,
+            enricher=mock_enricher,
+            ai_agent=mock_ai_agent,
+        )
+
+        # All non-SPY return data; SPY raises.
+        def side_effect(sym, **kw):
+            if sym == "SPY":
+                raise RuntimeError("yfinance error on SPY")
+            return _make_ohlcv_df()
+
+        with patch("scanner.pipeline._fetch_yfinance_ohlcv", side_effect=side_effect):
+            res = await pipe.run_full_scan(["AAPL", "MSFT", "GOOG"])
+        assert res  # AI still runs without market context
+
+
+class TestFetchYfinanceOhlcv:
+    """The module-level helper has fully observable failure modes."""
+
+    def test_empty_history_returns_empty_df(self):
+        with patch("scanner.pipeline.yf.Ticker") as mock_t:
+            mock_t.return_value.history.return_value = pd.DataFrame()
+            df = _fetch_yfinance_ohlcv("AAPL")
+        assert df.empty
+
+    def test_missing_columns_returns_empty(self):
+        with patch("scanner.pipeline.yf.Ticker") as mock_t:
+            # Has Open but missing Close — must return empty.
+            mock_t.return_value.history.return_value = pd.DataFrame({"Open": [1, 2]})
+            df = _fetch_yfinance_ohlcv("AAPL")
+        assert df.empty
+
+    def test_exception_returns_empty(self):
+        with patch("scanner.pipeline.yf.Ticker") as mock_t:
+            mock_t.return_value.history.side_effect = RuntimeError("network")
+            df = _fetch_yfinance_ohlcv("AAPL")
+        assert df.empty
+
+    def test_happy_path_normalizes_columns(self):
+        """Valid yfinance response → lowercased OHLCV columns subset."""
+        with patch("scanner.pipeline.yf.Ticker") as mock_t:
+            mock_t.return_value.history.return_value = pd.DataFrame({
+                "Open": [1.0, 2.0],
+                "High": [1.1, 2.1],
+                "Low": [0.9, 1.9],
+                "Close": [1.05, 2.05],
+                "Volume": [100, 200],
+                "Dividends": [0.0, 0.0],  # extra column gets dropped
+            })
+            df = _fetch_yfinance_ohlcv("AAPL")
+        assert list(df.columns) == ["open", "high", "low", "close", "volume"]
+        assert len(df) == 2
+
     async def test_spy_context_dispatched_via_to_thread(
         self, mock_market_data, mock_indicator_svc, mock_enricher, mock_ai_agent,
     ):
