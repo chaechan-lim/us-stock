@@ -18,11 +18,13 @@ const WINDOWS = [
   { days: 90, label: '90d' },
 ]
 
-const MARKETS = [
-  { key: '', label: 'ALL' },
-  { key: 'KR', label: 'KR' },
-  { key: 'US', label: 'US' },
-]
+// Market filter removed (2026-05-23): on a 통합증거금 account,
+// per-market equity has cross-leakage between US/KR (collateral
+// sharing, FX conversion of holdings) so KR-only / US-only equity
+// metrics are misleading. ALL view via integrated_total_krw is the
+// only portfolio-level metric that makes sense. The series builds
+// up since 2026-05-06 when KIS CTRP6548R wiring landed; before that
+// the API has no integrated total to serve.
 
 function fmtPct(v: number | null | undefined, signed = true) {
   if (v == null) return '—'
@@ -78,8 +80,8 @@ function KpiTile({ label, value, sub, toneVal = 'neu', highlight }: KpiTileProps
 
 export default function PerformanceDashboard() {
   const [days, setDays] = useState(30)
-  const [market, setMarket] = useState<string>('')
-  const { data, isLoading, error } = usePerformanceMetrics(days, market || undefined)
+  // Always ALL — single-market view removed (see top-of-file note).
+  const { data, isLoading, error } = usePerformanceMetrics(days, undefined)
 
   if (isLoading) {
     return (
@@ -102,7 +104,7 @@ export default function PerformanceDashboard() {
 
   return (
     <div className="space-y-3">
-      {/* Window + Market selectors */}
+      {/* Window selector — market filter removed (통합증거금) */}
       <div className="flex items-center gap-3 flex-wrap">
         <div className="flex items-center gap-2">
           <span className="text-xs text-gray-500">기간:</span>
@@ -121,26 +123,12 @@ export default function PerformanceDashboard() {
             </button>
           ))}
         </div>
-        <div className="flex items-center gap-2">
-          <span className="text-xs text-gray-500">시장:</span>
-          {MARKETS.map(m => (
-            <button
-              key={m.key}
-              onClick={() => setMarket(m.key)}
-              className={clsx(
-                'px-2.5 py-1 rounded-md text-xs font-medium transition-colors',
-                market === m.key
-                  ? 'bg-purple-600 text-white'
-                  : 'bg-gray-100 text-gray-700 hover:bg-gray-200',
-              )}
-            >
-              {m.label}
-            </button>
-          ))}
-        </div>
+        <span className="text-[10px] text-gray-400">
+          통합 (US + KR) · CTRP6548R 통합총자산 기반
+        </span>
         {sampleHint && (
           <div className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 px-2 py-0.5 rounded">
-            ⚠️ {sampleHint} — 일부 지표 신뢰도 낮음
+            ⚠️ {sampleHint} — 통합총자산 추적은 2026-05-06부터 시작, 일부 지표 신뢰도 낮음
           </div>
         )}
       </div>
@@ -286,8 +274,8 @@ export default function PerformanceDashboard() {
         exposureGapPct={tg.exposure_gap_pct}
       />
 
-      {/* Net equity curve — respects the same market+window selector */}
-      <EquityCurve days={days} market={market} />
+      {/* Net equity curve — uses combined 통합 총자산 series */}
+      <EquityCurve days={days} />
 
       <div className="text-[11px] text-gray-500 px-2">
         💡 Net Equity Curve 우상향 + MDD 감당 가능 + Net PF &gt; 1.2 + Expectancy 양수가
@@ -451,12 +439,10 @@ function HealthLine({ label, status, detail }: HealthRow) {
 }
 
 
-function EquityCurve({ days, market }: { days: number; market: string }) {
-  // Backend get_equity_history accepts a market filter; '' (ALL) defaults
-  // to the US series in the existing hook signature. Pass US or KR
-  // explicitly so the curve matches the selector above.
-  const effectiveMarket = market || 'US'
-  const { data, isLoading, error } = useEquityHistory(days, effectiveMarket)
+function EquityCurve({ days }: { days: number }) {
+  // 'combined' triggers kr_pm.get_combined_equity_history → returns the
+  // CTRP6548R integrated total (₩, since 2026-05-06 onwards).
+  const { data, isLoading, error } = useEquityHistory(days, 'combined')
 
   if (isLoading) {
     return (
@@ -473,37 +459,30 @@ function EquityCurve({ days, market }: { days: number; market: string }) {
     )
   }
 
-  // Dedupe by date — keep the last value per day (one point/day).
-  // Note: the API returns numeric balance.total under `total_value_usd`
-  // regardless of market — for KR the unit is actually KRW (the column
-  // name is legacy). We just treat it as the market's native currency.
+  // Dedupe by date — keep the last value per day. The combined endpoint
+  // surfaces the integrated total in `total_value_krw` (not _usd).
   const byDate = new Map<string, number>()
   for (const p of data) {
     const d = (p.date ?? '').slice(0, 10)
     if (!d) continue
-    const v = (p as { total_value_usd?: number }).total_value_usd ?? 0
+    const v = (p as { total_value_krw?: number; total_value_usd?: number })
+      .total_value_krw
+      ?? (p as { total_value_usd?: number }).total_value_usd
+      ?? 0
     if (v) byDate.set(d, v)
   }
   const series = Array.from(byDate.entries()).map(([date, value]) => ({ date, value }))
   if (series.length === 0) return null
 
   const startValue = series[0].value
-  const isKr = effectiveMarket === 'KR'
-  const currencySymbol = isKr ? '₩' : '$'
-  const yFormatter = (v: number) => {
-    if (isKr) return `${currencySymbol}${(v / 1_000_000).toFixed(1)}M`
-    return `${currencySymbol}${(v / 1_000).toFixed(0)}k`
-  }
-  const tooltipFormatter = (v: number) => {
-    if (isKr) return [`${currencySymbol}${v.toLocaleString()}`, '총자산']
-    return [`${currencySymbol}${v.toLocaleString(undefined, { maximumFractionDigits: 0 })}`, '총자산']
-  }
+  const yFormatter = (v: number) => `₩${(v / 1_000_000).toFixed(1)}M`
+  const tooltipFormatter = (v: number) => [`₩${v.toLocaleString()}`, '통합총자산']
 
   return (
     <div className="rounded-xl border border-gray-100 bg-white p-3">
       <div className="flex items-center justify-between mb-2">
         <div className="text-[11px] uppercase tracking-wide text-gray-500">
-          📈 Net Equity Curve · {effectiveMarket} · {days}d
+          📈 Net Equity Curve · 통합 · {days}d
         </div>
         <div className="text-[11px] text-gray-500">
           {series.length} points
