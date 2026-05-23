@@ -805,7 +805,7 @@ async def performance_metrics(
     else:
         history = []
 
-    intraday_values: list[float] = []
+    intraday_values_raw: list[tuple[_date, float]] = []
     # P1-D (2026-05-14): track per-day cash_flow so compute_equity_metrics
     # can use TWR. SUM within a day (multiple snapshots can both detect
     # the deposit on different sides — but detect_cash_flow normally fires
@@ -823,12 +823,17 @@ async def performance_metrics(
         if v:
             v_f = float(v)
             per_day[d] = v_f       # last value of day overrides
-            intraday_values.append(v_f)
+            intraday_values_raw.append((d, v_f))
         cf = float(p.get("cash_flow", 0.0) or 0.0)
         if cf != 0.0:
             per_day_cf[d] = per_day_cf.get(d, 0.0) + cf
     equity_series = list(per_day.items())
     cash_flows = [per_day_cf.get(d, 0.0) for d, _ in equity_series]
+    # Filter intraday values to exclude cash-flow days. Without this, a
+    # ₩4M intraday withdrawal shows up as a ~50% intraday drawdown even
+    # though TWR already strips it from the daily MDD (#163 follow-up).
+    cf_days = {d for d, cf in per_day_cf.items() if cf != 0.0}
+    intraday_values = [v for d, v in intraday_values_raw if d not in cf_days]
 
     # Exposure uses the per-market series (has cash + invested fields).
     if not market or market.upper() == "ALL":
