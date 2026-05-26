@@ -2103,6 +2103,9 @@ class EvaluationLoop:
                     atr_val = float(df["ATRr_14"].iloc[-1])
                 if atr_val and atr_val > 0:
                     atr_pct = atr_val / price
+                    # Vol scaling now reads target/min/max from RiskParams
+                    # (per-market tuning). KR overrides via yaml block
+                    # markets.KR.risk.volatility_scaling.
                     sizing = self._risk_manager.apply_volatility_scaling(
                         sizing, atr_pct, price,
                     )

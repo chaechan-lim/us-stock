@@ -234,6 +234,16 @@ class PipelineConfig:
     kelly_fraction: float = 0.40  # Fractional Kelly (matches live)
     confidence_exponent: float = 1.2  # Confidence scaling power (matches live)
     min_position_pct: float = 0.05  # Minimum position size (matches live)
+    # Volatility scaling (apply_volatility_scaling) — live eval_loop runs
+    # this after Kelly/fallback sizing. Defaults match the US-calibrated
+    # static values; KR overrides via compare_vol_scaling.py sweep.
+    enable_vol_scaling: bool = False  # Off by default to keep prior backtest behavior stable
+    vol_scale_target_risk_pct: float = 0.02
+    vol_scale_min: float = 0.3
+    vol_scale_max: float = 1.5
+    # P2 floor (RiskParams.enforce_min_position_pct_floor) — KR live
+    # uses this to bump Kelly/fallback below min_position_pct up.
+    enforce_min_position_pct_floor: bool = False
 
     # Momentum factor tilt
     enable_momentum_tilt: bool = False  # Pass momentum z-scores to Kelly sizer
@@ -439,6 +449,12 @@ class FullPipelineBacktest:
             daily_loss_limit_pct=self._config.daily_loss_limit_pct,
             default_stop_loss_pct=self._config.default_stop_loss_pct,
             default_take_profit_pct=self._config.default_take_profit_pct,
+            min_position_pct=self._config.min_position_pct,
+            kelly_fraction=self._config.kelly_fraction,
+            enforce_min_position_pct_floor=self._config.enforce_min_position_pct_floor,
+            vol_scale_target_risk_pct=self._config.vol_scale_target_risk_pct,
+            vol_scale_min=self._config.vol_scale_min,
+            vol_scale_max=self._config.vol_scale_max,
         ))
         # Override Kelly sizer params for backtest tuning
         self._risk_manager._kelly = KellyPositionSizer(
@@ -1996,8 +2012,29 @@ class FullPipelineBacktest:
         if not sizing.allowed:
             return
 
-        # Apply slippage (volume-adjusted if enabled)
         row = data.df.iloc[date_idx]
+
+        # Risk-parity volatility scaling — mirrors evaluation_loop.py:2106
+        # so backtest sees the same per-symbol downsizing live applies.
+        # Off unless cfg.enable_vol_scaling = True (keeps legacy backtest
+        # numbers stable; compare_vol_scaling.py toggles it).
+        if cfg.enable_vol_scaling and price > 0:
+            atr_val = None
+            for col in ("atr", "ATRr_14"):
+                if col in row.index:
+                    v = row[col]
+                    if v is not None:
+                        atr_val = float(v)
+                        break
+            if atr_val and atr_val > 0:
+                atr_pct = atr_val / price
+                sizing = self._risk_manager.apply_volatility_scaling(
+                    sizing, atr_pct, price,
+                )
+                if not sizing.allowed or sizing.quantity <= 0:
+                    return
+
+        # Apply slippage (volume-adjusted if enabled)
         volume = float(row["volume"]) if "volume" in row.index else 0
         est_quantity = int(sizing.allocation_usd / price) if price > 0 else 0
         slippage = self._effective_slippage(volume, est_quantity)
