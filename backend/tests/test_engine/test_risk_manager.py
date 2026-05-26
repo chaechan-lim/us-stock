@@ -306,6 +306,69 @@ class TestP2MinPositionFloor:
         # max 10% × ₩7M = ₩700K → 7 shares max
         assert result.allocation_usd <= 700_000.0
 
+    def test_kelly_path_also_applies_floor(self):
+        """#59-D: Kelly path must apply the same min-position-pct floor
+        as the fallback path. Repro of live 5-26 KR pattern: ₩29M
+        account, ₩300K share price. Without the floor, Kelly's small
+        allocation rounded to 1 share. With the floor, min_pos 4% × 29M
+        = ₩1.16M / ₩300K ≈ 3 shares."""
+        from analytics.position_sizing import KellyResult
+
+        # Stub the Kelly engine to force a small final_allocation_pct
+        # so we exercise the floor — otherwise the regime fallback path
+        # would mask the change.
+        small_kelly = KellyResult(
+            kelly_fraction=0.005,
+            position_pct=0.01,
+            confidence_boost=1.0,
+            factor_boost=1.0,
+            final_allocation_pct=0.01,  # 1% × ₩29M = ₩290K
+            reason="test stub",
+        )
+
+        class _StubKelly:
+            def calculate(self, *a, **kw):
+                return small_kelly
+
+        params_floor = RiskParams(
+            max_position_pct=0.20, min_position_pct=0.04,
+            enforce_min_position_pct_floor=True,
+        )
+        rm_floor = RiskManager(params=params_floor)
+        rm_floor.set_eval_regime("uptrend")
+        rm_floor._kelly = _StubKelly()
+        r_floor = rm_floor.calculate_kelly_position_size(
+            symbol="005930", price=300_000.0,
+            portfolio_value=29_000_000.0, cash_available=26_000_000.0,
+            current_positions=0, signal_confidence=0.50,
+            win_rate=0.55, avg_win=0.05, avg_loss=0.03,
+        )
+        assert r_floor.allowed is True
+        # Must have come through the Kelly branch (the #59-D fix lives
+        # there), not via "Fixed+factors" fallback.
+        assert r_floor.reason.startswith("Kelly"), f"unexpected reason: {r_floor.reason}"
+        # Floor: 4% × ₩29M = ₩1.16M / ₩300K = 3.87 → 3 shares
+        assert r_floor.quantity == 3, f"expected 3 with floor, got {r_floor.quantity}"
+
+        # Without the floor, Kelly's tiny allocation (₩290K) ÷ price
+        # (₩300K) rounds to 0 shares → Kelly path skips the early-return
+        # and falls through to "Fixed+factors". Demonstrating that the
+        # floor is what made the Kelly path productive on a small alloc.
+        params_no = RiskParams(
+            max_position_pct=0.20, min_position_pct=0.04,
+            enforce_min_position_pct_floor=False,
+        )
+        rm_no = RiskManager(params=params_no)
+        rm_no.set_eval_regime("uptrend")
+        rm_no._kelly = _StubKelly()
+        r_no = rm_no.calculate_kelly_position_size(
+            symbol="005930", price=300_000.0,
+            portfolio_value=29_000_000.0, cash_available=26_000_000.0,
+            current_positions=0, signal_confidence=0.50,
+            win_rate=0.55, avg_win=0.05, avg_loss=0.03,
+        )
+        assert not r_no.reason.startswith("Kelly")
+
 
 class TestRegimePositionPctOverride:
     """Per-market regime sizing override (US uses larger sizes than KR)."""

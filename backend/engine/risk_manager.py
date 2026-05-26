@@ -489,6 +489,21 @@ class RiskManager:
                 )
                 if effective_existing > 0:
                     allocation = max(0.0, allocation - effective_existing)
+                # #59-D (2026-05-26): apply the same min-position-pct floor
+                # in the Kelly path that the fallback path uses. Without
+                # this, Kelly returning a small allocation (e.g. ₩300K)
+                # rounds to 1 share for a ₩300K stock and exits before
+                # the fallback floor (₩1.16M on a ₩29M KR account) ever
+                # runs — same root cause as the 1-share placeholders #59
+                # was supposed to kill, just via a different code path.
+                if self._params.enforce_min_position_pct_floor:
+                    min_alloc = portfolio_value * self._params.min_position_pct
+                    max_alloc = portfolio_value * self._params.max_position_pct
+                    if allocation < min_alloc:
+                        allocation = min(
+                            min_alloc, cash_available * 0.95, max_alloc,
+                            exposure_headroom,
+                        )
                 allocation = min(allocation, cash_available * 0.95, exposure_headroom)
 
                 if allocation > 0 and price > 0:
@@ -496,12 +511,13 @@ class RiskManager:
                     if quantity > 0:
                         logger.info(
                             "Kelly sizing %s: kelly=%.3f, conf_boost=%.2f, "
-                            "factor_boost=%.2f, alloc=%.1f%%",
+                            "factor_boost=%.2f, alloc=%.1f%%, qty=%d",
                             symbol,
                             kelly_result.kelly_fraction,
                             kelly_result.confidence_boost,
                             kelly_result.factor_boost,
                             kelly_result.final_allocation_pct * 100,
+                            quantity,
                         )
                         return PositionSizeResult(
                             quantity=quantity,
