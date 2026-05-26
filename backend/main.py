@@ -472,6 +472,20 @@ async def lifespan(app: FastAPI):
         # high" lets the cash flow to symbols that actually fit min_pos
         # × equity sized allocations. Paired with #59-C sizing-up.
         allow_one_share_round_up=False,
+        # 2026-05-26: KR-tuned vol scaling (was US-calibrated 0.02/0.3
+        # globally). KR mid-cap ATR ~4-7% → scale clamps at 0.3 →
+        # everything floors to 1 share. New 0.04/0.5 keeps risk parity
+        # but stops shrinking sub-blue-chip names to placeholder size.
+        # Source: backend/scripts/compare_vol_scaling.py KR 2y.
+        vol_scale_target_risk_pct=kr_risk_cfg.get(
+            "volatility_scaling", {},
+        ).get("target_risk_pct", 0.04),
+        vol_scale_min=kr_risk_cfg.get(
+            "volatility_scaling", {},
+        ).get("min_scale", 0.5),
+        vol_scale_max=kr_risk_cfg.get(
+            "volatility_scaling", {},
+        ).get("max_scale", 1.5),
     )
     kr_risk_manager = RiskManager(params=kr_risk_params)
     order_manager = OrderManager(

@@ -68,6 +68,15 @@ class RiskParams:
     # live ₩6.85M × 4% = ₩274K allocation is below ₩300K+ share prices.
     # Bounded by max_position_pct so no concentration risk.
     allow_one_share_round_up: bool = True
+    # Volatility scaling (apply_volatility_scaling) — per-market tunable.
+    # Defaults match the original US-calibrated static values
+    # (target 2% per-position risk, floor 0.3). KR overrides these in
+    # main.py from markets.KR.risk.volatility_scaling because KR mid-cap
+    # ATR% (4-7%) was making scale clamp at 0.3 → most buys cut to 1
+    # share. See compare_vol_scaling.py for the per-market sweep.
+    vol_scale_target_risk_pct: float = 0.02
+    vol_scale_min: float = 0.3
+    vol_scale_max: float = 1.5
 
 
 @dataclass
@@ -644,14 +653,14 @@ class RiskManager:
         current_invested = portfolio_value - cash_available
         return max(0.0, max_invested - current_invested)
 
-    @staticmethod
     def apply_volatility_scaling(
+        self,
         sizing: PositionSizeResult,
         atr_pct: float,
         price: float,
-        target_risk_pct: float = 0.02,
-        min_scale: float = 0.3,
-        max_scale: float = 1.5,
+        target_risk_pct: float | None = None,
+        min_scale: float | None = None,
+        max_scale: float | None = None,
     ) -> PositionSizeResult:
         """Apply risk-parity volatility scaling to a position size.
 
@@ -662,9 +671,14 @@ class RiskManager:
             sizing: Original PositionSizeResult to adjust.
             atr_pct: ATR as a percentage of price (e.g. 0.02 = 2%).
             price: Current stock price (for recalculating quantity).
-            target_risk_pct: Target per-position risk (default 2%).
-            min_scale: Minimum scaling factor (floor).
-            max_scale: Maximum scaling factor (cap).
+            target_risk_pct: Override RiskParams.vol_scale_target_risk_pct.
+            min_scale: Override RiskParams.vol_scale_min.
+            max_scale: Override RiskParams.vol_scale_max.
+
+        Defaults pull from instance RiskParams so per-market tuning works
+        without touching call sites. KR live (2026-05-26) found the
+        US-calibrated 0.02/0.3 floor was cutting most KR mid-caps to 1
+        share — see compare_vol_scaling.py.
 
         Returns:
             Adjusted PositionSizeResult with volatility-scaled quantity.
@@ -672,8 +686,12 @@ class RiskManager:
         if not sizing.allowed or sizing.quantity <= 0 or atr_pct <= 0:
             return sizing
 
-        scale = target_risk_pct / atr_pct
-        scale = max(min_scale, min(max_scale, scale))
+        target = target_risk_pct if target_risk_pct is not None else self._params.vol_scale_target_risk_pct
+        lo = min_scale if min_scale is not None else self._params.vol_scale_min
+        hi = max_scale if max_scale is not None else self._params.vol_scale_max
+
+        scale = target / atr_pct
+        scale = max(lo, min(hi, scale))
 
         new_quantity = max(1, int(sizing.quantity * scale))
         new_alloc = new_quantity * price

@@ -1781,7 +1781,7 @@ class TestVolatilityScaling:
     def test_high_vol_reduces_position(self):
         """High ATR% → scale < 1.0 → fewer shares."""
         sizing = self._base_sizing(quantity=10, price=100.0)
-        result = RiskManager.apply_volatility_scaling(
+        result = RiskManager(params=RiskParams()).apply_volatility_scaling(
             sizing, atr_pct=0.04, price=100.0, target_risk_pct=0.02,
         )
         assert result.quantity < 10
@@ -1791,7 +1791,7 @@ class TestVolatilityScaling:
     def test_low_vol_increases_position(self):
         """Low ATR% → scale > 1.0 → more shares."""
         sizing = self._base_sizing(quantity=10, price=100.0)
-        result = RiskManager.apply_volatility_scaling(
+        result = RiskManager(params=RiskParams()).apply_volatility_scaling(
             sizing, atr_pct=0.01, price=100.0, target_risk_pct=0.02,
         )
         assert result.quantity > 10
@@ -1800,7 +1800,7 @@ class TestVolatilityScaling:
     def test_target_vol_no_change(self):
         """ATR% matches target → scale = 1.0 → same quantity."""
         sizing = self._base_sizing(quantity=10, price=100.0)
-        result = RiskManager.apply_volatility_scaling(
+        result = RiskManager(params=RiskParams()).apply_volatility_scaling(
             sizing, atr_pct=0.02, price=100.0, target_risk_pct=0.02,
         )
         assert result.quantity == 10
@@ -1808,7 +1808,7 @@ class TestVolatilityScaling:
     def test_scale_clamped_at_min(self):
         """Extremely high volatility should be clamped at min_scale."""
         sizing = self._base_sizing(quantity=10, price=100.0)
-        result = RiskManager.apply_volatility_scaling(
+        result = RiskManager(params=RiskParams()).apply_volatility_scaling(
             sizing, atr_pct=0.20, price=100.0, target_risk_pct=0.02,
             min_scale=0.3,
         )
@@ -1818,7 +1818,7 @@ class TestVolatilityScaling:
     def test_scale_clamped_at_max(self):
         """Extremely low volatility should be clamped at max_scale."""
         sizing = self._base_sizing(quantity=10, price=100.0)
-        result = RiskManager.apply_volatility_scaling(
+        result = RiskManager(params=RiskParams()).apply_volatility_scaling(
             sizing, atr_pct=0.001, price=100.0, target_risk_pct=0.02,
             max_scale=1.5,
         )
@@ -1827,7 +1827,7 @@ class TestVolatilityScaling:
     def test_zero_atr_no_change(self):
         """Zero ATR should return sizing unchanged."""
         sizing = self._base_sizing(quantity=10, price=100.0)
-        result = RiskManager.apply_volatility_scaling(
+        result = RiskManager(params=RiskParams()).apply_volatility_scaling(
             sizing, atr_pct=0.0, price=100.0,
         )
         assert result.quantity == 10
@@ -1838,7 +1838,7 @@ class TestVolatilityScaling:
             quantity=0, allocation_usd=0, risk_per_share=0,
             reason="Max positions", allowed=False,
         )
-        result = RiskManager.apply_volatility_scaling(
+        result = RiskManager(params=RiskParams()).apply_volatility_scaling(
             sizing, atr_pct=0.03, price=100.0,
         )
         assert result.allowed is False
@@ -1847,7 +1847,7 @@ class TestVolatilityScaling:
     def test_quantity_at_least_one(self):
         """Even extreme scaling should leave at least 1 share."""
         sizing = self._base_sizing(quantity=1, price=100.0)
-        result = RiskManager.apply_volatility_scaling(
+        result = RiskManager(params=RiskParams()).apply_volatility_scaling(
             sizing, atr_pct=0.10, price=100.0, target_risk_pct=0.02,
             min_scale=0.1,
         )
@@ -1856,7 +1856,7 @@ class TestVolatilityScaling:
     def test_allocation_matches_quantity(self):
         """allocation_usd should equal quantity * price."""
         sizing = self._base_sizing(quantity=10, price=150.0)
-        result = RiskManager.apply_volatility_scaling(
+        result = RiskManager(params=RiskParams()).apply_volatility_scaling(
             sizing, atr_pct=0.03, price=150.0, target_risk_pct=0.02,
         )
         assert result.allocation_usd == result.quantity * 150.0
