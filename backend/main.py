@@ -132,6 +132,12 @@ def _apply_kr_eval_overrides(
     v = kr_eval_cfg.get("opening_avoidance_minutes")
     kr_loop.set_opening_avoidance_minutes(int(v) if v is not None else 0)
 
+    # Defense-in-depth min_price gate (#158 follow-up, 2026-05-28). Reads
+    # from markets.KR.scanner.min_price — same yaml path the
+    # ScannerPipeline uses, just enforced at the eval-loop layer too.
+    kr_scanner_cfg = config_loader.get_market_scanner_config("KR")
+    kr_loop.set_min_buy_price(float(kr_scanner_cfg.get("min_price", 0.0)))
+
     # Daily buy budget + escalation (per-market, hot-reloadable). KR keeps
     # the tighter 5/0.65/0.75 default unless yaml says otherwise.
     kr_loop.set_daily_buy_budget(
@@ -215,6 +221,10 @@ def _apply_us_eval_overrides(
     # Opening-minute BUY avoidance (2026-04-24).
     v = us_eval_cfg.get("opening_avoidance_minutes")
     us_loop.set_opening_avoidance_minutes(int(v) if v is not None else 0)
+
+    # Defense-in-depth min_price gate (#158 follow-up, 2026-05-28).
+    us_scanner_eval_cfg = config_loader.get_market_scanner_config("US")
+    us_loop.set_min_buy_price(float(us_scanner_eval_cfg.get("min_price", 0.0)))
 
     # P1 (#55) time-based stale exit. Backtest V3 (2d, -2%):
     # +6.8pp Ret, +0.55 Sharpe, MDD even improved.

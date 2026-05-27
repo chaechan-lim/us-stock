@@ -176,6 +176,13 @@ class EvaluationLoop:
         # 0 = off. SELL signals still pass (position_tracker SL/TP also runs
         # on its own schedule, so risk exits aren't blocked).
         self._opening_avoidance_minutes: int = 0
+        # 2026-05-28: minimum BUY price (defense-in-depth for #158).
+        # ScannerPipeline.min_price filters Layer 1, but universe_expander
+        # / KIS ranking can push symbols straight into evaluation without
+        # going through the pipeline. CDXS ($2.69) + BWEN ($3.85) slipped
+        # through that gap on 5-27. Setting a market-level floor in the
+        # eval loop catches every path. 0 = off; live US sets 5.0 via yaml.
+        self._min_buy_price: float = 0.0
 
         # Commission rate per order (one-way). Used to filter out trades
         # where expected PnL < round-trip commission. KIS US = 0.25%,
@@ -445,6 +452,20 @@ class EvaluationLoop:
         logger.info(
             "Market %s: opening_avoidance_minutes=%d",
             self._market, self._opening_avoidance_minutes,
+        )
+
+    def set_min_buy_price(self, min_price: float) -> None:
+        """Defense-in-depth minimum BUY price. Rejects BUY signals when
+        the real-time price is below `min_price`. 0 disables. Matches
+        the watchlist's ScannerPipeline.min_price filter (#158); catches
+        symbols that enter evaluation via universe_expander / KIS
+        ranking without going through the scanner."""
+        if min_price < 0:
+            raise ValueError(f"min_buy_price must be >= 0, got {min_price}")
+        self._min_buy_price = float(min_price)
+        logger.info(
+            "Market %s: min_buy_price=$%.2f",
+            self._market, self._min_buy_price,
         )
 
     def set_sizing_up_config(
@@ -1804,6 +1825,16 @@ class EvaluationLoop:
             # rejected at the first gate.
             self._reset_daily_counters_if_needed()
             self._buy_flow_counters["buy_signals_total"] += 1
+            # Defense-in-depth min_price gate (#158 follow-up). Catches
+            # symbols that bypass ScannerPipeline (universe_expander +
+            # KIS ranking can push directly to evaluation). 0 = off.
+            if self._min_buy_price > 0 and price < self._min_buy_price:
+                logger.info(
+                    "Skipping BUY for %s: price $%.2f < min_buy_price $%.2f",
+                    symbol, price, self._min_buy_price,
+                )
+                self._bump_reject("min_price")
+                return
             # 2026-04-24: skip BUY during the first N minutes after market open.
             # Live BUY pattern showed ~60% of fills land in the opening 30 min
             # and lose ~5% within 4h (ALM/AMPX whipsaw). SELL signals pass
