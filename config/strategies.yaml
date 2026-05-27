@@ -794,7 +794,17 @@ markets:
     risk:
       kelly_fraction: 0.40       # Conservative (was 1.00, full Kelly too aggressive)
       max_position_pct: 0.20     # 2026-04-17: 10→20% — KR backtest V4: Sharpe 0.56→1.05
-      min_position_pct: 0.04     # 4% min (was 0.15)
+      # 2026-05-28 (#XX): 0.04 → 0.05 to deploy idle cash. Live 5-28 was
+      # 78% cash after #168 (vol scaling fix). compare_kr_cash_deployment.py
+      # KR 2y on post-#168 baseline:
+      #   V0_min04 (cur live):  Ret +12.2% Sharpe +0.64 MDD -11.9% PF 1.24 AvgAlloc ₩4.74M
+      #   V1_min05:             Ret +13.6% Sharpe +0.69 MDD -11.3% PF 1.25 AvgAlloc ₩5.28M ← ✓ 4/4
+      #   V2_min06:             Ret +11.0% Sharpe +0.50 MDD -15.0% PF 1.18 AvgAlloc ₩5.56M (over-conc)
+      #   V3_cooldown_12h:      Ret  +9.2% Sharpe +0.42 MDD -14.0% PF 1.18 (whipsaw)
+      #   V4_limit_15:          Ret +12.2% Sharpe +0.64 MDD -11.9% PF 1.24 (limit not binding)
+      # V1 4/4 vs V0, AvgAlloc +12%. cooldown reduction hurts KR (dual_momentum
+      # repeats same-symbol signals → whipsaw). limit raise is no-op.
+      min_position_pct: 0.05
       # 2026-05-04: 12 → 18. Live observation: 12 KR BUY signals rejected
       # the morning of 2026-05-04 ("Max positions reached") with cap full
       # of 1-share placeholder positions. compare_position_sizing.py VG
