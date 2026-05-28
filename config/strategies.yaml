@@ -33,7 +33,18 @@ global:
   # these are evaluation-loop tuning parameters validated via the whipsaw replay.
   held_sell_bias: 0.05          # SELL confidence boost when evaluating held stocks (was 0.10)
   held_min_confidence: 0.40     # min_confidence for held positions (was 0.25)
-  stale_pnl_threshold: -0.05   # P&L below this + HOLD signal → sell on indifference (was -0.03)
+  # 2026-05-28: -0.05 → -0.10 to stop cutting positions too fast.
+  # Live 5-27: cleanup × 8 / -$121, top loser of the day. Cumulative
+  # 45 cleanups / 0 wins / -$651 (project memory position_cleanup_drag).
+  # compare_stale_pnl.py US 2y sweep (held_min_confidence + cleanup combo):
+  #   V0_curr_-5:    Ret +19.6% Sharpe +1.31 MDD -5.3% PF 1.63 (current)
+  #   V1_relax_-7:   Ret +25.4% Sharpe +1.70 MDD -4.8% PF 1.85 (+5.8pp)
+  #   V2_relax_-10:  Ret +28.4% Sharpe +1.92 MDD -5.4% PF 1.95 (+8.8pp) ← ✓ adopt
+  #   V3_disable:    Ret +24.6% Sharpe +1.63 MDD -4.3% PF 1.77 (+5.0pp)
+  # V2 wins 4/4. LLM Claude rec #2 today suggested disabling cleanup
+  # entirely; the milder -0.10 (not -1.0) sweet-spots between cutting
+  # losers and giving room to recover.
+  stale_pnl_threshold: -0.10
   # NOTE (STOCK-47): Additional anti-whipsaw constants (min hold 4h, hard SL -7%,
   # max 2 loss sells/7d) are hardcoded in EvaluationLoop.__init__ and are not
   # currently loaded from YAML. They are intentionally not listed here to avoid
