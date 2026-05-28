@@ -299,7 +299,8 @@ class TestStrategyConfigLoaderMarketMethods:
         loader = StrategyConfigLoader()
         us_disabled = loader.get_market_disabled_strategies("US")
         assert isinstance(us_disabled, list)
-        assert us_disabled == ["dual_momentum"]
+        # 2026-05-28: rsi_divergence KR-only enable → added to US disabled.
+        assert set(us_disabled) == {"dual_momentum", "rsi_divergence"}
         assert "trend_following" not in us_disabled
         assert "supertrend" not in us_disabled
         # P1-B/P1-C (2026-05-14): US risk overrides

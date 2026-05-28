@@ -47,14 +47,25 @@ BASELINE_PATH = Path(__file__).parent.parent / "tests" / "backtest_baselines.jso
 
 
 def _kr_config(disabled: list[str]) -> dict:
-    """Matches live KR evaluation loop config (markets.KR in strategies.yaml)."""
+    """Matches live KR evaluation loop config (markets.KR in strategies.yaml).
+
+    2026-05-28: reads everything from yaml so the gate tracks live
+    deploys. Earlier version hardcoded a half-stale subset — vol_scaling
+    + enforce_min_position_pct_floor + min_position_pct + kelly_fraction
+    were missing, so a yaml change to those silently slipped past the
+    gate.
+    """
+    loader = StrategyConfigLoader()
+    risk = loader.get_market_risk_config("KR")
+    vol = risk.get("volatility_scaling") or {}
     return dict(
         market="KR",
         initial_equity=100_000_000,
-        default_stop_loss_pct=0.12,
-        default_take_profit_pct=0.20,
-        max_positions=18,                 # 2026-05-04: PR #123 cap raise
-        max_position_pct=0.20,
+        default_stop_loss_pct=float(risk.get("default_stop_loss_pct", 0.12)),
+        default_take_profit_pct=float(risk.get("default_take_profit_pct", 0.20)),
+        max_positions=int(risk.get("max_positions", 18)),
+        max_position_pct=float(risk.get("max_position_pct", 0.20)),
+        min_position_pct=float(risk.get("min_position_pct", 0.05)),
         sell_cooldown_days=1,
         whipsaw_max_losses=2,
         min_hold_days=1,
@@ -62,18 +73,27 @@ def _kr_config(disabled: list[str]) -> dict:
         volume_adjusted_slippage=True,
         min_confidence=0.30,
         disabled_strategies=disabled,
+        kelly_fraction=float(risk.get("kelly_fraction", 0.50)),
+        enforce_min_position_pct_floor=True,
+        enable_vol_scaling=True,
+        vol_scale_target_risk_pct=float(vol.get("target_risk_pct", 0.04)),
+        vol_scale_min=float(vol.get("min_scale", 0.5)),
+        vol_scale_max=float(vol.get("max_scale", 1.5)),
     )
 
 
 def _us_config(disabled: list[str]) -> dict:
     """Matches live US evaluation loop config (markets.US in strategies.yaml)."""
+    loader = StrategyConfigLoader()
+    risk = loader.get_market_risk_config("US")
     return dict(
         market="US",
         initial_equity=100_000,
         default_stop_loss_pct=0.08,
         default_take_profit_pct=0.20,
         max_positions=20,
-        max_position_pct=0.10,
+        max_position_pct=float(risk.get("max_position_pct", 0.15)),
+        min_position_pct=float(risk.get("min_position_pct", 0.03)),
         sell_cooldown_days=1,
         whipsaw_max_losses=2,
         min_hold_days=1,
@@ -81,6 +101,8 @@ def _us_config(disabled: list[str]) -> dict:
         volume_adjusted_slippage=True,
         min_confidence=0.30,
         disabled_strategies=disabled,
+        kelly_fraction=float(risk.get("kelly_fraction", 0.50)),
+        stale_pnl_threshold=-0.10,
     )
 
 async def _run(market: str) -> dict:
