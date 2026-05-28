@@ -358,8 +358,17 @@ strategies:
       max_pct: 0.05
 
   rsi_divergence:
-    # 2026-04-23: disabled (Option A).
-    enabled: false
+    # 2026-04-23: disabled globally (Option A).
+    # 2026-05-28: re-enabled, KR-only (markets.US.disabled_strategies
+    # has rsi_divergence to keep US unchanged). KR diversification sweep
+    # (compare_kr_diversify.py 2y on post-#170 baseline):
+    #   V0 baseline (dm+st):   Ret +13.6% Sharpe +0.69 MDD -11.3% PF 1.25
+    #   V7 +rsi_divergence:    Ret +16.4% Sharpe +0.81 MDD -13.6% PF 1.28 ← +2.8pp ✓
+    # Best of 7 candidates tested (donchian/bbs/csm/vol_surge/macd/rsi).
+    # rsi_divergence adds mean-reversion signal diversity to the dm+st
+    # trend-following pair → fewer same_signal_24h dedupe rejects.
+    # MDD -13.6% acceptable (still < -15% threshold).
+    enabled: true
     timeframe: "1D"
     params:
       rsi_period: 10         # optimized: 14 -> 10
@@ -618,6 +627,7 @@ markets:
     # US-disabled (live bleeder, -2.28% avg 10 trades + backtest -$3,865).
     disabled_strategies:
       - dual_momentum
+      - rsi_divergence  # 2026-05-28: KR-only enable for diversification (#XX). US backtest never validated rsi_div on top of current US combo; keep off until tested.
     # P1-B (#55, 2026-05-14) Kelly fraction bump. compare_kelly_fraction.py
     # US 2y on Phase 2 + P1 baseline:
     #   V0_30  Ret +22.8% Sharpe +1.69 MDD -5.5% PF 1.63
