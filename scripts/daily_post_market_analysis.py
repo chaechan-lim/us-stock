@@ -325,31 +325,39 @@ async def main() -> None:
     else:
         print("Discord webhook not configured — skipped push")
 
-    # Chain the LLM recommendation generators (#60). Spawned non-blocking
-    # so the systemd unit returns promptly; recommendations write into
-    # agent_recommendations and the dashboard surfaces them. Weekly only
-    # fires on Monday runs (KST). Failures are logged but never fatal —
-    # the deterministic report above is the source-of-truth.
-    _spawn_llm_recommendations(now_kst)
+    # Chain the LLM recommendation generators (#60). Run in-line (await)
+    # instead of detached subprocess: systemd's default KillMode=
+    # control-group was reaping the spawned children when the daily
+    # service exited (no LLM artifacts written 5-23 ~ 5-27). The daily
+    # report is the source-of-truth either way — LLM failures only
+    # affect the recommendation queue, not the deterministic numbers.
+    # Weekly only fires on Monday runs (KST).
+    await _run_llm_recommendations(now_kst)
 
 
-def _spawn_llm_recommendations(now_kst: datetime) -> None:
-    import subprocess
-
+async def _run_llm_recommendations(now_kst: datetime) -> None:
     script_path = os.path.join(os.path.dirname(__file__), "generate_recommendations.py")
     venv_python = sys.executable
     for mode in ("daily",) + (("weekly",) if now_kst.weekday() == 0 else ()):
         try:
-            subprocess.Popen(
-                [venv_python, script_path, "--mode", mode],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                close_fds=True,
-                start_new_session=True,
+            proc = await asyncio.create_subprocess_exec(
+                venv_python, script_path, "--mode", mode,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
             )
-            print(f"LLM {mode} recommendations: spawned")
+            try:
+                stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=600)
+            except asyncio.TimeoutError:
+                proc.kill()
+                print(f"LLM {mode} recommendations: timed out at 10min")
+                continue
+            print(
+                f"LLM {mode} recommendations: rc={proc.returncode}"
+                + (f" (last 200 chars: {stdout[-200:].decode(errors='replace')})"
+                   if proc.returncode != 0 else "")
+            )
         except Exception as e:
-            print(f"LLM {mode} spawn failed: {e}")
+            print(f"LLM {mode} run failed: {e}")
 
 
 if __name__ == "__main__":
