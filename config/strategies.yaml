@@ -865,7 +865,20 @@ markets:
     evaluation_loop:
       min_confidence: 0.30       # 2026-04-17: 0.40→0.30 (backtest V3/V4 slight help)
       min_active_ratio: null
-      sell_cooldown_days: 1
+      # 2026-05-29: 1d → 3d to break sym-churn. Live 14d: 8 symbols had
+      # 4 round-trips each (사팔사팔). 006400 -₩111K / 403870 -₩55K /
+      # 028260 -₩54K / 005380 -₩16K — losers dominated the churn.
+      # compare_kr_churn.py KR 2y on post-#171 baseline:
+      #   V0 (cd=1d):           Ret  +2.5% Sharpe +0.02 MDD -15.6% PF 1.04
+      #   V1 (hold=3d):         Ret +11.6% Sharpe +0.53 MDD -11.6% PF 1.22 (+9.1pp)
+      #   V2 (cd=3d):           Ret +11.9% Sharpe +0.57 MDD -11.0% PF 1.24 (+9.4pp) ← ✓ adopt
+      #   V3 (cd=5d):           Ret  -0.5% Sharpe -0.21 MDD -12.5% PF 0.99 (too long)
+      #   V4 (whipsaw_max=1):   Ret  +6.7% Sharpe +0.27 MDD -15.7% PF 1.13 (+4.2pp)
+      #   V5 (hold=3 + cd=3):   Ret  +9.6% Sharpe +0.41 MDD -13.7% PF 1.19 (combo weaker)
+      # V2 sweet spot — 3d enough to break the churn without cutting alpha.
+      # Note: #169 backtest had cd=0.5d hurting -3pp on a different baseline
+      # (pre-#171 rsi_div). Sweet spot moved with the new strategy mix.
+      sell_cooldown_days: 3
       whipsaw_max_losses: 2
       min_hold_days: 1
       # D1 sector strength boost on BUY (2026-04-24 sweep): KR 2y baseline
