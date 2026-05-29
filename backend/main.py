@@ -2122,39 +2122,35 @@ async def lifespan(app: FastAPI):
         """KR evaluation: run strategies on KR watchlist symbols."""
         await kr_evaluation_loop._evaluate_all()
 
-    async def task_kr_daily_scan():
-        """KR daily scan: discover stocks via KRUniverseExpander + KRScreener.
+    async def _run_kr_scan(max_add: int, label: str):
+        """Shared body for KR scan tasks (daily + intra-day).
 
-        Uses KRUniverseExpander for dynamic discovery (seed + KIS domestic
-        ranking APIs), then feeds dynamic symbols into KRScreener for quality
-        filtering (market cap / volume). Top candidates are added to the KR
-        watchlist and the evaluation loop is refreshed.
+        Pre-market daily uses max_add=40 (full sweep). Intra-day uses a
+        smaller cap (e.g. 10) so the watchlist doesn't bloat across
+        multiple within-session refreshes.
         """
         from scanner.kr_screener import KRScreener
         from db.trade_repository import TradeRepository
 
         try:
-            # Get existing KR watchlist
             async with session_factory() as session:
                 repo = TradeRepository(session)
                 existing = await repo.get_watchlist(active_only=True, market="KR")
                 existing_syms = [w.symbol for w in existing]
                 existing_syms_set = {w.symbol for w in existing}
 
-            # Dynamic universe expansion (seed + KIS domestic ranking)
             universe_result = await kr_universe_expander.expand_kr(
                 existing_watchlist=existing_syms,
             )
             logger.info(
-                "KR universe expanded: %d symbols (watchlist=%d, seed=%d, kis_kr=%d)",
+                "KR universe expanded (%s): %d symbols (watchlist=%d, seed=%d, kis_kr=%d)",
+                label,
                 universe_result.total_discovered,
                 len(universe_result.sources.get("watchlist", [])),
                 len(universe_result.sources.get("seed", [])),
                 len(universe_result.sources.get("kis_kr_ranking", [])),
             )
 
-            # Quality filter via KRScreener (market cap + volume)
-            # Pass dynamic symbols so screener can apply yfinance quality filter
             dynamic_new = [
                 s
                 for s in universe_result.sources.get("kis_kr_ranking", [])
@@ -2166,7 +2162,8 @@ async def lifespan(app: FastAPI):
                 exchange_map=universe_result.exchange_map,
             )
             logger.info(
-                "KR scan: %d symbols after screening from %d sources",
+                "KR scan (%s): %d symbols after screening from %d sources",
+                label,
                 screen_result.total_discovered,
                 len(screen_result.sources),
             )
@@ -2174,13 +2171,11 @@ async def lifespan(app: FastAPI):
             if not screen_result.symbols:
                 return
 
-            # Add top candidates to KR watchlist
             added = []
             async with session_factory() as session:
                 repo = TradeRepository(session)
-                for sym in screen_result.symbols[:40]:
+                for sym in screen_result.symbols[:max_add]:
                     if sym not in existing_syms_set:
-                        # Use exchange from universe expansion map, fallback to KRX
                         exchange = universe_result.exchange_map.get(sym, "KRX")
                         await repo.add_to_watchlist(
                             symbol=sym,
@@ -2190,21 +2185,38 @@ async def lifespan(app: FastAPI):
                         )
                         added.append(sym)
 
-            # Refresh KR evaluation loop watchlist from DB
             async with session_factory() as session:
                 repo = TradeRepository(session)
                 wl = await repo.get_watchlist(active_only=True, market="KR")
                 kr_evaluation_loop.set_watchlist([w.symbol for w in wl])
 
             if added:
-                logger.info("KR watchlist: +%d added (%s...)", len(added), added[:5])
+                logger.info("KR watchlist (%s): +%d added (%s...)", label, len(added), added[:5])
                 await notification.notify_system_event(
-                    "kr_daily_scan",
-                    f"KR Daily Scan: {universe_result.total_discovered} discovered, "
+                    label,
+                    f"KR {label}: {universe_result.total_discovered} discovered, "
                     f"+{len(added)} added to watchlist",
                 )
         except Exception as e:
-            logger.error("KR daily scan failed: %s", e)
+            logger.error("KR scan (%s) failed: %s", label, e)
+
+    async def task_kr_daily_scan():
+        """KR daily (pre-market) scan: dynamic universe + quality filter.
+
+        Top 40 candidates from KIS ranking + yfinance screener get added
+        to the KR watchlist. Paired with task_kr_intraday_scan which
+        refreshes mid-session with a smaller cap.
+        """
+        await _run_kr_scan(max_add=40, label="kr_daily_scan")
+
+    async def task_kr_intraday_scan():
+        """KR intra-day scan: mid-session refresh of dynamic universe.
+
+        Lighter than the daily scan (max_add=10) so the watchlist doesn't
+        bloat across the trading session. Catches volume_surge / updown_rate
+        names that appear after pre-market.
+        """
+        await _run_kr_scan(max_add=10, label="kr_intraday_scan")
 
     scheduler.add_task(
         "kr_position_check",
@@ -2246,6 +2258,13 @@ async def lifespan(app: FastAPI):
         task_kr_daily_scan,
         interval_sec=86400,
         phases=[MarketPhase.PRE_MARKET],
+        market="KR",
+    )
+    scheduler.add_task(
+        "kr_intraday_scan",
+        task_kr_intraday_scan,
+        interval_sec=18000,  # 5h → fires ~09:30 and ~14:30 KST in REGULAR
+        phases=[MarketPhase.REGULAR],
         market="KR",
     )
 
