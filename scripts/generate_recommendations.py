@@ -172,6 +172,29 @@ def _read_yaml_text() -> str:
     return raw[:12_000] + "\n# … (truncated) …\n"
 
 
+def _load_today_exposure() -> dict[str, Any] | None:
+    """Read today's exposure snapshot written earlier in the daily chain
+    by scripts/daily_post_market_analysis.py → exposure_tracker.
+
+    Returns None if the file is missing or unreadable. The LLM prompt
+    will then omit the exposure section instead of erroring.
+
+    Falls back to yesterday's snapshot if today's hasn't been written
+    yet (e.g., generator invoked standalone before the daily chain).
+    """
+    today = datetime.now(KST).date()
+    history_dir = REPO_ROOT / "data" / "exposure_history"
+    for back in (0, 1):
+        candidate = history_dir / f"{today - timedelta(days=back)}.json"
+        if candidate.exists():
+            try:
+                return json.loads(candidate.read_text(encoding="utf-8"))
+            except Exception as e:
+                logger.warning("exposure read %s failed: %s", candidate, e)
+                return None
+    return None
+
+
 async def _gather_pending_recommendations() -> list[dict]:
     """Existing pending rows — feed to the LLM to discourage duplicates
     and to enforce the dedupe rule we apply post-hoc."""
@@ -202,6 +225,57 @@ async def _gather_pending_recommendations() -> list[dict]:
 # ---------------------------------------------------------------------------
 
 
+def _format_exposure_section(exposure: dict[str, Any] | None) -> str:
+    """Render today's exposure snapshot into the prompt.
+
+    Empty string when no snapshot is available (e.g., file missing on
+    first run). When sentinel flags exist, the section ends with an
+    explicit ask so the LLM prioritizes exposure-targeting proposals.
+    """
+    if not exposure:
+        return ""
+    lines = ["\n== Exposure snapshot (Hermes sentinel) =="]
+    for market, exp in (exposure.get("markets") or {}).items():
+        funnel = exp.get("funnel") or {}
+        funnel_summary = ""
+        if funnel.get("top_reasons"):
+            parts = [
+                f"{r[0]} {r[1]} ({r[2]*100:.0f}%)"
+                for r in funnel["top_reasons"]
+            ]
+            funnel_summary = (
+                f" | funnel: {funnel.get('total_signals', 0)}→"
+                f"{funnel.get('buys_placed', 0)} placed; "
+                f"{', '.join(parts)}"
+            )
+        lines.append(
+            f"  {market}: deployed {exp.get('deployed_pct', 0)*100:.1f}% "
+            f"(slot_fill {exp.get('slot_fill_ratio', 0)*100:.0f}%, "
+            f"placeholders {exp.get('placeholder_count', 0)}/"
+            f"{exp.get('position_count', 0)}, "
+            f"idle_days {exp.get('cash_idle_days', 0)})"
+            f"{funnel_summary}"
+        )
+    flags = exposure.get("flags") or []
+    if flags:
+        lines.append("")
+        lines.append("Sentinel flags raised today:")
+        for f in flags:
+            lines.append(
+                f"  - [{f.get('severity', 'warning')}] {f.get('market')} "
+                f"{f.get('flag')}: {f.get('detail')}"
+            )
+        lines.append("")
+        lines.append(
+            "If you propose any change today, **prioritize** lifting the "
+            "binding rejection reason above (or expanding the universe so "
+            "fewer signals hit it). A small param tweak that reduces the "
+            "dominant funnel reason is worth more than a Sharpe-optimizing "
+            "tweak elsewhere."
+        )
+    return "\n".join(lines) + "\n"
+
+
 def _build_prompt(mode: str, ctx: dict[str, Any]) -> str:
     whitelist_text = "\n".join(f"  - {p.rstrip('.')}*" for p in ALLOWED_PARAM_PREFIXES)
     pending_summary = (
@@ -210,6 +284,7 @@ def _build_prompt(mode: str, ctx: dict[str, Any]) -> str:
             for r in ctx["pending"]
         ) or "  (none)"
     )
+    exposure_section = _format_exposure_section(ctx.get("exposure"))
 
     return f"""You are a senior quant assistant reviewing a live auto-trading system (US + KR).
 You will propose parameter changes that the operator can accept from a dashboard.
@@ -235,7 +310,7 @@ You will propose parameter changes that the operator can accept from a dashboard
 
 == Pending recommendations (do not duplicate param_path) ==
 {pending_summary}
-
+{exposure_section}
 == Live snapshot ==
 Portfolio summary:
 {json.dumps(ctx["snapshot"]["summary"], ensure_ascii=False, indent=2)}
@@ -532,12 +607,14 @@ async def main(mode: str, dry_run: bool) -> int:
     pending = await _gather_pending_recommendations()
     pending_paths = {r["param_path"] for r in pending}
     yaml_text = _read_yaml_text()
+    exposure = _load_today_exposure()
 
     ctx = {
         "orders": orders,
         "snapshot": snapshot,
         "pending": pending,
         "yaml_text": yaml_text,
+        "exposure": exposure,
     }
     prompt = _build_prompt(mode, ctx)
     logger.info("Built prompt: %d chars, %d pending rows", len(prompt), len(pending))
