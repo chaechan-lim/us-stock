@@ -34,6 +34,7 @@ from sqlalchemy import text
 
 from db.session import get_session_factory
 from services.notification import DiscordAdapter, AlertLevel
+from services.exposure_tracker import collect_snapshot, write_snapshot
 from config import NotificationConfig
 
 
@@ -325,6 +326,12 @@ async def main() -> None:
     else:
         print("Discord webhook not configured — skipped push")
 
+    # Hermes Phase 0+1: exposure snapshot + sentinel.
+    # Runs before the LLM step so Phase 2 (funnel-aware prompt) can
+    # later read today's snapshot. Failures here must not break the
+    # daily report — wrap defensively.
+    await _run_exposure_snapshot()
+
     # Chain the LLM recommendation generators (#60). Run in-line (await)
     # instead of detached subprocess: systemd's default KillMode=
     # control-group was reaping the spawned children when the daily
@@ -333,6 +340,52 @@ async def main() -> None:
     # affect the recommendation queue, not the deterministic numbers.
     # Weekly only fires on Monday runs (KST).
     await _run_llm_recommendations(now_kst)
+
+
+async def _run_exposure_snapshot() -> None:
+    """Compute + persist today's exposure snapshot, push sentinel flags."""
+    from pathlib import Path
+
+    try:
+        history_dir = Path(__file__).resolve().parent.parent / "data" / "exposure_history"
+        snap = await collect_snapshot(history_dir=history_dir)
+        out = write_snapshot(snap, history_dir)
+        print(f"Exposure snapshot: {out}")
+        for market, exp in snap.markets.items():
+            print(
+                f"  {market}: deployed={exp.deployed_pct*100:.1f}% "
+                f"slot_fill={exp.slot_fill_ratio*100:.1f}% "
+                f"placeholders={exp.placeholder_count}/{exp.position_count} "
+                f"idle_days={exp.cash_idle_days}"
+            )
+        if snap.flags:
+            print(f"⚠ Sentinel flags ({len(snap.flags)}):")
+            for f in snap.flags:
+                print(f"  [{f.severity}] {f.market} {f.flag}: {f.detail}")
+            await _push_sentinel_discord(snap.flags)
+        else:
+            print("✓ No sentinel flags")
+    except Exception as e:
+        print(f"Exposure snapshot failed: {e}")
+
+
+async def _push_sentinel_discord(flags) -> None:
+    webhook = NotificationConfig().discord_webhook_url or os.environ.get(
+        "DISCORD_WEBHOOK_URL", "",
+    )
+    if not webhook:
+        return
+    title = f"⚠ Exposure sentinel — {len(flags)} flag(s)"
+    body = "\n".join(
+        f"**{f.market}** `{f.flag}`: {f.detail}" for f in flags
+    )
+    try:
+        adapter = DiscordAdapter(webhook_url=webhook)
+        await adapter.send_rich(
+            title=title, body=body, level=AlertLevel.WARNING, fields={},
+        )
+    except Exception as e:
+        print(f"Sentinel Discord push failed: {e}")
 
 
 async def _run_llm_recommendations(now_kst: datetime) -> None:

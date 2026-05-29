@@ -202,3 +202,67 @@ class TestMergeSources:
 
     def test_both_empty(self):
         assert gr._merge_sources([], []) == []
+
+
+class TestFormatExposureSection:
+    """Hermes Phase 2 — prompt enrichment with exposure snapshot."""
+
+    def test_no_exposure_returns_empty_string(self):
+        assert gr._format_exposure_section(None) == ""
+        assert gr._format_exposure_section({}) == ""
+
+    def test_renders_markets_and_funnel(self):
+        exposure = {
+            "date": "2026-05-29",
+            "markets": {
+                "KR": {
+                    "deployed_pct": 0.226,
+                    "slot_fill_ratio": 0.323,
+                    "placeholder_count": 9,
+                    "position_count": 14,
+                    "cash_idle_days": 1,
+                    "funnel": {
+                        "total_signals": 31,
+                        "buys_placed": 1,
+                        "top_reasons": [
+                            ["sell_cooldown", 20, 0.645],
+                            ["same_signal_24h", 8, 0.258],
+                        ],
+                    },
+                },
+            },
+            "flags": [],
+        }
+        section = gr._format_exposure_section(exposure)
+        assert "Exposure snapshot" in section
+        assert "KR: deployed 22.6%" in section
+        assert "placeholders 9/14" in section
+        assert "sell_cooldown 20 (64%)" in section
+        assert "same_signal_24h 8 (26%)" in section
+
+    def test_flags_emit_priority_directive(self):
+        exposure = {
+            "markets": {
+                "KR": {
+                    "deployed_pct": 0.22,
+                    "slot_fill_ratio": 0.32,
+                    "placeholder_count": 9, "position_count": 14,
+                    "cash_idle_days": 5,
+                    "funnel": {
+                        "total_signals": 31, "buys_placed": 1,
+                        "top_reasons": [["sell_cooldown", 20, 0.645]],
+                    },
+                },
+            },
+            "flags": [
+                {
+                    "market": "KR", "flag": "chronic_under_deployment",
+                    "severity": "warning",
+                    "detail": "deployed 22% for 5d",
+                },
+            ],
+        }
+        section = gr._format_exposure_section(exposure)
+        assert "Sentinel flags raised today" in section
+        assert "chronic_under_deployment" in section
+        assert "prioritize" in section
