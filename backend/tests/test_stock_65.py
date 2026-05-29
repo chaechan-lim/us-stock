@@ -285,7 +285,8 @@ class TestStrategyConfigLoaderMarketMethods:
         # 2026-04-17: 0.40→0.30 (backtest V3/V4 slight improvement)
         assert eval_cfg.get("min_confidence") == pytest.approx(0.30)
         assert eval_cfg.get("min_active_ratio") is None  # null in YAML = no override
-        assert eval_cfg.get("sell_cooldown_days") == 1
+        # 2026-05-29: 1 → 3 to break same-symbol churn (compare_kr_churn V2).
+        assert eval_cfg.get("sell_cooldown_days") == 3
         assert eval_cfg.get("whipsaw_max_losses") == 2
         assert eval_cfg.get("min_hold_days") == 1
 
@@ -742,7 +743,8 @@ class TestYAMLKRSection:
         assert ev["min_confidence"] == pytest.approx(0.30)
         # null in YAML → None in Python; means 'no override, use per-call defaults'
         assert ev["min_active_ratio"] is None
-        assert ev["sell_cooldown_days"] == 1
+        # 2026-05-29: 1 → 3 to break same-symbol churn (compare_kr_churn V2).
+        assert ev["sell_cooldown_days"] == 3
         assert ev["whipsaw_max_losses"] == 2
         assert ev["min_hold_days"] == 1
 
