@@ -1949,9 +1949,26 @@ class EvaluationLoop:
                     return
 
             # Skip if signal hasn't changed since last evaluation (daily strategies
-            # produce the same signal all day — no point re-buying)
+            # produce the same signal all day — no point re-buying).
+            #
+            # Exception: when sizing_up_enabled and the symbol is already held,
+            # we WANT the repeated daily BUY signal to reach the sizing-up
+            # branch (line ~2000) so 1-share placeholders can be grown.
+            # Without this bypass, sizing-up is silently no-op: daily strategies
+            # re-fire the same signal every 5 min eval cycle and get rejected
+            # here long before the sizing-up eligibility check at line ~2004.
+            sizing_up_eligible_held = (
+                self._sizing_up_enabled
+                and self._position_tracker is not None
+                and symbol in self._position_tracker.tracked_symbols
+            )
             last = self._last_signal.get(symbol)
-            if last and last[0] == "BUY" and time.time() - last[1] < 86400:
+            if (
+                not sizing_up_eligible_held
+                and last
+                and last[0] == "BUY"
+                and time.time() - last[1] < 86400
+            ):
                 logger.debug("Skipping BUY for %s: same signal within 24h", symbol)
                 self._bump_reject("same_signal_24h")
                 return

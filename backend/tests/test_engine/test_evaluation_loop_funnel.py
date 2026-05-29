@@ -197,6 +197,25 @@ class TestRejectionCounters:
         await loop._execute_signal(buy_signal, "AAPL", _df())
         assert loop._reject_counters.get("same_signal_24h") == 1
 
+    async def test_same_signal_24h_bypassed_for_sizing_up_held(self, loop, buy_signal):
+        """If symbol is held and sizing_up is enabled, same_signal_24h must
+        NOT fire — the repeated daily BUY signal is required to reach the
+        sizing-up branch. Without this bypass, 1-share placeholders stay
+        1-share forever."""
+        import time as _time
+
+        loop._daily_buy_date = _date.today().isoformat()
+        loop._last_signal["AAPL"] = ("BUY", _time.time() - 100)
+        # Held + sizing_up enabled
+        tracker = MagicMock()
+        tracker.tracked_symbols = {"AAPL"}
+        loop._position_tracker = tracker
+        loop.set_sizing_up_config(enabled=True, threshold=0.5, min_confidence=0.5)
+
+        await loop._execute_signal(buy_signal, "AAPL", _df())
+
+        assert loop._reject_counters.get("same_signal_24h") is None
+
 
 class TestSuccessCounter:
     async def test_buys_placed_increments_on_successful_order(self, loop, buy_signal):
