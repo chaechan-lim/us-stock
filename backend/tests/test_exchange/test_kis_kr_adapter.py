@@ -1090,6 +1090,8 @@ class TestRankingTRIDs:
         assert "KR_NEW_HIGHLOW" in TR_ID_KR_PAPER
 
     def test_ranking_tr_id_values(self):
-        assert TR_ID_KR_LIVE["KR_VOLUME_SURGE"] == "FHPST01720000"
+        # 2026-05-29: corrected per koreainvestment/open-trading-api
+        # (volume + new-highlow TR_IDs were wrong → 404 in production).
+        assert TR_ID_KR_LIVE["KR_VOLUME_SURGE"] == "FHPST01710000"
         assert TR_ID_KR_LIVE["KR_UPDOWN_RATE"] == "FHPST01700000"
-        assert TR_ID_KR_LIVE["KR_NEW_HIGHLOW"] == "FHPST01600000"
+        assert TR_ID_KR_LIVE["KR_NEW_HIGHLOW"] == "FHPST01870000"

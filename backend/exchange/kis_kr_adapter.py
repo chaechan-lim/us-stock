@@ -68,9 +68,12 @@ TR_ID_KR_LIVE = {
     "EXECUTED_ORDERS": "TTTC8001R",
     "BUYING_POWER": "TTTC8908R",
     # Scanner / Ranking (국내 주식 랭킹)
-    "KR_VOLUME_SURGE": "FHPST01720000",   # 거래량 급등
-    "KR_UPDOWN_RATE": "FHPST01700000",    # 등락률 순위
-    "KR_NEW_HIGHLOW": "FHPST01600000",    # 신고가/신저가
+    # 2026-05-29: corrected per koreainvestment/open-trading-api official
+    # samples. Old TR_IDs+paths were returning 404; KRUniverseExpander's
+    # dynamic discovery was silently falling back to the static seed list.
+    "KR_VOLUME_SURGE": "FHPST01710000",   # 거래량순위 (was FHPST01720000)
+    "KR_UPDOWN_RATE": "FHPST01700000",    # 등락률 순위 (unchanged)
+    "KR_NEW_HIGHLOW": "FHPST01870000",    # 신고가 근접 (was FHPST01600000)
     # Holiday calendar (국내휴장일조회)
     "KR_HOLIDAY": "CTCA0903R",
 }
@@ -748,7 +751,11 @@ class KISKRAdapter(ExchangeAdapter):
     async def fetch_volume_surge(
         self, market: str = "J", limit: int = 20,
     ) -> list[KRRankedStock]:
-        """Fetch domestic stocks with surging volume.
+        """Fetch domestic stocks ranked by volume (거래량순위).
+
+        2026-05-29: path was `/ranking/volume-surge` (404). Corrected to
+        the official `/quotations/volume-rank` per
+        github.com/koreainvestment/open-trading-api samples.
 
         Args:
             market: "J" = KOSPI (KRX), "K" = KOSDAQ
@@ -757,13 +764,19 @@ class KISKRAdapter(ExchangeAdapter):
         await self._auth.ensure_valid_token()
         params = {
             "FID_COND_MRKT_DIV_CODE": market,
-            "FID_COND_SCR_DIV_CODE": "20171",  # 거래량 급등 화면
-            "FID_INPUT_ISCD": "0000",           # 전체 종목
-            "FID_RANK_SORT_CLS_CODE": "0",      # 급등률 내림차순
-            "FID_BLNG_CLS_CODE": "0",           # 전체 업종
+            "FID_COND_SCR_DIV_CODE": "20171",
+            "FID_INPUT_ISCD": "0000",
+            "FID_DIV_CLS_CODE": "0",            # required (was missing)
+            "FID_BLNG_CLS_CODE": "0",
+            "FID_TRGT_CLS_CODE": "111111111",   # required
+            "FID_TRGT_EXLS_CLS_CODE": "000000",
+            "FID_INPUT_PRICE_1": "0",
+            "FID_INPUT_PRICE_2": "0",
+            "FID_VOL_CNT": "0",
+            "FID_INPUT_DATE_1": "0",
         }
         data = await self._get(
-            "/uapi/domestic-stock/v1/ranking/volume-surge",
+            "/uapi/domestic-stock/v1/quotations/volume-rank",
             self._tr["KR_VOLUME_SURGE"],
             params,
         )
@@ -773,7 +786,11 @@ class KISKRAdapter(ExchangeAdapter):
     async def fetch_updown_rate(
         self, market: str = "J", direction: str = "up", limit: int = 20,
     ) -> list[KRRankedStock]:
-        """Fetch domestic stocks by price change rate (gainers or losers).
+        """Fetch domestic stocks by price change rate (등락률 순위).
+
+        2026-05-29: path was `/ranking/updown-rate` (404). Corrected to
+        `/ranking/fluctuation` (TR_ID stays FHPST01700000). Params
+        replaced per koreainvestment/open-trading-api/.../fluctuation.
 
         Args:
             market: "J" = KOSPI (KRX), "K" = KOSDAQ
@@ -783,14 +800,22 @@ class KISKRAdapter(ExchangeAdapter):
         await self._auth.ensure_valid_token()
         params = {
             "FID_COND_MRKT_DIV_CODE": market,
-            "FID_COND_SCR_DIV_CODE": "20170",  # 등락률 순위 화면
-            "FID_INPUT_ISCD": "0000",           # 전체 종목
+            "FID_COND_SCR_DIV_CODE": "20170",
+            "FID_INPUT_ISCD": "0000",
             "FID_RANK_SORT_CLS_CODE": "0" if direction == "up" else "1",
-            "FID_PRCSTEP_RCNT_CLS_CODE": "1",  # 상승/하락
-            "FID_BLNG_CLS_CODE": "0",           # 전체 업종
+            "FID_INPUT_CNT_1": "0",
+            "FID_PRC_CLS_CODE": "0",
+            "FID_INPUT_PRICE_1": "",
+            "FID_INPUT_PRICE_2": "",
+            "FID_VOL_CNT": "",
+            "FID_TRGT_CLS_CODE": "0",
+            "FID_TRGT_EXLS_CLS_CODE": "0",
+            "FID_DIV_CLS_CODE": "0",
+            "FID_RSFL_RATE1": "",
+            "FID_RSFL_RATE2": "",
         }
         data = await self._get(
-            "/uapi/domestic-stock/v1/ranking/updown-rate",
+            "/uapi/domestic-stock/v1/ranking/fluctuation",
             self._tr["KR_UPDOWN_RATE"],
             params,
         )
@@ -800,7 +825,11 @@ class KISKRAdapter(ExchangeAdapter):
     async def fetch_new_highlow(
         self, market: str = "J", high: bool = True, limit: int = 20,
     ) -> list[KRRankedStock]:
-        """Fetch domestic stocks hitting new highs or new lows.
+        """Fetch domestic stocks at/near new highs or lows (신고가 근접).
+
+        2026-05-29: path was `/ranking/new-highlow` (404). Corrected to
+        `/ranking/near-new-highlow` (TR_ID FHPST01870000). Params replaced
+        per koreainvestment/open-trading-api/.../near_new_highlow.
 
         Args:
             market: "J" = KOSPI (KRX), "K" = KOSDAQ
@@ -809,15 +838,21 @@ class KISKRAdapter(ExchangeAdapter):
         """
         await self._auth.ensure_valid_token()
         params = {
+            "FID_APLY_RANG_VOL": "100",
             "FID_COND_MRKT_DIV_CODE": market,
-            "FID_COND_SCR_DIV_CODE": "20160",  # 신고가/신저가 화면
-            "FID_INPUT_ISCD": "0000",           # 전체 종목
-            "FID_RANK_SORT_CLS_CODE": "0",      # 내림차순
-            "FID_BLNG_CLS_CODE": "0",           # 전체 업종
-            "FID_DIV_CLS_CODE": "1" if high else "2",  # 1=신고가, 2=신저가
+            "FID_COND_SCR_DIV_CODE": "20187",
+            "FID_DIV_CLS_CODE": "0" if high else "1",
+            "FID_INPUT_CNT_1": "0",
+            "FID_INPUT_CNT_2": "10",
+            "FID_PRC_CLS_CODE": "0",
+            "FID_INPUT_ISCD": "0000",
+            "FID_TRGT_CLS_CODE": "0",
+            "FID_TRGT_EXLS_CLS_CODE": "0",
+            "FID_APLY_RANG_PRC_1": "",
+            "FID_APLY_RANG_PRC_2": "",
         }
         data = await self._get(
-            "/uapi/domestic-stock/v1/ranking/new-highlow",
+            "/uapi/domestic-stock/v1/ranking/near-new-highlow",
             self._tr["KR_NEW_HIGHLOW"],
             params,
         )
