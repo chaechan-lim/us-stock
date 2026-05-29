@@ -7,6 +7,11 @@ Type=oneshot
 User=chans
 WorkingDirectory=/home/chans/us-stock
 EnvironmentFile=/home/chans/us-stock/.env
+# Include the user's npm-global bin so generate_recommendations.py can
+# find `claude` and `codex` CLIs. Without this, the daily LLM chain
+# silently no-ops (rc=0, zero artifacts written) — systemd's default
+# PATH does not include ~/.npm-global/bin.
+Environment=PATH=/home/chans/.npm-global/bin:/home/chans/us-stock/venv/bin:/usr/local/bin:/usr/bin:/bin
 ExecStart=/home/chans/us-stock/venv/bin/python scripts/daily_post_market_analysis.py
 StandardOutput=journal
 StandardError=journal

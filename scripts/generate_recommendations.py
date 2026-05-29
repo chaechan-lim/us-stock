@@ -547,6 +547,16 @@ async def main(mode: str, dry_run: bool) -> int:
     codex_task = asyncio.to_thread(_run_cli, ["codex", "exec"], prompt)
     claude_raw, codex_raw = await asyncio.gather(claude_task, codex_task)
 
+    # Loud diagnostic when both CLIs returned None — this looks identical
+    # to "no recs to propose" but is almost always a PATH / env issue
+    # under systemd (see deploy/daily-post-market-analysis.service).
+    if claude_raw is None and codex_raw is None:
+        logger.error(
+            "Both Claude and Codex CLIs returned None — likely missing "
+            "from PATH (PATH=%s). Check systemd service Environment=PATH.",
+            os.environ.get("PATH", "<unset>"),
+        )
+
     # Persist raw outputs so a failed parse is debuggable (and so the
     # operator can audit what the LLM actually said).
     debug_dir = REPO_ROOT / "data" / "llm_recommendations"
