@@ -45,7 +45,7 @@ from sqlalchemy import desc, select, text  # noqa: E402
 
 from core.models import AgentRecommendation  # noqa: E402
 from db.session import get_session_factory  # noqa: E402
-from services.yaml_mutator import ALLOWED_PARAM_PREFIXES, _is_path_allowed  # noqa: E402
+from services.yaml_mutator import ALLOWED_PARAM_PREFIXES, _is_path_allowed, path_exists  # noqa: E402
 
 
 logger = logging.getLogger("generate_recommendations")
@@ -462,6 +462,25 @@ def _filter_whitelist(recs: list[dict]) -> list[dict]:
     return kept
 
 
+def _filter_phantom_paths(recs: list[dict]) -> list[dict]:
+    """Drop recommendations whose `param_path` does not exist in the
+    live yaml file. LLMs occasionally hallucinate plausible-looking
+    paths (e.g. `sell_cooldown_hours` when the real key is
+    `sell_cooldown_days`). These get blocked at whitelist by prefix
+    but the leaf is fictional — accepting them would create dead
+    yaml keys with no effect on the running engine."""
+    kept = []
+    for r in recs:
+        if not path_exists(YAML_PATH, r["param_path"]):
+            logger.warning(
+                "drop (phantom path — does not exist in yaml): %s",
+                r["param_path"],
+            )
+            continue
+        kept.append(r)
+    return kept
+
+
 def _filter_against_pending(
     recs: list[dict], pending_paths: set[str],
 ) -> list[dict]:
@@ -652,11 +671,15 @@ async def main(mode: str, dry_run: bool) -> int:
 
     claude_recs = _filter_whitelist(claude_recs)
     codex_recs = _filter_whitelist(codex_recs)
+    claude_recs = _filter_phantom_paths(claude_recs)
+    codex_recs = _filter_phantom_paths(codex_recs)
     claude_recs = _filter_against_pending(claude_recs, pending_paths)
     codex_recs = _filter_against_pending(codex_recs, pending_paths)
 
     merged = _merge_sources(claude_recs, codex_recs)
-    logger.info("After whitelist + dedupe + merge: %d rows", len(merged))
+    logger.info(
+        "After whitelist + phantom-path + dedupe + merge: %d rows", len(merged),
+    )
 
     if dry_run:
         print(json.dumps(

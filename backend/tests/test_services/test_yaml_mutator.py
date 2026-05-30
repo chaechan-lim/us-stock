@@ -9,6 +9,7 @@ from services.yaml_mutator import (
     YamlMutationError,
     _is_path_allowed,
     apply_yaml_change,
+    path_exists,
 )
 
 
@@ -228,3 +229,40 @@ class TestTypeMatching:
         p = self._yaml_with(tmp_path, 42)
         apply_yaml_change(p, "markets.KR.evaluation_loop.k", None)
         assert yaml.safe_load(p.read_text())["markets"]["KR"]["evaluation_loop"]["k"] is None
+
+
+class TestPathExists:
+    """path_exists — phantom-path filter for LLM hallucinations."""
+
+    def test_returns_true_for_real_path(self, yaml_file):
+        assert path_exists(yaml_file, "markets.KR.evaluation_loop.sector_boost_weight") is True
+        assert path_exists(yaml_file, "markets.KR.risk.max_positions") is True
+        assert path_exists(yaml_file, "markets.US.disabled_strategies") is True
+
+    def test_returns_false_for_phantom_leaf(self, yaml_file):
+        # Real LLM hallucinations seen 2026-05-29:
+        assert path_exists(
+            yaml_file, "markets.KR.evaluation_loop.sell_cooldown_hours",
+        ) is False
+        assert path_exists(
+            yaml_file, "markets.US.evaluation_loop.same_signal_dedup_hours",
+        ) is False
+
+    def test_returns_false_for_missing_intermediate(self, yaml_file):
+        assert path_exists(yaml_file, "markets.JP.evaluation_loop.x") is False
+        assert path_exists(yaml_file, "markets.KR.bogus_section.x") is False
+
+    def test_returns_false_for_missing_file(self, tmp_path):
+        assert path_exists(tmp_path / "nope.yaml", "markets.KR.x") is False
+
+    def test_returns_false_for_invalid_yaml(self, tmp_path):
+        p = tmp_path / "bad.yaml"
+        p.write_text("not: valid: yaml: at: all:\n  - mixed types: [{", encoding="utf-8")
+        assert path_exists(p, "markets.KR.x") is False
+
+    def test_returns_true_for_path_to_dict_node(self, yaml_file):
+        # Path resolving to a sub-dict (not a leaf) is still a real path
+        assert path_exists(yaml_file, "markets.KR.evaluation_loop") is True
+
+    def test_returns_true_for_path_to_list_node(self, yaml_file):
+        assert path_exists(yaml_file, "markets.KR.disabled_strategies") is True

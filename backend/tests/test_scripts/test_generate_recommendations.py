@@ -266,3 +266,40 @@ class TestFormatExposureSection:
         assert "Sentinel flags raised today" in section
         assert "chronic_under_deployment" in section
         assert "prioritize" in section
+
+
+class TestFilterPhantomPaths:
+    """A: drop LLM-hallucinated paths that look plausible but don't
+    exist in the live yaml (e.g. sell_cooldown_hours when the real
+    key is sell_cooldown_days)."""
+
+    def test_phantom_paths_dropped_real_paths_kept(self, tmp_path, monkeypatch):
+        import yaml as _yaml
+
+        fake_yaml = tmp_path / "strategies.yaml"
+        fake_yaml.write_text(_yaml.safe_dump({
+            "markets": {
+                "KR": {
+                    "evaluation_loop": {"sell_cooldown_days": 3},
+                },
+            },
+        }), encoding="utf-8")
+        monkeypatch.setattr(gr, "YAML_PATH", fake_yaml)
+
+        recs = [
+            {"param_path": "markets.KR.evaluation_loop.sell_cooldown_days",
+             "proposed_value": 2},
+            {"param_path": "markets.KR.evaluation_loop.sell_cooldown_hours",
+             "proposed_value": 12},  # phantom: real key is _days
+            {"param_path": "markets.US.evaluation_loop.same_signal_dedup_hours",
+             "proposed_value": 12},  # phantom: no such key anywhere
+        ]
+        kept = gr._filter_phantom_paths(recs)
+        assert len(kept) == 1
+        assert kept[0]["param_path"] == "markets.KR.evaluation_loop.sell_cooldown_days"
+
+    def test_empty_input_returns_empty(self, monkeypatch, tmp_path):
+        fake_yaml = tmp_path / "strategies.yaml"
+        fake_yaml.write_text("markets: {}\n", encoding="utf-8")
+        monkeypatch.setattr(gr, "YAML_PATH", fake_yaml)
+        assert gr._filter_phantom_paths([]) == []
