@@ -278,3 +278,28 @@ class AgentRecommendation(Base):
         Index("idx_recs_created", "created_at"),
         Index("idx_recs_agent_status", "agent_type", "status"),
     )
+
+
+# 2026-05-30: Hermes Phase 3 — funnel event persistence
+# Every BUY signal evaluation (rejected or placed) writes one row here.
+# Powers counterfactual replay: given a proposed config change, replay
+# the last N days of rejections and estimate how many would have passed
+# under the new params. 30-day retention via daily cleanup task.
+class FunnelEvent(Base):
+    __tablename__ = "funnel_events"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    ts = Column(DateTime, default=datetime.utcnow, nullable=False)
+    market = Column(String(2), nullable=False)         # US | KR
+    symbol = Column(String(20), nullable=False)
+    strategy_name = Column(String(50))
+    signal_confidence = Column(Float)
+    decision = Column(String(10), nullable=False)      # placed | rejected
+    reject_reason = Column(String(50))                 # populated when decision='rejected'
+    price = Column(Float)                              # price at signal eval time
+
+    __table_args__ = (
+        Index("idx_funnel_ts", "ts"),
+        Index("idx_funnel_market_ts", "market", "ts"),
+        Index("idx_funnel_decision_reason", "decision", "reject_reason"),
+    )

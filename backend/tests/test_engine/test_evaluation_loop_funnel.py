@@ -180,6 +180,30 @@ class TestRejectionCounters:
         await loop._execute_signal(buy_signal, "AAPL", _df())
         assert loop._reject_counters.get("sell_cooldown") == 1
 
+    async def test_bump_reject_persists_funnel_event(self, loop, buy_signal, monkeypatch):
+        """Hermes Phase 3 — every _bump_reject call must schedule a
+        FunnelEvent insert with the current symbol/signal/price context
+        so counterfactual replay has data to work with."""
+        captured = []
+
+        async def fake_persist(self, symbol, decision, reason=None):
+            captured.append((symbol, decision, reason))
+
+        monkeypatch.setattr(
+            "engine.evaluation_loop.EvaluationLoop._persist_funnel_event",
+            fake_persist,
+        )
+
+        loop._daily_buy_date = _date.today().isoformat()
+        loop._sell_cooldown_secs = 3600
+        loop._recovery_watch["AAPL"] = __import__("time").time() - 10
+        await loop._execute_signal(buy_signal, "AAPL", _df())
+        # Let the scheduled persist task run
+        import asyncio as _asyncio
+        await _asyncio.sleep(0)
+
+        assert ("AAPL", "rejected", "sell_cooldown") in captured
+
     async def test_sell_cooldown_bypassed_for_sizing_up_held(self, loop, buy_signal):
         """When the symbol is still held (partial sell left a placeholder)
         AND sizing_up is enabled, the BUY signal is an add-on, not a re-

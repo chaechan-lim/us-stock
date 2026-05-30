@@ -227,6 +227,40 @@ class EvaluationLoop:
 
     def _bump_reject(self, reason: str) -> None:
         self._reject_counters[reason] = self._reject_counters.get(reason, 0) + 1
+        # Hermes Phase 3: persist funnel event for counterfactual replay.
+        # _current_* are set at the top of _execute_signal so every reject
+        # call site automatically gets symbol/strategy/price context.
+        sym = getattr(self, "_current_symbol", None)
+        if sym:
+            asyncio.create_task(self._persist_funnel_event(
+                sym, decision="rejected", reason=reason,
+            ))
+
+    async def _persist_funnel_event(
+        self, symbol: str, decision: str, reason: str | None = None,
+    ) -> None:
+        """Fire-and-forget DB insert. Failures must not affect trading —
+        wrap broadly and swallow. 30d retention is enforced by a daily
+        scheduler task (see main.py)."""
+        try:
+            from core.models import FunnelEvent
+            from db.session import get_session_factory
+            sig = getattr(self, "_current_signal", None)
+            price = getattr(self, "_current_price", None)
+            factory = get_session_factory()
+            async with factory() as s:
+                s.add(FunnelEvent(
+                    market=self._market,
+                    symbol=symbol,
+                    strategy_name=getattr(sig, "strategy_name", None) if sig else None,
+                    signal_confidence=getattr(sig, "confidence", None) if sig else None,
+                    decision=decision,
+                    reject_reason=reason,
+                    price=price,
+                ))
+                await s.commit()
+        except Exception as e:
+            logger.debug("FunnelEvent persist failed (non-fatal): %s", e)
 
     def _reset_daily_counters_if_needed(self) -> None:
         """Roll over _daily_buy_count, _reject_counters, _buy_flow_counters
@@ -1819,6 +1853,12 @@ class EvaluationLoop:
             logger.warning("Real-time price fetch failed for %s, using OHLCV close: %s", symbol, e)
             price = float(df.iloc[-1]["close"])
 
+        # Hermes Phase 3: stash context for _bump_reject / _persist_funnel_event
+        # so every reject + placed-buy automatically records symbol/conf/price.
+        self._current_symbol = symbol
+        self._current_signal = signal
+        self._current_price = price
+
         if signal.signal_type == SignalType.BUY:
             # F1 funnel: roll counters BEFORE any increments so the first
             # BUY of a new day is attributed to the new day even if it gets
@@ -2257,6 +2297,12 @@ class EvaluationLoop:
             if order:
                 self._daily_buy_count += 1
                 self._buy_flow_counters["buys_placed"] += 1
+                # Hermes Phase 3: record placed buy for counterfactual
+                # baseline (so replay knows which signals already passed
+                # all gates, not just which were rejected).
+                asyncio.create_task(self._persist_funnel_event(
+                    symbol, decision="placed",
+                ))
 
             # Register position for SL/TP/trailing stop monitoring
             if order and self._position_tracker:
