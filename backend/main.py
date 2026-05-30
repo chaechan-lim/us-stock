@@ -2268,6 +2268,38 @@ async def lifespan(app: FastAPI):
         market="KR",
     )
 
+    async def task_funnel_events_cleanup():
+        """Hermes Phase 3 — 30-day retention on funnel_events.
+        Keeps the counterfactual replay window bounded so the table
+        doesn't grow unbounded (rough estimate: ~500 events/day per
+        market = 30k rows/month, trivial — but we'd rather know."""
+        try:
+            from datetime import datetime, timedelta
+            from sqlalchemy import text
+            cutoff = datetime.utcnow() - timedelta(days=30)
+            async with session_factory() as session:
+                result = await session.execute(
+                    text("DELETE FROM funnel_events WHERE ts < :cutoff"),
+                    {"cutoff": cutoff},
+                )
+                await session.commit()
+                deleted = result.rowcount or 0
+                if deleted > 0:
+                    logger.info(
+                        "funnel_events cleanup: deleted %d rows older than 30d",
+                        deleted,
+                    )
+        except Exception as e:
+            logger.warning("funnel_events cleanup failed: %s", e)
+
+    scheduler.add_task(
+        "funnel_events_cleanup",
+        task_funnel_events_cleanup,
+        interval_sec=86400,  # 24h
+        phases=None,
+        market=None,
+    )
+
     async def task_kr_market_state_update():
         """Update KR market regime from KODEX 200 data."""
         try:
