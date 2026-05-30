@@ -32,6 +32,57 @@ function formatValue(v: any): string {
   return String(v)
 }
 
+/**
+ * Render the backtest_result blob with friendly visual tone:
+ *   - `skip`  → amber: auto-validation could not run (operator must judge manually)
+ *   - `error` → red:   validator crashed (likely bug, not LLM fault)
+ *   - metrics → gray:  delta vs baseline (the happy path)
+ */
+function BacktestPill({ result }: { result: any }) {
+  if (!result || typeof result !== 'object') return null
+  if (result.skip) {
+    return (
+      <div className="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded p-1.5 mt-1">
+        <span className="font-medium">⚠ 백테스트 스킵: </span>
+        {String(result.skip)}
+        <div className="text-amber-700 mt-0.5">
+          → validator가 자동 검증 못함. 적용 전 수동 판단 필요.
+        </div>
+      </div>
+    )
+  }
+  if (result.error) {
+    return (
+      <div className="text-[11px] text-red-800 bg-red-50 border border-red-200 rounded p-1.5 mt-1">
+        <span className="font-medium">❌ 백테스트 실패: </span>
+        {String(result.error)}
+      </div>
+    )
+  }
+  const baseline = result.baseline
+  const proposed = result.proposed
+  if (baseline && proposed) {
+    const dRet = (proposed.ret_pct ?? 0) - (baseline.ret_pct ?? 0)
+    const dSharpe = (proposed.sharpe ?? 0) - (baseline.sharpe ?? 0)
+    const dMdd = (proposed.mdd_pct ?? 0) - (baseline.mdd_pct ?? 0)
+    const passes = result.passes_floor !== false
+    return (
+      <div className={clsx(
+        'text-[11px] rounded p-1.5 mt-1 border',
+        passes ? 'text-gray-700 bg-gray-50 border-gray-200' : 'text-red-700 bg-red-50 border-red-200',
+      )}>
+        <span className="font-medium">{passes ? '✓ 백테스트 통과' : '✗ regression floor 실패'}: </span>
+        ΔRet={dRet >= 0 ? '+' : ''}{dRet.toFixed(1)}pp  ΔSharpe={dSharpe >= 0 ? '+' : ''}{dSharpe.toFixed(2)}  ΔMDD={dMdd >= 0 ? '+' : ''}{dMdd.toFixed(1)}pp
+      </div>
+    )
+  }
+  return (
+    <div className="text-[11px] text-gray-600 bg-gray-50 rounded p-1.5 mt-1 font-mono">
+      backtest: {JSON.stringify(result)}
+    </div>
+  )
+}
+
 function RecommendationRow({ r }: { r: AgentRecommendation }) {
   const [showReject, setShowReject] = useState(false)
   const [reason, setReason] = useState('')
@@ -88,11 +139,7 @@ function RecommendationRow({ r }: { r: AgentRecommendation }) {
               {r.expected_effect}
             </div>
           )}
-          {r.backtest_result && (
-            <div className="text-[11px] text-gray-600 bg-gray-50 rounded p-1.5 mt-1 font-mono">
-              backtest: {JSON.stringify(r.backtest_result)}
-            </div>
-          )}
+          {r.backtest_result && <BacktestPill result={r.backtest_result} />}
           {r.status === 'rejected' && r.rejected_reason && (
             <div className="text-xs text-red-700 mt-1">
               거절 사유: {r.rejected_reason}

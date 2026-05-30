@@ -65,6 +65,28 @@ def _is_path_allowed(param_path: str) -> bool:
     )
 
 
+def path_exists(yaml_path: str | os.PathLike, param_path: str) -> bool:
+    """Return True iff every segment of `param_path` resolves to a key
+    in the yaml file. Used to drop LLM-hallucinated param paths before
+    they are inserted as recommendations.
+
+    Unlike apply_yaml_change which RAISES on missing intermediates,
+    this returns a clean boolean — safe for filter loops.
+    """
+    try:
+        with open(yaml_path) as fh:
+            data = yaml.safe_load(fh) or {}
+    except (OSError, yaml.YAMLError):
+        return False
+    parts = param_path.split(".")
+    cur: Any = data
+    for key in parts:
+        if not isinstance(cur, dict) or key not in cur:
+            return False
+        cur = cur[key]
+    return True
+
+
 def _walk(d: dict, parts: list[str]) -> tuple[dict, str]:
     """Walk nested dict to the parent of the leaf, return (parent, leaf_key).
     Raises if any intermediate key is missing or not a dict."""
