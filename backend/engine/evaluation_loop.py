@@ -1918,8 +1918,26 @@ class EvaluationLoop:
             # STOCK-20: Sell cooldown — block BUY for recently-sold symbols.
             # After a stop-loss or strategy sell, wait at least _sell_cooldown_secs
             # before re-buying to prevent sell-then-immediately-rebuy churn.
+            #
+            # Bypass: when the symbol is still held (partial sell left a
+            # placeholder) AND sizing_up is enabled, the BUY signal is an
+            # add-on to an existing position, not a re-entry. The
+            # whipsaw_block gate (2+ loss sells in 7d) below still catches
+            # genuine loser-symbol cases. Live evidence 2026-05-29 EOD:
+            # 173/239 KR rejections were sell_cooldown, of which 8 held
+            # placeholders kept hitting the gate even though sizing-up
+            # eligibility passed — they never reached line ~2004.
+            held_for_sizing_up = (
+                self._sizing_up_enabled
+                and self._position_tracker is not None
+                and symbol in self._position_tracker.tracked_symbols
+            )
             sell_ts = self._recovery_watch.get(symbol)
-            if sell_ts is not None and self._sell_cooldown_secs > 0:
+            if (
+                not held_for_sizing_up
+                and sell_ts is not None
+                and self._sell_cooldown_secs > 0
+            ):
                 elapsed = time.time() - sell_ts
                 if elapsed < self._sell_cooldown_secs:
                     hours_ago = elapsed / 3600

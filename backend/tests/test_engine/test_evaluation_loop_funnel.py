@@ -180,6 +180,25 @@ class TestRejectionCounters:
         await loop._execute_signal(buy_signal, "AAPL", _df())
         assert loop._reject_counters.get("sell_cooldown") == 1
 
+    async def test_sell_cooldown_bypassed_for_sizing_up_held(self, loop, buy_signal):
+        """When the symbol is still held (partial sell left a placeholder)
+        AND sizing_up is enabled, the BUY signal is an add-on, not a re-
+        entry. sell_cooldown must NOT fire. whipsaw_block further down
+        still catches genuine loser-symbol cases."""
+        import time as _time
+
+        loop._daily_buy_date = _date.today().isoformat()
+        loop._sell_cooldown_secs = 3600
+        loop._recovery_watch["AAPL"] = _time.time() - 10
+        tracker = MagicMock()
+        tracker.tracked_symbols = {"AAPL"}
+        loop._position_tracker = tracker
+        loop.set_sizing_up_config(enabled=True, threshold=0.5, min_confidence=0.5)
+
+        await loop._execute_signal(buy_signal, "AAPL", _df())
+
+        assert loop._reject_counters.get("sell_cooldown") is None
+
     async def test_whipsaw_block_bump(self, loop, buy_signal):
         import time as _time
 
