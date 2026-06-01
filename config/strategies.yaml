@@ -592,6 +592,35 @@ strategies:
       activation_pct: 0.06
       trail_pct: 0.03
 
+  # 2026-06-01: FAILED on KR daily-bar backtest. compare_kr_gap_and_go.py:
+  #   V0_live:        Ret +13.7% Sharpe +0.68 MDD -10.5% PF 1.25
+  #   V2_gng_only:    Ret  -0.5% Sharpe -2.33 MDD  -1.7% PF 0.88 (37 trd, ₩-520K)
+  #   V1-V6 (combo):  Identical to V0 (combiner weight 0.10 too small)
+  # Per-trade avg -₩14K. KR daily-bar gap-up patterns FADE on the SAME day
+  # (oversold + circuit breakers + retail flip), so a buy at close = buy
+  # at fade-start. True ORB/Gap-and-Go needs intraday entry (09:00-09:30)
+  # which requires 1-min OHLCV infra (yfinance only has last 7d).
+  # Strategy code + tests retained as infrastructure for a future intraday
+  # version. enabled=false keeps it inert.
+  gap_and_go:
+    enabled: false   # backtest failed — see comment above
+    timeframe: "1D"
+    params:
+      min_gap_pct: 0.03         # 3% min gap up vs prev close
+      max_gap_pct: 0.15         # cap to filter pump-and-dump (>15%)
+      min_intraday_return: 0.005  # close >= open * 1.005 (gap holds)
+      min_vol_ratio: 1.5        # today vol vs 20-day avg
+    stop_loss:
+      type: fixed_pct
+      max_pct: 0.05             # 5% below entry — gap-fill protection
+    take_profit:
+      type: fixed_pct
+      max_pct: 0.10             # quick scalp target
+    trailing_stop:
+      enabled: true
+      activation_pct: 0.05
+      trail_pct: 0.03
+
 # Market-specific overrides
 # Each market key can override: disabled_strategies, risk, evaluation_loop
 markets:
@@ -628,6 +657,7 @@ markets:
     disabled_strategies:
       - dual_momentum
       - rsi_divergence  # 2026-05-28: KR-only enable for diversification (#XX). US backtest never validated rsi_div on top of current US combo; keep off until tested.
+      - gap_and_go      # 2026-06-01: KR-specific signal density strategy. US has PEAD for gap-drift already; gap_and_go untested on US universe.
     # P1-B (#55, 2026-05-14) Kelly fraction bump. compare_kelly_fraction.py
     # US 2y on Phase 2 + P1 baseline:
     #   V0_30  Ret +22.8% Sharpe +1.69 MDD -5.5% PF 1.63
