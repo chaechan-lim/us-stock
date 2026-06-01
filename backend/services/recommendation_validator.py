@@ -141,9 +141,27 @@ async def validate_recommendation(rec_id: int, session_factory) -> None:
                 return  # operator already decided
 
             if not _is_validatable(rec.param_path):
-                rec.backtest_result = {
-                    "skip": f"path {rec.param_path!r} not in backtest config map",
-                }
+                # Hermes Phase 3 C2: fall through to funnel replay for
+                # paths that affect rejection logic but no backtest knob.
+                # Replay simulates the proposed change against the last
+                # 30 days of FunnelEvent rows and reports would-pass
+                # counts. Falls through to skip if path not replayable.
+                from services.funnel_replay import (
+                    is_replayable,
+                    replay_recommendation,
+                )
+                if is_replayable(rec.param_path):
+                    replay_result = await replay_recommendation(
+                        session=session,
+                        param_path=rec.param_path,
+                        current_value=rec.current_value,
+                        proposed_value=rec.proposed_value,
+                    )
+                    rec.backtest_result = replay_result
+                else:
+                    rec.backtest_result = {
+                        "skip": f"path {rec.param_path!r} not in backtest config map",
+                    }
                 await session.commit()
                 return
 

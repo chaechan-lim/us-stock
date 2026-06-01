@@ -840,8 +840,15 @@ markets:
       dynamic_sl_tp: true        # Enable ATR-based dynamic SL/TP
       # P3 (compare_trailing_activation.py 2026-05-08, KR 2y):
       # V0(4%/3%) Ret 0% → V2(8%/3%) Ret +44.9% Sharpe +1.90 MDD -9.2% PF 1.67.
-      default_trailing_activation_pct: 0.08
-      default_trailing_stop_pct: 0.03
+      # 2026-06-01: 8/3 → 10/4 — compare_kr_extra_levers.py V6 KR 2y on
+      # post-#183 baseline:
+      #   V0 (8/3):    Ret +14.1% Sharpe +0.72 MDD -11.1% PF 1.26
+      #   V5 (6/2):    Ret +10.0% Sharpe +0.47 MDD -10.6% PF 1.17  (too tight, exits early)
+      #   V6 (10/4):   Ret +16.1% Sharpe +0.82 MDD -12.8% PF 1.30  ← ✓ 4/4
+      # Activate later (+10% gain vs +8%) + give more room (4% trail vs 3%) =
+      # let winners run. Worth the 1.7pp MDD widen (still <13% absolute).
+      default_trailing_activation_pct: 0.10
+      default_trailing_stop_pct: 0.04
       # 2026-05-26 (#XX): vol scaling KR re-calibration. Live found 89%
       # idle cash with most BUYs sized to 1 share by apply_volatility_
       # scaling — target_risk_pct=0.02 + min_scale=0.30 (US default) was
