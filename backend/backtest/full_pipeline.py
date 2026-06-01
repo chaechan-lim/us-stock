@@ -331,6 +331,17 @@ class PipelineConfig:
     # Sector concentration limit
     max_sector_pct: float = 1.0  # Max portfolio % in any single sector (1.0 = no cap)
 
+    # Holding add-on (sizing-up). 2026-06-01: live KR has chronic 1-share
+    # placeholder positions whose original signal fires too rarely to
+    # naturally grow; this lever simulates the live `sizing_up_*` path —
+    # when a fresh BUY signal hits an already-held symbol whose current
+    # value is below `holding_addon_threshold × min_position_pct × equity`
+    # AND confidence ≥ min, route it through an add-on (weighted avg cost
+    # update). Off by default to keep existing scripts/CI gate stable.
+    enable_holding_addon: bool = False
+    holding_addon_threshold: float = 0.5     # add-on only if held < thr × min_pos × eq
+    holding_addon_min_confidence: float = 0.50
+
     # Strategy config path
     strategy_config_path: str | None = None
 
@@ -922,6 +933,16 @@ class FullPipelineBacktest:
                         )
                 elif combined.signal_type == SignalType.BUY and not is_held:
                     # Only buy if not already held (BUY→HOLD remapping)
+                    buy_candidates.append((combined.confidence, symbol, combined))
+                elif (
+                    combined.signal_type == SignalType.BUY
+                    and is_held
+                    and cfg.enable_holding_addon
+                    and combined.confidence >= cfg.holding_addon_min_confidence
+                ):
+                    # Add-on candidate — mirrors live `_is_sizing_up_eligible`.
+                    # Final undersized check happens inside _execute_buy where
+                    # equity is recomputed.
                     buy_candidates.append((combined.confidence, symbol, combined))
 
             # Execute BUYs ranked by confidence (highest first)
@@ -1941,11 +1962,17 @@ class FullPipelineBacktest:
         signal: Signal,
         regime: MarketRegime,
     ) -> None:
-        """Execute a buy order with portfolio-level risk checks."""
-        if symbol in self._positions:
-            return  # Already holding
+        """Execute a buy order with portfolio-level risk checks.
 
+        When `cfg.enable_holding_addon=True` and the symbol is already
+        held, routes to `_execute_addon_buy` (weighted-avg cost-basis
+        update) instead of early-returning.
+        """
         cfg = self._config
+        if symbol in self._positions:
+            if cfg.enable_holding_addon:
+                self._execute_addon_buy(symbol, stock_data, date_idx, date, signal)
+            return  # Either dispatched to add-on or skipped
 
         # Trading gate: sell cooldown
         if cfg.sell_cooldown_days > 0 and symbol in self._sell_cooldown:
@@ -2090,6 +2117,136 @@ class FullPipelineBacktest:
             trailing_activation_pct=trail_act,
             trailing_trail_pct=trail_pct,
         )
+
+    def _execute_addon_buy(
+        self,
+        symbol: str,
+        stock_data: dict,
+        date_idx: int,
+        date,
+        signal: Signal,
+    ) -> None:
+        """Add to an existing position — mirrors live sizing-up path.
+
+        Only fires when current position value is below
+        `holding_addon_threshold × min_position_pct × equity`. Quantity
+        comes from Kelly sizing with `existing_position_value` passed in
+        so the additional allocation respects max_position_pct cap.
+        Weighted average price; highest_price preserved (trail tracker
+        unaffected). SL/TP/strategy_name inherited from the existing
+        position (this is an add-on of the same thesis, not a new one).
+        """
+        cfg = self._config
+        pos = self._positions.get(symbol)
+        if pos is None or pos.quantity <= 0:
+            return
+        data = stock_data.get(symbol)
+        if data is None or date_idx >= len(data.df):
+            return
+
+        price = float(data.df.iloc[date_idx]["close"])
+        if price <= 0:
+            return
+
+        equity = self._calculate_equity(stock_data, date_idx)
+        if equity <= 0:
+            return
+
+        existing_value = pos.quantity * price  # value at current market
+        # Threshold gate: only top up below `thr × min_pos × eq` floor
+        min_pos = self._risk_manager._params.min_position_pct
+        floor = cfg.holding_addon_threshold * min_pos * equity
+        if existing_value >= floor:
+            return  # Already adequately sized — let normal exits handle
+
+        strategy_name = pos.strategy_name
+        metrics = self._signal_quality.get_metrics(strategy_name)
+        win_rate, avg_win, avg_loss = metrics.kelly_inputs
+        factor_score = self._factor_scores.get(symbol, 0.0)
+
+        # Mirror _execute_buy: sector-boost confidence
+        boosted_confidence = signal.confidence
+        if self._sector_history is not None:
+            from backtest.sector_data import confidence_multiplier
+            sector = self._sector_history.sector_for(symbol)
+            strength = self._sector_history.score_at(date).get(sector)
+            mult = confidence_multiplier(strength, cfg.sector_boost_weight)
+            boosted_confidence = max(0.0, min(1.0, signal.confidence * mult))
+
+        system_strategies = {"cash_parking", "etf_leverage", "etf_inverse"}
+        active_positions = sum(
+            1 for p in self._positions.values()
+            if p.strategy_name not in system_strategies
+        )
+
+        sizing = self._risk_manager.calculate_kelly_position_size(
+            symbol=symbol,
+            price=price,
+            portfolio_value=equity,
+            cash_available=self._cash,
+            current_positions=active_positions,
+            win_rate=win_rate,
+            avg_win=avg_win,
+            avg_loss=avg_loss,
+            signal_confidence=boosted_confidence,
+            factor_score=factor_score,
+            existing_position_value=existing_value,  # Kelly subtracts this
+        )
+        if not sizing.allowed:
+            return
+
+        row = data.df.iloc[date_idx]
+        if cfg.enable_vol_scaling and price > 0:
+            atr_val = None
+            for col in ("atr", "ATRr_14"):
+                if col in row.index:
+                    v = row[col]
+                    if v is not None:
+                        atr_val = float(v)
+                        break
+            if atr_val and atr_val > 0:
+                atr_pct = atr_val / price
+                sizing = self._risk_manager.apply_volatility_scaling(
+                    sizing, atr_pct, price,
+                )
+                if not sizing.allowed or sizing.quantity <= 0:
+                    return
+
+        volume = float(row["volume"]) if "volume" in row.index else 0
+        est_quantity = int(sizing.allocation_usd / price) if price > 0 else 0
+        slippage = self._effective_slippage(volume, est_quantity)
+        exec_price = price * (1 + slippage / 100)
+        add_qty = int(sizing.allocation_usd / exec_price)
+        if add_qty <= 0:
+            return
+
+        cost = add_qty * exec_price + cfg.commission_per_order
+        if cost > self._cash:
+            return
+
+        # Sector concentration — held position already counted in
+        # sector_value; only NEW cost contributes incremental exposure.
+        if cfg.max_sector_pct < 1.0:
+            sector = self._get_sector(symbol)
+            if sector:
+                sector_value = sum(
+                    p.quantity * p.avg_price
+                    for p in self._positions.values()
+                    if p.sector == sector
+                    and p.strategy_name not in system_strategies
+                )
+                if (sector_value + cost) / equity > cfg.max_sector_pct:
+                    return
+
+        # Weighted-avg cost basis. Quantity grows, highest_price unchanged
+        # (trail tracker keeps its all-time peak).
+        new_qty = pos.quantity + add_qty
+        new_avg = (
+            pos.quantity * pos.avg_price + add_qty * exec_price
+        ) / new_qty
+        self._cash -= cost
+        pos.quantity = new_qty
+        pos.avg_price = new_avg
 
     def _resolve_strategy_trailing(self, strategy_name: str) -> tuple[float, float]:
         """Per-strategy trailing config from yaml. Returns (act, trail) or
