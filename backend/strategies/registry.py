@@ -26,6 +26,7 @@ from strategies.cross_sectional_momentum import CrossSectionalMomentumStrategy
 from strategies.quality_factor import QualityFactorStrategy
 from strategies.pead_drift import PEADDriftStrategy
 from strategies.gap_and_go import GapAndGoStrategy
+from strategies.eod_momentum import EODMomentumStrategy
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +50,7 @@ STRATEGY_CLASSES: dict[str, type[BaseStrategy]] = {
     "quality_factor": QualityFactorStrategy,
     "pead_drift": PEADDriftStrategy,
     "gap_and_go": GapAndGoStrategy,
+    "eod_momentum": EODMomentumStrategy,
 }
 
 
