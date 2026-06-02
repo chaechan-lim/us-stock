@@ -56,6 +56,7 @@ TR_ID_KR_LIVE = {
     # Market data (same for live/paper)
     "PRICE": "FHKST01010100",
     "DAILY_CANDLE": "FHKST03010100",
+    "MINUTE_CANDLE": "FHKST03010200",  # 1-min intraday OHLCV (up to 30 bars per call)
     "ORDERBOOK": "FHKST01010200",
     # Orders
     "BUY": "TTTC0802U",
@@ -205,6 +206,114 @@ class KISKRAdapter(ExchangeAdapter):
                 continue
         candles.reverse()  # oldest first
         return candles[-limit:]
+
+    async def fetch_intraday_candles(
+        self,
+        symbol: str,
+        date_str: str,
+        end_time: str = "153000",
+        exchange: str = "KRX",
+    ) -> list[Candle]:
+        """Fetch 1-min intraday OHLCV bars for one trading day.
+
+        KIS endpoint `inquire-time-itemchartprice` returns up to 30 bars
+        per call ending at `end_time`. To cover a full session
+        (09:00-15:30, 390 minutes), call this ~13 times with descending
+        end_time values and concatenate.
+
+        Each Candle uses `timestamp = int("YYYYMMDDHHMM")` (12 digits)
+        so a sort still works chronologically.
+
+        Args:
+            symbol: 6-digit KR stock code (no exchange suffix)
+            date_str: trading date as "YYYYMMDD"
+            end_time: HHMMSS, bars at or before this time
+            exchange: "KRX" or "KOSDAQ"
+
+        Returns: list of Candle, oldest first, up to 30 entries.
+        """
+        await self._auth.ensure_valid_token()
+
+        params = {
+            "FID_ETC_CLS_CODE": "",
+            "FID_COND_MRKT_DIV_CODE": _MRKT_DIV.get(exchange, "J"),
+            "FID_INPUT_ISCD": symbol,
+            "FID_INPUT_HOUR_1": end_time,
+            "FID_PW_DATA_INCU_YN": "N",
+            "FID_INPUT_DATE_1": date_str,
+        }
+        data = await self._get(
+            "/uapi/domestic-stock/v1/quotations/inquire-time-itemchartprice",
+            self._tr["MINUTE_CANDLE"],
+            params,
+        )
+        candles = []
+        for item in data.get("output2", []):
+            try:
+                bar_date = item.get("stck_bsop_date", "")
+                bar_time = item.get("stck_cntg_hour", "")
+                if not bar_date or not bar_time:
+                    continue
+                # bar_time is HHMMSS → strip seconds for HHMM
+                hhmm = bar_time[:4]
+                ts = int(f"{bar_date}{hhmm}")
+                candles.append(
+                    Candle(
+                        timestamp=ts,
+                        open=float(item.get("stck_oprc", 0)),
+                        high=float(item.get("stck_hgpr", 0)),
+                        low=float(item.get("stck_lwpr", 0)),
+                        close=float(item.get("stck_prpr", 0)),  # 분봉 close field
+                        volume=float(item.get("cntg_vol", 0)),
+                    )
+                )
+            except (ValueError, KeyError):
+                continue
+        candles.sort(key=lambda c: c.timestamp)
+        return candles
+
+    async def fetch_intraday_session(
+        self,
+        symbol: str,
+        date_str: str,
+        exchange: str = "KRX",
+    ) -> list[Candle]:
+        """Fetch the full 09:00-15:30 KST session of 1-min bars.
+
+        KIS returns ≤30 bars per call ending at `end_time`. To cover
+        the 390-min session we call ~14 times with descending end_time
+        and de-dupe. Returns up to 390 candles, oldest first.
+
+        Caller MUST handle rate limiting (KIS 20 req/sec real). Each
+        full-session fetch is ~14 calls, so backfilling 79 symbols
+        across 90 days = 99k calls → ~83 minutes at 20/sec sustained.
+        """
+        all_candles: dict[int, Candle] = {}
+        # End times descending: 15:30, 15:00, 14:30, ..., 09:30, 09:00
+        # 30-bar window means we ask for ranges ending at each :30 / :00
+        # mark of every half-hour from 15:30 back to 09:00.
+        end_times = [
+            "153000", "150000", "143000", "140000",
+            "133000", "130000", "123000", "120000",
+            "113000", "110000", "103000", "100000",
+            "093000", "090000",
+        ]
+        for end_t in end_times:
+            try:
+                window = await self.fetch_intraday_candles(
+                    symbol, date_str, end_time=end_t, exchange=exchange,
+                )
+            except Exception as e:
+                logger.warning(
+                    "Intraday fetch failed for %s %s @%s: %s",
+                    symbol, date_str, end_t, e,
+                )
+                continue
+            for c in window:
+                all_candles[c.timestamp] = c
+
+        ordered = sorted(all_candles.values(), key=lambda c: c.timestamp)
+        return ordered
 
     async def fetch_orderbook(
         self, symbol: str, exchange: str = "KRX", limit: int = 20
