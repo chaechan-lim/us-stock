@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import os
 from contextlib import asynccontextmanager
 from datetime import datetime
 
@@ -650,11 +651,18 @@ async def lifespan(app: FastAPI):
     from data.macro_calendar import MacroCalendarService
     from data.insider_service import InsiderTradingService
     from data.event_calendar import EventCalendarService
+    from data.dart_service import DARTInsiderService
 
     earnings_svc = EarningsCalendarService(api_key=config.external.finnhub_api_key)
     macro_svc = MacroCalendarService()
     insider_svc = InsiderTradingService(api_key=config.external.finnhub_api_key)
-    event_calendar = EventCalendarService(earnings_svc, macro_svc, insider_svc)
+    kr_insider_svc = DARTInsiderService(
+        api_key=os.getenv("DART_API_KEY"),
+        enabled=os.getenv("DART_ENABLED", "false").lower() == "true",
+    )
+    event_calendar = EventCalendarService(
+        earnings_svc, macro_svc, insider_svc, kr_insider=kr_insider_svc,
+    )
     app.state.event_calendar = event_calendar
     position_tracker._event_calendar = event_calendar
 
@@ -1862,7 +1870,12 @@ async def lifespan(app: FastAPI):
 
     # Event calendar refresh (earnings, insider transactions)
     async def task_event_calendar_refresh():
-        """Daily: refresh earnings calendar + insider transactions."""
+        """Daily: refresh earnings calendar + insider transactions.
+
+        Passes BOTH US and KR watchlist symbols — refresh_all() routes
+        US tickers (alpha) to Finnhub and KR codes (6-digit numeric) to
+        DART internally.
+        """
         if not earnings_svc.available:
             return
         try:
@@ -1870,8 +1883,11 @@ async def lifespan(app: FastAPI):
 
             async with session_factory() as session:
                 repo = TradeRepository(session)
-                wl = await repo.get_watchlist(active_only=True, market="US")
-                symbols = [w.symbol for w in wl if w.source != "etf_universe"][:40]
+                us_wl = await repo.get_watchlist(active_only=True, market="US")
+                kr_wl = await repo.get_watchlist(active_only=True, market="KR")
+                us_syms = [w.symbol for w in us_wl if w.source != "etf_universe"][:40]
+                kr_syms = [w.symbol for w in kr_wl if w.source != "etf_universe"][:80]
+                symbols = us_syms + kr_syms
 
             if not symbols:
                 return
