@@ -470,12 +470,23 @@ strategies:
 
   bnf_deviation:
     # 2026-04-23: disabled (Option A).
-    enabled: false
+    # 2026-06-02: RE-ENABLED for KR with looser deviation thresholds.
+    # compare_kr_mean_reversion.py V4 KR 2y on post-#183 baseline:
+    #   V0_live:       Ret +13.7% Sharpe +0.68 MDD -10.5% PF 1.25
+    #   V2 default(-5/+3):  Ret  +6.6% Sharpe +0.27  (too strict, 49 trades, -₩91K)
+    #   V4 loose(-3/+2):    Ret +15.9% Sharpe +0.84 MDD -11.1% PF 1.30 ← ✓ 4/4
+    #                        63 trades / 2y, +₩602K standalone contribution
+    #   V5 tight(-7/+4):    Ret +11.5% Sharpe +0.58 (36 trades, alpha-positive but V0 미달)
+    # Looser thresholds expose more mean-reversion candidates; KR mid-caps
+    # rarely deviate >5% from 20-SMA in a single bar but -3% deviations
+    # are common (~30-day mean reversion window). US-disabled defensively
+    # (untested on US universe; bnf is a KR-flavored strategy).
+    enabled: true
     timeframe: "1D"
     params:
-      sma_period: 20         # optimized: 25 -> 20
-      buy_deviation: -5.0    # optimized (unchanged)
-      sell_deviation: 3.0    # optimized (unchanged)
+      sma_period: 20
+      buy_deviation: -3.0    # 2026-06-02: was -5.0 (too strict)
+      sell_deviation: 2.0    # 2026-06-02: was 3.0
       rsi_boost_threshold: 35.0
     stop_loss:
       type: fixed_pct
@@ -658,6 +669,7 @@ markets:
       - dual_momentum
       - rsi_divergence  # 2026-05-28: KR-only enable for diversification (#XX). US backtest never validated rsi_div on top of current US combo; keep off until tested.
       - gap_and_go      # 2026-06-01: KR-specific signal density strategy. US has PEAD for gap-drift already; gap_and_go untested on US universe.
+      - bnf_deviation   # 2026-06-02: KR-only mean-reversion (V4 loose params +2.3pp Ret). Untested on US universe; bnf-style 20-SMA deviation needs US-specific tuning.
     # P1-B (#55, 2026-05-14) Kelly fraction bump. compare_kelly_fraction.py
     # US 2y on Phase 2 + P1 baseline:
     #   V0_30  Ret +22.8% Sharpe +1.69 MDD -5.5% PF 1.63
