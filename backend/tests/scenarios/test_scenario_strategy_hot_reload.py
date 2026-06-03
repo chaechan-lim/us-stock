@@ -162,7 +162,9 @@ def test_profile_weights_change_on_reload(temp_config):
 
 def test_all_strategy_classes_registered():
     """Every strategy class in STRATEGY_CLASSES is importable."""
-    assert len(STRATEGY_CLASSES) == 17
+    # 2026-06-01..03: +gap_and_go +eod_momentum +sector_rs (17 → 20).
+    # All three yaml-disabled; pure infrastructure additions.
+    assert len(STRATEGY_CLASSES) == 20
     for name, cls in STRATEGY_CLASSES.items():
         assert hasattr(cls, "name")
         assert hasattr(cls, "analyze")

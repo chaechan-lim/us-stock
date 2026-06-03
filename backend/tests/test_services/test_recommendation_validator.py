@@ -68,14 +68,16 @@ class TestFloorCheck:
 
 @pytest.mark.asyncio
 async def test_validate_skips_unvalidatable_path(db_setup):
-    """Recommendations that point at non-backtest params record a skip
-    reason instead of running a backtest."""
+    """Recommendations that point at non-backtest AND non-replayable params
+    record a skip reason instead of running a backtest or replay."""
     async with db_setup() as session:
         rec = AgentRecommendation(
             agent_type="trade_review",
-            param_path="markets.KR.evaluation_loop.opening_avoidance_minutes",
-            current_value=30,
-            proposed_value=60,
+            # 2026-06-03: opening_avoidance_minutes is now replayable
+            # (Hermes C2). kelly_fraction is in neither map → genuine skip.
+            param_path="markets.KR.risk.kelly_fraction",
+            current_value=0.40,
+            proposed_value=0.60,
             status="pending",
         )
         session.add(rec)

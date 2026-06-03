@@ -282,8 +282,9 @@ class TestStrategyConfigLoaderMarketMethods:
         loader = StrategyConfigLoader()
         eval_cfg = loader.get_market_evaluation_loop_config("KR")
         assert isinstance(eval_cfg, dict)
-        # 2026-04-17: 0.40→0.30 (backtest V3/V4 slight improvement)
-        assert eval_cfg.get("min_confidence") == pytest.approx(0.30)
+        # 2026-04-17: 0.40→0.30; 2026-06-01: 0.30→0.20
+        # (compare_kr_levers V5 +2.6pp Ret, +0.14 Sharpe).
+        assert eval_cfg.get("min_confidence") == pytest.approx(0.20)
         assert eval_cfg.get("min_active_ratio") is None  # null in YAML = no override
         # 2026-05-29: 1 → 3 to break same-symbol churn (compare_kr_churn V2).
         assert eval_cfg.get("sell_cooldown_days") == 3
@@ -301,7 +302,10 @@ class TestStrategyConfigLoaderMarketMethods:
         us_disabled = loader.get_market_disabled_strategies("US")
         assert isinstance(us_disabled, list)
         # 2026-05-28: rsi_divergence KR-only enable → added to US disabled.
-        assert set(us_disabled) == {"dual_momentum", "rsi_divergence"}
+        # 2026-06-01..02: gap_and_go, bnf_deviation KR-only → added to US disabled.
+        assert set(us_disabled) == {
+            "dual_momentum", "rsi_divergence", "gap_and_go", "bnf_deviation",
+        }
         assert "trend_following" not in us_disabled
         assert "supertrend" not in us_disabled
         # P1-B/P1-C (2026-05-14): US risk overrides
@@ -739,8 +743,9 @@ class TestYAMLKRSection:
     def test_yaml_kr_eval_loop_values(self):
         loader = StrategyConfigLoader()
         ev = loader._config["markets"]["KR"]["evaluation_loop"]
-        # 2026-04-17: 0.40→0.30 (backtest V3/V4 slight improvement)
-        assert ev["min_confidence"] == pytest.approx(0.30)
+        # 2026-04-17: 0.40→0.30; 2026-06-01: 0.30→0.20
+        # (compare_kr_levers V5 +2.6pp Ret, +0.14 Sharpe).
+        assert ev["min_confidence"] == pytest.approx(0.20)
         # null in YAML → None in Python; means 'no override, use per-call defaults'
         assert ev["min_active_ratio"] is None
         # 2026-05-29: 1 → 3 to break same-symbol churn (compare_kr_churn V2).
