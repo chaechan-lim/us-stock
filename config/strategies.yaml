@@ -855,13 +855,12 @@ markets:
       enable_unpark: true # BUY 시그널 시 현금 부족하면 parking 매도
       buffer: 0.10
     risk:
-      # 2026-06-03: 0.40 → 0.60. compare_kr_position_size_new V4 on
-      # post-bnf-weight-0.20 baseline (KR 2y):
-      #   V0 (0.40):  Ret +18.5% Sharpe +0.97 MDD -11.0% PF 1.34 AvgAlloc ₩4.7M
-      #   V4 (0.60):  Ret +19.4% Sharpe +1.00 MDD -12.1% PF 1.34 AvgAlloc ₩5.0M ← ✓ 4/4
-      # V4+V1 combo (kelly 0.60 + min_pos 0.07): -3.1pp Ret oversizing conflict.
-      # min_pos / vol_scale / max_pos sweep all flat-to-negative on new baseline.
-      kelly_fraction: 0.60
+      # 2026-06-03: tried 0.40 → 0.60 (V4 alone +0.8pp Ret on bnf-w-0.20
+      # baseline) but combo with min_position_pct 0.07 (V1) regressed
+      # -3.1pp Ret due to oversizing conflict. Reverted to 0.40; using
+      # min_position_pct=0.07 instead to capture the bigger deploy lift
+      # (V1 alone: AvgAlloc +22%, Dep 68.9%→77.7%, Ret roughly flat).
+      kelly_fraction: 0.40
       max_position_pct: 0.20     # 2026-04-17: 10→20% — KR backtest V4: Sharpe 0.56→1.05
       # 2026-05-28 (#XX): 0.04 → 0.05 to deploy idle cash. Live 5-28 was
       # 78% cash after #168 (vol scaling fix). compare_kr_cash_deployment.py
