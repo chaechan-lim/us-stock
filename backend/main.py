@@ -2386,13 +2386,23 @@ async def lifespan(app: FastAPI):
     # generated high trade volume (+16 orders in 6 days) with minimal PnL
     # (+23k KRW total, many round-trips). KR dual_momentum alone is more
     # efficient. Re-enable after ETF allocation cap is implemented.
-    # scheduler.add_task(
-    #     "kr_etf_evaluation",
-    #     task_kr_etf_evaluation,
-    #     interval_sec=900,
-    #     phases=[MarketPhase.REGULAR],
-    #     market="KR",
-    # )
+    # 2026-06-03: RE-ENABLED. KR strategy combo expanded (4 active
+    # strategies post-bnf-weight-0.20) + risk caps in kr_etf_universe.yaml
+    # are now binding. compare_kr_etf_engine_full.py KR 2y on
+    # post-bnf-weight-0.20 baseline:
+    #   V0_no_etf:   Ret +18.5% Sharpe +0.97 MDD -11.0% PF 1.34 Dep 68.9%
+    #   V1-V5 +etf:  Ret +25.1% Sharpe +1.53 MDD -10.7% PF 1.44 Dep 82.5% ← ✓ 4/4
+    #               +6.6pp Ret, +0.56 Sharpe, MDD actually better (-0.3pp,
+    #               defensive regime-based ETF rotation hedges downturns).
+    # All five cap variants (10/5 to 50/25) returned identical metrics →
+    # the cap is no longer binding; ETF engine sizes itself per regime.
+    scheduler.add_task(
+        "kr_etf_evaluation",
+        task_kr_etf_evaluation,
+        interval_sec=900,
+        phases=[MarketPhase.REGULAR],
+        market="KR",
+    )
 
     # ── Extended Hours Tasks ─────────────────────────────────────────
     # SL/TP monitoring during pre-market/after-hours (US + KR)
