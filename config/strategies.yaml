@@ -117,7 +117,7 @@ profiles:
     supertrend: 0.10
     cis_momentum: 0.05
     larry_williams: 0.07
-    bnf_deviation: 0.05
+    bnf_deviation: 0.20   # 2026-06-03: 0.05 → 0.20 (KR mean-reversion alpha)
     volume_surge: 0.13
 
   uptrend:
@@ -131,7 +131,7 @@ profiles:
     macd_histogram: 0.05
     cis_momentum: 0.04
     larry_williams: 0.07
-    bnf_deviation: 0.05
+    bnf_deviation: 0.20   # 2026-06-03: 0.05 → 0.20
     volume_surge: 0.15
 
   sideways:
@@ -148,7 +148,7 @@ profiles:
     volume_profile: 0.08
     cis_momentum: 0.02
     larry_williams: 0.05
-    bnf_deviation: 0.05
+    bnf_deviation: 0.20   # 2026-06-03: 0.05 → 0.20 (compare_kr_bnf_weight V3 +7.3pp Ret)
     volume_surge: 0.10
 
   weak_downtrend:
