@@ -847,13 +847,27 @@ markets:
     # 현금을 먹어버려 개별주 매수 기회를 차단. ETF 5개 수동매도 후에도
     # 파킹이 즉시 재매수(069500 42주)하며 Max exposure 100%로 개별주 BUY reject.
     # KR 전략이 2개 이상 활성화되어 매수 빈도가 올라가면 재활성화 검토.
+    # 2026-06-03: RE-ENABLED. KR 활성 strategies now = supertrend + dual_momentum
+    # + rsi_divergence + bnf_deviation (weight 0.20) = 4 strategies generating
+    # signals. compare_kr_aggressive_deploy V_parking_only on post-bnf-w-0.20
+    # baseline (KR 2y):
+    #   V0_base:        Ret +18.5% Sharpe +0.97 MDD -11.0% PF 1.34 Dep 68.9%
+    #   V_parking_only: Ret +39.6% Sharpe +1.67 MDD -13.5% PF 1.46 Dep 80.1% ← ✓ 4/4
+    #                   +21.1pp Ret, +0.70 Sharpe, +11.2pp deploy.
+    # Idle cash now captures KOSPI beta via KODEX 200; individual stock
+    # alpha still flows through bnf/supertrend/dm/rsi_div. threshold 0.50
+    # (not 0.70) per backtest — earlier 0.70 left too much idle. min_hold
+    # 5d (not 10d) — bnf_deviation generates new entries faster than 10d
+    # cycle. max_pct 0.50 caps parking at half of KR allocation so
+    # individual stock signals always have headroom.
     cash_parking:
-      enabled: false
-      symbol: "069500"  # KODEX 200
-      threshold: 0.70   # 70% — backtest V3: PF 1.45 (best), 21 trades (lowest cost)
-      min_hold_days: 10  # 2주 최소 보유 (수수료 회수)
-      enable_unpark: true # BUY 시그널 시 현금 부족하면 parking 매도
+      enabled: true
+      symbol: "069500"          # KODEX 200
+      threshold: 0.50           # park when cash >= 50% of KR allocation
+      min_hold_days: 5
+      enable_unpark: true       # sell parking when individual BUY needs cash
       buffer: 0.10
+      max_pct: 0.50             # cap parking value at 50% of KR allocation
     risk:
       # 2026-06-03: tried 0.40 → 0.60 (V4 alone +0.8pp Ret on bnf-w-0.20
       # baseline) but combo with min_position_pct 0.07 (V1) regressed
@@ -872,16 +886,12 @@ markets:
       #   V4_limit_15:          Ret +12.2% Sharpe +0.64 MDD -11.9% PF 1.24 (limit not binding)
       # V1 4/4 vs V0, AvgAlloc +12%. cooldown reduction hurts KR (dual_momentum
       # repeats same-symbol signals → whipsaw). limit raise is no-op.
-      # 2026-06-03: 0.05 → 0.07. compare_kr_position_size_new V1 on post-
-      # bnf-weight-0.20 baseline:
-      #   V0 (0.05):  Ret +18.5% Sharpe +0.97 MDD -11.0% PF 1.34 AvgAlloc ₩4.70M Dep 68.9%
-      #   V1 (0.07):  Ret +18.7% Sharpe +0.85 MDD -14.6% PF 1.28 AvgAlloc ₩5.75M Dep 77.7%
-      # Returns essentially identical (+0.1pp). Real lift is AvgAlloc +22%
-      # and average daily deployment 68.9% → 77.7% (+8.8pp). Trades down
-      # slightly (535 → 510). Sharpe drops 0.97 → 0.85 (still positive);
-      # MDD widens -11→-14.6% (still inside KR floor < 15%). User-priority
-      # axis is "deploy more cash", and this is the lever that moves it.
-      min_position_pct: 0.07
+      # 2026-06-03: briefly 0.05 → 0.07 (V1 +8.8pp deploy) but cash_parking
+      # re-enable (below) is the much bigger win and works best with 0.05.
+      # compare_kr_aggressive_deploy V_V1_parking (0.07+park) = +37.2% Ret
+      # vs V_parking_only (0.05+park) = +39.6% Ret — 0.07 floor consumes
+      # cash that parking would otherwise productively deploy.
+      min_position_pct: 0.05
       # 2026-05-04: 12 → 18. Live observation: 12 KR BUY signals rejected
       # the morning of 2026-05-04 ("Max positions reached") with cap full
       # of 1-share placeholder positions. compare_position_sizing.py VG
