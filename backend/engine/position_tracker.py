@@ -15,7 +15,7 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Callable
 
 from data.market_data_service import MarketDataService
@@ -41,7 +41,13 @@ class TrackedPosition:
     take_profit_pct: float | None = None
     trailing_activation_pct: float = 0.0
     trailing_stop_pct: float = 0.0
+    # tracked_at: monotonic clock for within-process age comparisons
+    # (check_all, sentiment min-hold). Resets on process restart.
     tracked_at: float = field(default_factory=time.monotonic)
+    # entry_unix: wall-clock UNIX epoch of first BUY for this position.
+    # Survives process restart via PositionRecord.opened_at and is the
+    # source of truth for the anti-churn min_hold gate.
+    entry_unix: float = field(default_factory=time.time)
     partial_profit_taken: bool = False  # True after partial profit sell executed
 
 
@@ -114,6 +120,7 @@ class PositionTracker:
         trailing_stop_pct: float | None = None,
         highest_price: float | None = None,  # STOCK-58: Restore from DB
         partial_profit_taken: bool = False,  # STOCK-58: Restore from DB
+        entry_unix: float | None = None,  # Wall-clock entry; restore_from_db passes opened_at
     ) -> None:
         """Start tracking a position.
 
@@ -125,6 +132,9 @@ class PositionTracker:
             highest_price: Restore from DB — highest price reached (for trailing stop).
                 Defaults to entry_price if not provided.
             partial_profit_taken: Restore from DB — whether partial profit was taken.
+            entry_unix: Wall-clock UNIX timestamp of original BUY. When restoring
+                from DB this should be PositionRecord.opened_at so the min_hold
+                gate sees the true elapsed time, not the process restart time.
         """
         # Apply trailing stop defaults from risk params when not specified
         trail_act = trailing_activation_pct
@@ -134,7 +144,7 @@ class PositionTracker:
         if trail_pct is None:
             trail_pct = self._risk.params.default_trailing_stop_pct
 
-        self._tracked[symbol] = TrackedPosition(
+        pos = TrackedPosition(
             symbol=symbol,
             entry_price=entry_price,
             quantity=quantity,
@@ -146,6 +156,9 @@ class PositionTracker:
             trailing_stop_pct=trail_pct,
             partial_profit_taken=partial_profit_taken,
         )
+        if entry_unix is not None:
+            pos.entry_unix = float(entry_unix)
+        self._tracked[symbol] = pos
         logger.info(
             "Tracking position: %s %d @ $%.2f (SL=%.1f%% TP=%.1f%% trail=%.1f%%/%.1f%%)",
             symbol,
@@ -1060,6 +1073,16 @@ class PositionTracker:
             if record.symbol in self._tracked:
                 continue
 
+            # opened_at is stored naive in UTC (datetime.utcnow). Convert to
+            # epoch by attaching UTC so the min_hold gate sees the original
+            # BUY time even after process restart.
+            opened_unix: float | None = None
+            if record.opened_at is not None:
+                opened_at = record.opened_at
+                if opened_at.tzinfo is None:
+                    opened_at = opened_at.replace(tzinfo=timezone.utc)
+                opened_unix = opened_at.timestamp()
+
             self.track(
                 symbol=record.symbol,
                 entry_price=record.avg_price,
@@ -1069,6 +1092,7 @@ class PositionTracker:
                 take_profit_pct=record.take_profit,
                 highest_price=record.highest_price,  # STOCK-58: Restore highest price
                 partial_profit_taken=record.partial_profit_taken or False,  # STOCK-58: Restore partial profit flag
+                entry_unix=opened_unix,
             )
 
             pnl_pct = 0.0

@@ -1712,6 +1712,49 @@ class TestRestoreFromDb:
         assert len(restored) == 1
         assert restored[0]["source"] == "db"
 
+    @pytest.mark.asyncio
+    async def test_restore_from_db_populates_entry_unix(
+        self, adapter, risk, order_mgr, db_factory
+    ):
+        """entry_unix must be restored from PositionRecord.opened_at.
+
+        2026-06-04 regression: monotonic tracked_at resets on every process
+        restart, which made the min_hold gate think every position was
+        freshly opened. The wall-clock entry_unix derived from opened_at
+        is the source of truth that survives restart.
+        """
+        import time as _t
+        from datetime import datetime, timedelta, timezone
+
+        from core.models import PositionRecord
+
+        opened = datetime.utcnow() - timedelta(days=5)
+        async with db_factory() as session:
+            session.add(
+                PositionRecord(
+                    market="US",
+                    symbol="OLD",
+                    exchange="NASD",
+                    quantity=10,
+                    avg_price=150.0,
+                    strategy_name="trend",
+                    opened_at=opened,
+                )
+            )
+            await session.commit()
+
+        tracker = _make_tracker(adapter, risk, order_mgr)
+        restored = await tracker.restore_from_db(db_factory)
+        assert len(restored) == 1
+
+        tracked = tracker._tracked["OLD"]
+        expected = opened.replace(tzinfo=timezone.utc).timestamp()
+        # Allow small float jitter from timestamp() round-trip.
+        assert abs(tracked.entry_unix - expected) < 1.0
+        # And the wall-clock elapsed since entry_unix should be ~5 days.
+        elapsed = _t.time() - tracked.entry_unix
+        assert 4.9 * 86400 < elapsed < 5.1 * 86400
+
 
 # ── Auto-Recovery in check_all (STOCK-7) ────────────────────────────
 

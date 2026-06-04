@@ -1256,7 +1256,12 @@ class EvaluationLoop:
                             and pnl_pct < st_thr
                         ):
                             tracked = self._position_tracker._tracked[symbol]
-                            hold_secs = time.monotonic() - tracked.tracked_at
+                            # Wall-clock preferred — survives process restart.
+                            _eu = getattr(tracked, "entry_unix", None)
+                            if isinstance(_eu, (int, float)) and _eu > 0:
+                                hold_secs = time.time() - float(_eu)
+                            else:
+                                hold_secs = time.monotonic() - tracked.tracked_at
                             time_trigger = hold_secs >= st_days * 86400
 
                         if loss_trigger or time_trigger:
@@ -1613,21 +1618,48 @@ class EvaluationLoop:
 
         STOCK-47: Prevents whipsaw by enforcing a minimum holding period
         before non-emergency sells. Hard stop-loss bypasses this check.
+
+        2026-06-04: Fail-closed on missing tracker entry. Previously
+        returned True (allow sell) for untracked symbols, which silently
+        bypassed the anti-churn gate whenever a position lived in KIS
+        balance but not in `_tracked` (race, restart edge case, etc.).
+        Live KR session showed 9 round-trips that day in <55 minutes
+        despite yaml min_hold_days=3.
+
+        Source of truth is wall-clock `entry_unix` so the gate survives
+        process restarts (restored from PositionRecord.opened_at by
+        restore_from_db). Falls back to monotonic tracked_at when
+        entry_unix is missing (e.g. mocked test fixtures).
         """
         if self._min_hold_secs <= 0:
             return True
         if not self._position_tracker:
             return True
         tracked_dict = getattr(self._position_tracker, "_tracked", None)
-        if not tracked_dict:
-            return True
-        tracked = tracked_dict.get(symbol)
-        if not tracked:
-            return True
-        try:
-            hold_secs = time.monotonic() - float(tracked.tracked_at)
-        except (TypeError, ValueError):
-            return True  # Can't determine hold time — allow sell
+        if not tracked_dict or symbol not in tracked_dict:
+            logger.warning(
+                "Min hold check: %s not in %s tracker — blocking SELL "
+                "(fail-closed; investigate why position is untracked).",
+                symbol, self._market,
+            )
+            return False
+        tracked = tracked_dict[symbol]
+
+        # Prefer wall-clock — survives process restart via DB opened_at.
+        entry_unix = getattr(tracked, "entry_unix", None)
+        if isinstance(entry_unix, (int, float)) and entry_unix > 0:
+            hold_secs = time.time() - float(entry_unix)
+        else:
+            # Legacy / mocked: fall back to monotonic tracked_at.
+            try:
+                hold_secs = time.monotonic() - float(tracked.tracked_at)
+            except (TypeError, ValueError):
+                logger.warning(
+                    "Min hold check: %s has no usable timestamp — blocking SELL.",
+                    symbol,
+                )
+                return False
+
         if hold_secs < self._min_hold_secs:
             logger.info(
                 "Min hold not met for %s: held %.1fh < %.1fh required",
@@ -2419,7 +2451,12 @@ class EvaluationLoop:
                 if tracked.entry_price > 0
                 else 0.0
             )
-            hold_secs = time.monotonic() - tracked.tracked_at
+            # Wall-clock preferred — survives process restart.
+            _eu = getattr(tracked, "entry_unix", None)
+            if isinstance(_eu, (int, float)) and _eu > 0:
+                hold_secs = time.time() - float(_eu)
+            else:
+                hold_secs = time.monotonic() - tracked.tracked_at
             return PositionContext(
                 symbol=symbol,
                 entry_price=tracked.entry_price,

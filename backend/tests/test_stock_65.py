@@ -289,7 +289,8 @@ class TestStrategyConfigLoaderMarketMethods:
         # 2026-05-29: 1 → 3 to break same-symbol churn (compare_kr_churn V2).
         assert eval_cfg.get("sell_cooldown_days") == 3
         assert eval_cfg.get("whipsaw_max_losses") == 2
-        assert eval_cfg.get("min_hold_days") == 1
+        # 2026-06-04: 1 → 3 anti-churn (compare_kr_min_hold V2 +16.9pp Ret).
+        assert eval_cfg.get("min_hold_days") == 3
 
     def test_get_market_config_us(self):
         """2026-04-23 Option A: US keeps trend_following + supertrend.
@@ -751,7 +752,8 @@ class TestYAMLKRSection:
         # 2026-05-29: 1 → 3 to break same-symbol churn (compare_kr_churn V2).
         assert ev["sell_cooldown_days"] == 3
         assert ev["whipsaw_max_losses"] == 2
-        assert ev["min_hold_days"] == 1
+        # 2026-06-04: 1 → 3 anti-churn (compare_kr_min_hold V2 +16.9pp Ret).
+        assert ev["min_hold_days"] == 3
 
 
 # ---------------------------------------------------------------------------
