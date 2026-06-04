@@ -218,18 +218,44 @@ class PortfolioManager:
             if self._market == "KR"
             else CASH_FLOW_STRONG_ABS_THRESHOLD_US
         )
+        # P1-F.3 (2026-06-04): suppress cash-flow detection during this
+        # market's REGULAR session. Live observed false positive:
+        # 6/4 01:32 UTC (= 10:32 KST, KR market active) detected
+        # ₩+5.03M "deposit" that was actually a transient KIS CTRP6548R
+        # accounting hiccup (integrated total briefly recomputed after
+        # an ETF buy + sell round-trip). True deposits land in 입출금
+        # outside trading hours; intraday CTRP swings are normally just
+        # evaluation timing. Only the strong rule (≥30% rel) still fires
+        # during sessions — a real intraday flow of that magnitude would
+        # be impossible to miss anyway.
+        try:
+            from engine.scheduler import (
+                MarketPhase, get_kr_market_phase, get_market_phase,
+            )
+            phase = (
+                get_kr_market_phase() if self._market == "KR"
+                else get_market_phase()
+            )
+            in_session = phase == MarketPhase.REGULAR
+        except Exception:
+            in_session = False
         if prev is not None and prev.total_value_usd > 0:
+            # Raise thresholds dramatically during session to make only
+            # genuine 30%+ swings count.
+            session_abs = abs_thr * 100 if in_session else abs_thr
+            session_rel = 1.0 if in_session else CASH_FLOW_REL_THRESHOLD
             cash_flow = detect_cash_flow(
                 prev_total=prev.total_value_usd,
                 new_total=total_equity,
-                rel_threshold=CASH_FLOW_REL_THRESHOLD,
-                abs_threshold=abs_thr,
+                rel_threshold=session_rel,
+                abs_threshold=session_abs,
                 strong_abs_threshold=strong_abs_thr,
             )
             if cash_flow != 0.0:
                 action = "deposit" if cash_flow > 0 else "withdrawal"
                 logger.info(
-                    "[%s] Cash flow detected: %.2f (%s)", self._market, cash_flow, action
+                    "[%s] Cash flow detected: %.2f (%s) (in_session=%s)",
+                    self._market, cash_flow, action, in_session,
                 )
 
         # STOCK-58: Capture exchange rate at snapshot time for accurate historical conversions.
