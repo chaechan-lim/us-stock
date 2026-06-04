@@ -377,11 +377,32 @@ class KISKRAdapter(ExchangeAdapter):
         # Use scts_evlu_amt (domestic stock evaluation only) instead.
         stock_eval = float(output2.get("scts_evlu_amt", 0))   # 유가증권평가금액 (domestic only)
         # Store tot_evlu_amt for combined total equity calculation (includes overseas in 통합증거금)
-        self._tot_evlu_amt = float(output2.get("tot_evlu_amt", 0))
+        tot_evlu_new = float(output2.get("tot_evlu_amt", 0))
         invested = float(output2.get("pchs_amt_smtl_amt", 0)) # 매입금액합계
         deposit = float(output2.get("dnca_tot_amt", 0))       # 예수금총금액
-        self._scts_evlu_amt = stock_eval
-        self._dnca_tot_amt = deposit
+        # 2026-06-04: Don't overwrite cached values with zero when API rate-
+        # limit returns an empty output2 (race with concurrent calls). Only
+        # update when we actually got non-zero data, OR when the response
+        # explicitly says holdings = 0 (deposit > 0 but stock_eval missing
+        # while having no positions). Heuristic: if BOTH deposit and
+        # stock_eval are 0 AND tot_evlu is 0, this is almost certainly an
+        # empty/throttled response → keep stale.
+        api_empty = (
+            stock_eval == 0 and deposit == 0 and tot_evlu_new == 0
+        )
+        if not api_empty:
+            self._scts_evlu_amt = stock_eval
+            self._tot_evlu_amt = tot_evlu_new
+            self._dnca_tot_amt = deposit
+        else:
+            logger.warning(
+                "KR balance API returned empty output2; keeping cached "
+                "_scts_evlu_amt=%.0f _tot_evlu_amt=%.0f _dnca_tot_amt=%.0f",
+                self._scts_evlu_amt, self._tot_evlu_amt, self._dnca_tot_amt,
+            )
+            # Use cached values for the rest of this call
+            stock_eval = self._scts_evlu_amt
+            deposit = self._dnca_tot_amt
 
         # Get actual orderable amount via 주문가능조회
         # dnca_tot_amt includes unsettled US stock buys — not actual buying power
