@@ -83,6 +83,11 @@ class PositionTracker:
         self._exchange_resolver = exchange_resolver
         self._account_id = account_id
         self._tracked: dict[str, TrackedPosition] = {}
+        # STATE-B3 (2026-06-05): symbols explicitly removed via untrack().
+        # sync_to_db consumes this set so the prune step distinguishes
+        # "operator/loop signalled removal" from "tracker happens to be
+        # empty because restore hasn't finished".
+        self._pending_removals: set[str] = set()
         # Commission rate per order (one-way). Exits with gain < 2× this
         # (round-trip cost) are suppressed — selling at +0.3% with 0.25%
         # commission each way = net loss. Added 2026-04-13 after the system
@@ -173,9 +178,106 @@ class PositionTracker:
         )
         self._schedule_db_upsert(symbol)
 
+    def add_on(
+        self,
+        symbol: str,
+        add_price: float,
+        add_quantity: int,
+        strategy: str = "",
+        stop_loss_pct: float | None = None,
+        take_profit_pct: float | None = None,
+        trailing_activation_pct: float | None = None,
+        trailing_stop_pct: float | None = None,
+    ) -> None:
+        """Record an add-on BUY for an existing position with blended cost basis.
+
+        2026-06-05 (FIN-B1 fix): live KR sizing-up was calling track()
+        on add-on BUYs, which overwrote entry_price / quantity /
+        highest_price with the add-on lot's values only. Every add-on
+        therefore destroyed the original cost basis:
+          - PnL on the next exit was wrong by (old_entry - add_price)
+          - SL anchored to the higher (add-on) entry fired prematurely
+          - quantity was just the add-on, so the next full SELL only
+            sold the add-on lot, leaving the original position behind
+
+        Blended math:
+          new_entry = (old_qty * old_entry + add_qty * add_price) / new_qty
+          new_qty   = old_qty + add_qty
+          highest   = max(old_highest, add_price)
+
+        Preserved across the add-on (sizing-up is averaging into the
+        SAME position, not opening a new one):
+          - entry_unix (the original min_hold clock)
+          - partial_profit_taken (the original lot's profit history)
+          - tracked_at (monotonic age within this process)
+        """
+        existing = self._tracked.get(symbol)
+        if existing is None:
+            # Safest fallback: promote to fresh track but log a warning
+            # because the caller almost certainly meant to add to an
+            # existing entry.
+            logger.warning(
+                "add_on called for untracked %s — promoting to fresh track()",
+                symbol,
+            )
+            self.track(
+                symbol=symbol,
+                entry_price=add_price,
+                quantity=add_quantity,
+                strategy=strategy,
+                stop_loss_pct=stop_loss_pct,
+                take_profit_pct=take_profit_pct,
+                trailing_activation_pct=trailing_activation_pct,
+                trailing_stop_pct=trailing_stop_pct,
+            )
+            return
+
+        new_qty = existing.quantity + add_quantity
+        if new_qty <= 0 or add_quantity <= 0:
+            logger.warning(
+                "add_on %s: invalid quantity (existing=%d add=%d) — ignoring",
+                symbol, existing.quantity, add_quantity,
+            )
+            return
+
+        blended_entry = (
+            (existing.entry_price * existing.quantity)
+            + (add_price * add_quantity)
+        ) / new_qty
+        existing.entry_price = blended_entry
+        existing.quantity = new_qty
+        existing.highest_price = max(existing.highest_price, add_price)
+
+        # Optional overrides — only apply when the caller passed an explicit
+        # value (a new strategy might be driving the add-on with different
+        # SL/TP than the original entry). Default None means "keep existing".
+        if strategy:
+            existing.strategy = strategy
+        if stop_loss_pct is not None:
+            existing.stop_loss_pct = stop_loss_pct
+        if take_profit_pct is not None:
+            existing.take_profit_pct = take_profit_pct
+        if trailing_activation_pct is not None:
+            existing.trailing_activation_pct = trailing_activation_pct
+        if trailing_stop_pct is not None:
+            existing.trailing_stop_pct = trailing_stop_pct
+
+        logger.info(
+            "Add-on %s: +%d @ $%.2f → qty=%d blended_entry=$%.4f highest=$%.2f",
+            symbol, add_quantity, add_price, new_qty, blended_entry,
+            existing.highest_price,
+        )
+        self._schedule_db_upsert(symbol)
+
     def untrack(self, symbol: str) -> None:
-        """Stop tracking a position."""
+        """Stop tracking a position.
+
+        STATE-B3 (2026-06-05): records the symbol in `_pending_removals`
+        so the next `sync_to_db` knows this was an explicit removal vs
+        the "tracker is empty because restore hasn't finished" pattern.
+        """
         self._tracked.pop(symbol, None)
+        self._pending_removals.add(symbol)
         self._schedule_db_remove(symbol)
 
     async def _finalize_sell(
@@ -1317,10 +1419,29 @@ class PositionTracker:
 
             from core.models import PositionRecord
 
+            # STATE-B3 (2026-06-05): take an atomic snapshot of pending
+            # removals at the start of the sync, then clear. Any
+            # untrack() called during this awaited block gets
+            # registered against the NEXT sync, not lost.
+            pending_remove = set(self._pending_removals)
+            self._pending_removals.clear()
+
             async with sf() as session:
                 tracked_symbols = set(self._tracked.keys())
 
-                # Remove DB rows for positions no longer tracked in this account+market
+                # Remove DB rows for positions no longer tracked.
+                #
+                # Three deletion paths, from most-trusted to most-cautious:
+                #   1. The symbol is in `pending_remove` — untrack() was
+                #      called explicitly. Safe to delete.
+                #   2. The tracker has SOME entries but is missing this
+                #      symbol AND the broker also says we don't hold it.
+                #      Reconciles the case where an external SELL
+                #      happened without our untrack() flow firing.
+                #   3. Otherwise — tracker is wholly empty (restart
+                #      race) or KIS still reports the symbol as held
+                #      — preserve the DB row.
+                exchange_held: set[str] = set(price_map.keys())  # populated above
                 stmt = select(PositionRecord).where(
                     PositionRecord.account_id == self._account_id,
                     PositionRecord.market == self._market,
@@ -1328,9 +1449,40 @@ class PositionTracker:
                 result = await session.execute(stmt)
                 db_positions = result.scalars().all()
 
+                tracker_wholly_empty = (
+                    not tracked_symbols and bool(db_positions)
+                )
+                if tracker_wholly_empty and not pending_remove:
+                    logger.warning(
+                        "sync_to_db: %s tracker empty + no explicit "
+                        "removals + DB has %d rows — skipping prune "
+                        "(restart-race protection)",
+                        self._market, len(db_positions),
+                    )
+
                 for db_pos in db_positions:
-                    if db_pos.symbol not in tracked_symbols:
+                    if db_pos.symbol in tracked_symbols:
+                        continue
+                    # Path 1: explicit untrack() — always delete.
+                    if db_pos.symbol in pending_remove:
                         await session.delete(db_pos)
+                        continue
+                    # Path 3a: wholly-empty tracker without explicit
+                    # signal = restart race; preserve.
+                    if tracker_wholly_empty:
+                        continue
+                    # Path 3b: KIS still reports it held; preserve and
+                    # trust the broker.
+                    if db_pos.symbol in exchange_held:
+                        logger.warning(
+                            "sync_to_db: %s held on exchange but missing "
+                            "from tracker — preserving DB row %s",
+                            self._market, db_pos.symbol,
+                        )
+                        continue
+                    # Path 2: tracker has other entries, missing this
+                    # one AND KIS confirms gone → safe to delete.
+                    await session.delete(db_pos)
 
                 # Upsert all currently tracked positions with current prices
                 for symbol, tracked in self._tracked.items():

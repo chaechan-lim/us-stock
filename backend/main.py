@@ -1069,6 +1069,32 @@ async def lifespan(app: FastAPI):
                     kis_order_id=s["order_id"],
                     status="cancelled",
                 )
+                # STATE-B2 (2026-06-05): stale-cancelled BUYs leave
+                # phantom rows in position_tracker._tracked + positions
+                # DB because evaluation_loop.track() fires at order
+                # placement, not at fill. The next BUY signal sees
+                # "already held" and skips. Clean them up here — but
+                # only if the exchange confirms we don't actually hold
+                # the symbol (otherwise we'd untrack a real position
+                # whose initial BUY merely sat in pending status).
+                if s["side"] == "BUY":
+                    sym = s["symbol"]
+                    try:
+                        live_positions = await market_data.get_positions()
+                        live_symbols = {
+                            p.symbol for p in live_positions if p.quantity > 0
+                        }
+                        if sym not in live_symbols:
+                            position_tracker.untrack(sym)
+                            logger.info(
+                                "Stale BUY %s untracked (no live position)", sym,
+                            )
+                    except Exception as e:
+                        logger.warning(
+                            "Stale BUY cleanup failed for %s: %s — leaving "
+                            "tracker entry in place to avoid wrongful untrack",
+                            sym, e,
+                        )
             if notification:
                 symbols = ", ".join(f"{s['side']} {s['symbol']}" for s in stale)
                 await notification.notify_system_event(
@@ -2219,6 +2245,25 @@ async def lifespan(app: FastAPI):
                     kis_order_id=s["order_id"],
                     status="cancelled",
                 )
+                # STATE-B2 (2026-06-05): mirror US side — untrack
+                # stale BUYs only when KIS confirms we don't hold them.
+                if s["side"] == "BUY":
+                    sym = s["symbol"]
+                    try:
+                        live_positions = await kr_market_data.get_positions()
+                        live_symbols = {
+                            p.symbol for p in live_positions if p.quantity > 0
+                        }
+                        if sym not in live_symbols:
+                            kr_position_tracker.untrack(sym)
+                            logger.info(
+                                "KR stale BUY %s untracked (no live position)", sym,
+                            )
+                    except Exception as e:
+                        logger.warning(
+                            "KR stale BUY cleanup failed for %s: %s — leaving "
+                            "tracker entry in place", sym, e,
+                        )
             if notification:
                 symbols = ", ".join(f"{s['side']} {s['symbol']}" for s in stale)
                 await notification.notify_system_event(

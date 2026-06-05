@@ -183,16 +183,40 @@ class TestSyncToDb:
         assert record.stop_loss == 0.12
 
     @pytest.mark.asyncio
-    async def test_sync_empty_clears_all(self, adapter, risk, order_mgr, db_factory):
-        """sync_to_db with empty tracked dict should clear all DB positions."""
+    async def test_sync_explicit_untrack_removes_row(self, adapter, risk, order_mgr, db_factory):
+        """STATE-B3 (2026-06-05): explicit untrack() is the safe way to
+        remove a position from the DB. Wiping `_tracked` and re-running
+        sync no longer mass-deletes — that turned out to be the
+        catastrophic restart-race vector. Callers must signal removal
+        explicitly through untrack().
+        """
         tracker = _make_tracker(adapter, risk, order_mgr)
         tracker.track("AAPL", 150.0, 10)
         await tracker.sync_to_db(db_factory)
         assert await _count_positions(db_factory, "US") == 1
 
-        tracker._tracked.clear()
+        tracker.untrack("AAPL")
         await tracker.sync_to_db(db_factory)
         assert await _count_positions(db_factory, "US") == 0
+
+    @pytest.mark.asyncio
+    async def test_sync_preserves_db_when_tracker_wholly_empty(
+        self, adapter, risk, order_mgr, db_factory,
+    ):
+        """STATE-B3 regression: tracker emptied without explicit
+        untrack() = "haven't restored yet" pattern. DB rows must be
+        preserved so a restart race doesn't lose state."""
+        tracker = _make_tracker(adapter, risk, order_mgr)
+        tracker.track("AAPL", 150.0, 10)
+        tracker.track("MSFT", 300.0, 5)
+        await tracker.sync_to_db(db_factory)
+        assert await _count_positions(db_factory, "US") == 2
+
+        # Simulate the restart-race: tracker forgets without untrack.
+        tracker._tracked.clear()
+        await tracker.sync_to_db(db_factory)
+        # Both rows must survive.
+        assert await _count_positions(db_factory, "US") == 2
 
     @pytest.mark.asyncio
     async def test_sync_returns_zero_without_session_factory(self, adapter, risk, order_mgr):
@@ -340,7 +364,8 @@ class TestDualMarketIsolation:
 
     @pytest.mark.asyncio
     async def test_sync_only_removes_own_market(self, adapter, risk, order_mgr, db_factory):
-        """sync_to_db for US should not remove KR positions."""
+        """sync_to_db for US must not remove KR positions when an
+        explicit untrack() drives the deletion."""
         us_tracker = _make_tracker(adapter, risk, order_mgr, market="US")
         kr_tracker = _make_tracker(adapter, risk, order_mgr, market="KR")
 
@@ -349,11 +374,11 @@ class TestDualMarketIsolation:
         await us_tracker.sync_to_db(db_factory)
         await kr_tracker.sync_to_db(db_factory)
 
-        # Clear US tracker and sync
-        us_tracker._tracked.clear()
+        # Explicit untrack on US side (post-STATE-B3 semantics).
+        us_tracker.untrack("AAPL")
         await us_tracker.sync_to_db(db_factory)
 
-        # KR should still be there
+        # KR market should be untouched.
         assert await _count_positions(db_factory, "US") == 0
         assert await _count_positions(db_factory, "KR") == 1
 
@@ -1852,6 +1877,112 @@ class TestRestoreFromDb:
                 session, "DUAL", allow_fallback=True,
             )
         assert abs((ts - live_time).total_seconds()) < 1.0
+
+    @pytest.mark.asyncio
+    async def test_add_on_blends_cost_basis(
+        self, risk, order_mgr, db_factory
+    ):
+        """FIN-B1 (2026-06-05): KR sizing-up add-on BUYs were calling
+        track() and wiping entry_price/quantity/highest_price. add_on()
+        must blend the cost basis correctly so PnL math and SL anchor
+        survive sizing-up events.
+        """
+        import time as _t
+
+        adapter = AsyncMock()
+        tracker = _make_tracker(adapter, risk, order_mgr)
+
+        # Original entry — 10 shares at $40
+        tracker.track("KO", entry_price=40.0, quantity=10, strategy="trend")
+        orig_unix = tracker._tracked["KO"].entry_unix
+        tracker._tracked["KO"].highest_price = 55.0  # peak before add-on
+        tracker._tracked["KO"].partial_profit_taken = True  # earlier scale-out
+
+        # Sizing-up: +5 shares at $52
+        tracker.add_on("KO", add_price=52.0, add_quantity=5)
+
+        pos = tracker._tracked["KO"]
+        # Blended entry: (10*40 + 5*52) / 15 = 44.0
+        assert abs(pos.entry_price - 44.0) < 1e-6
+        assert pos.quantity == 15
+        # Highest price: max(55, 52) = 55 (preserved)
+        assert pos.highest_price == 55.0
+        # Original cooldown clock preserved
+        assert pos.entry_unix == orig_unix
+        # Original partial-profit history preserved
+        assert pos.partial_profit_taken is True
+
+    @pytest.mark.asyncio
+    async def test_add_on_updates_highest_when_addon_is_higher(
+        self, risk, order_mgr, db_factory
+    ):
+        adapter = AsyncMock()
+        tracker = _make_tracker(adapter, risk, order_mgr)
+        tracker.track("MS", entry_price=100.0, quantity=10)
+        # highest_price defaults to entry_price = 100
+        tracker.add_on("MS", add_price=120.0, add_quantity=5)
+        assert tracker._tracked["MS"].highest_price == 120.0
+
+    @pytest.mark.asyncio
+    async def test_add_on_untracked_falls_back_to_track(
+        self, risk, order_mgr, db_factory
+    ):
+        """Defensive: caller bug shouldn't lose the position."""
+        adapter = AsyncMock()
+        tracker = _make_tracker(adapter, risk, order_mgr)
+        tracker.add_on("NEW", add_price=100.0, add_quantity=10)
+        assert "NEW" in tracker._tracked
+        assert tracker._tracked["NEW"].entry_price == 100.0
+        assert tracker._tracked["NEW"].quantity == 10
+
+    @pytest.mark.asyncio
+    async def test_add_on_rejects_invalid_quantity(
+        self, risk, order_mgr, db_factory
+    ):
+        adapter = AsyncMock()
+        tracker = _make_tracker(adapter, risk, order_mgr)
+        tracker.track("X", entry_price=50.0, quantity=10)
+        tracker.add_on("X", add_price=60.0, add_quantity=0)
+        # Quantity unchanged
+        assert tracker._tracked["X"].quantity == 10
+        assert tracker._tracked["X"].entry_price == 50.0
+
+    @pytest.mark.asyncio
+    async def test_sync_to_db_does_not_wipe_when_tracker_empty(
+        self, adapter, risk, order_mgr, db_factory
+    ):
+        """STATE-B3 (2026-06-05): a thin/empty tracker (mid-recovery,
+        race after restart) used to mass-delete every PositionRecord
+        row for the account+market. Now sync_to_db detects the
+        "tracker hasn't loaded yet" pattern and skips the prune."""
+        from core.models import PositionRecord
+
+        # Seed DB with real rows.
+        async with db_factory() as session:
+            for sym in ("AAPL", "MSFT"):
+                session.add(
+                    PositionRecord(
+                        market="US",
+                        symbol=sym,
+                        exchange="NASD",
+                        quantity=10,
+                        avg_price=100.0,
+                        strategy_name="trend",
+                    )
+                )
+            await session.commit()
+
+        # Fresh tracker with empty _tracked simulating "haven't restored yet"
+        tracker = _make_tracker(adapter, risk, order_mgr)
+        assert not tracker._tracked
+
+        synced = await tracker.sync_to_db(db_factory)
+        assert synced == 0  # nothing to sync
+
+        async with db_factory() as session:
+            rows = (await session.execute(select(PositionRecord))).scalars().all()
+        # CRITICAL: real rows preserved.
+        assert {r.symbol for r in rows} == {"AAPL", "MSFT"}
 
     @pytest.mark.asyncio
     async def test_ensure_tracked_fills_individual_gap(

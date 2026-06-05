@@ -2383,16 +2383,37 @@ class EvaluationLoop:
                     trail_act = trail_cfg.get("activation_pct")
                     trail_pct = trail_cfg.get("trail_pct")
 
-                self._position_tracker.track(
-                    symbol=symbol,
-                    entry_price=price,
-                    quantity=order.quantity,
-                    strategy=strategy_name,
-                    stop_loss_pct=sl_pct,
-                    take_profit_pct=tp_pct,
-                    trailing_activation_pct=trail_act,
-                    trailing_stop_pct=trail_pct,
-                )
+                # 2026-06-05 (FIN-B1): sizing-up add-on BUYs must blend
+                # the cost basis with the existing lot. Calling track()
+                # for an already-tracked symbol used to overwrite
+                # entry_price / quantity / highest_price — every KR
+                # sizing-up event from 2026-05-22 onward corrupted PnL
+                # math and made SL fire on the wrong anchor. Now we
+                # route to add_on(), which preserves the original
+                # entry_unix (min_hold clock) and partial_profit_taken
+                # while blending entry_price.
+                if symbol in self._position_tracker.tracked_symbols:
+                    self._position_tracker.add_on(
+                        symbol=symbol,
+                        add_price=price,
+                        add_quantity=order.quantity,
+                        strategy=strategy_name,
+                        stop_loss_pct=sl_pct,
+                        take_profit_pct=tp_pct,
+                        trailing_activation_pct=trail_act,
+                        trailing_stop_pct=trail_pct,
+                    )
+                else:
+                    self._position_tracker.track(
+                        symbol=symbol,
+                        entry_price=price,
+                        quantity=order.quantity,
+                        strategy=strategy_name,
+                        stop_loss_pct=sl_pct,
+                        take_profit_pct=tp_pct,
+                        trailing_activation_pct=trail_act,
+                        trailing_stop_pct=trail_pct,
+                    )
 
         elif signal.signal_type == SignalType.SELL:
             # 2026-04-18: Smart sell escalation. If a pending limit SELL
