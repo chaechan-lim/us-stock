@@ -593,21 +593,31 @@ async def _validate_and_promote(ids: list[int]) -> tuple[list[int], list[int]]:
     rejected: list[int] = []
 
     for rid in ids:
+        validator_failed = False
         try:
             await validate_recommendation(rid, f)
         except Exception as e:
+            validator_failed = True
             logger.warning("validate_recommendation #%d failed: %s", rid, e)
-            # On validator error, fail-safe to operator-facing pending so
-            # the rec is still triageable (with empty backtest_result so
-            # the revalidate scheduler will retry it later).
         async with f() as session:
             rec = await session.get(AgentRecommendation, rid)
             if not rec or rec.status != "pending_validation":
+                # Operator already accepted/rejected, or the row was
+                # deleted — don't fight the user's decision.
                 continue
             result = rec.backtest_result or {}
-            # passes_floor is only set when a real backtest delta exists.
-            # Replay / skip / error / missing → defer to operator.
-            if result.get("passes_floor") is False:
+            # Decision matrix:
+            #   passes_floor=True  → promote
+            #   passes_floor=False → auto-reject (clear regression)
+            #   result has "skip"      → no backtest knob; defer to operator
+            #   result has "would_pass_total" (replay) → defer to operator
+            #   empty {} + validator raised → leave in pending_validation so
+            #       the self-heal scheduler retries (do NOT silently promote
+            #       — that's the bug the gate exists to prevent)
+            #   empty {} + validator didn't raise → unexpected; treat like
+            #       validator-raise and let self-heal retry
+            passes = result.get("passes_floor")
+            if passes is False:
                 delta = result.get("delta") or {}
                 rec.status = "rejected_by_backtest"
                 rec.rejected_reason = (
@@ -616,9 +626,18 @@ async def _validate_and_promote(ids: list[int]) -> tuple[list[int], list[int]]:
                     f"pf={delta.get('pf')} (failed floor)"
                 )
                 rejected.append(rid)
-            else:
+            elif passes is True or "skip" in result or "would_pass_total" in result:
                 rec.status = "pending"
                 promoted.append(rid)
+            else:
+                # No usable signal yet — keep pending_validation, let
+                # the 5-min self-heal task pick it up.
+                logger.info(
+                    "rec #%d left in pending_validation (validator_failed=%s, "
+                    "result=%s) — self-heal will retry",
+                    rid, validator_failed, result,
+                )
+                continue
             await session.commit()
 
     logger.info(

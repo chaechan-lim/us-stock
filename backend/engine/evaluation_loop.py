@@ -1648,11 +1648,15 @@ class EvaluationLoop:
         # Prefer wall-clock — survives process restart via DB opened_at.
         entry_unix = getattr(tracked, "entry_unix", None)
         if isinstance(entry_unix, (int, float)) and entry_unix > 0:
-            hold_secs = time.time() - float(entry_unix)
+            # max(0, ...) guards against NTP stepping the clock backwards
+            # (or a tiny scheduling skew); without it the gate could see
+            # a negative hold and treat it as zero-then-pass on the next
+            # comparison.
+            hold_secs = max(0.0, time.time() - float(entry_unix))
         else:
             # Legacy / mocked: fall back to monotonic tracked_at.
             try:
-                hold_secs = time.monotonic() - float(tracked.tracked_at)
+                hold_secs = max(0.0, time.monotonic() - float(tracked.tracked_at))
             except (TypeError, ValueError):
                 logger.warning(
                     "Min hold check: %s has no usable timestamp — blocking SELL.",

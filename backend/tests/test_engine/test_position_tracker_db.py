@@ -1713,6 +1713,226 @@ class TestRestoreFromDb:
         assert restored[0]["source"] == "db"
 
     @pytest.mark.asyncio
+    async def test_lookup_strict_mode_returns_none_for_paper_only(
+        self, adapter, risk, order_mgr, db_factory
+    ):
+        """Strict (default) mode: paper BUY does NOT satisfy.
+        Used by _upsert_position_record so PositionRecord.opened_at
+        only reflects real live trades."""
+        from datetime import datetime, timedelta
+
+        from core.models import Order
+
+        async with db_factory() as session:
+            session.add(
+                Order(
+                    account_id="ACC001",
+                    symbol="PAPER1", side="BUY",
+                    order_type="market", quantity=10, price=100.0,
+                    status="filled", strategy_name="trend",
+                    is_paper=True,
+                    created_at=datetime.utcnow() - timedelta(days=2),
+                )
+            )
+            await session.commit()
+
+        tracker = _make_tracker(adapter, risk, order_mgr)
+        async with db_factory() as session:
+            ts = await tracker._lookup_first_buy_time(session, "PAPER1")
+        assert ts is None  # strict — paper rejected
+
+    @pytest.mark.asyncio
+    async def test_lookup_lenient_falls_back_to_paper(
+        self, adapter, risk, order_mgr, db_factory
+    ):
+        """Lenient mode (allow_fallback=True): paper BUY is acceptable
+        rather than letting entry_unix reset to time.time()."""
+        from datetime import datetime, timedelta
+
+        from core.models import Order
+
+        paper_time = datetime.utcnow() - timedelta(days=2)
+        async with db_factory() as session:
+            session.add(
+                Order(
+                    account_id="ACC001",
+                    symbol="PAPER1", side="BUY",
+                    order_type="market", quantity=10, price=100.0,
+                    status="filled", strategy_name="trend",
+                    is_paper=True,
+                    created_at=paper_time,
+                )
+            )
+            await session.commit()
+
+        tracker = _make_tracker(adapter, risk, order_mgr)
+        async with db_factory() as session:
+            ts = await tracker._lookup_first_buy_time(
+                session, "PAPER1", allow_fallback=True,
+            )
+        assert ts is not None
+        assert abs((ts - paper_time).total_seconds()) < 1.0
+
+    @pytest.mark.asyncio
+    async def test_lookup_lenient_falls_back_to_sell_proxy(
+        self, adapter, risk, order_mgr, db_factory
+    ):
+        """When neither live nor paper BUY exists (legacy data) but a
+        SELL is present, return SELL.created_at − 1d as a proxy."""
+        from datetime import datetime, timedelta
+
+        from core.models import Order
+
+        sell_time = datetime.utcnow() - timedelta(days=3)
+        async with db_factory() as session:
+            session.add(
+                Order(
+                    account_id="ACC001",
+                    symbol="LEGACY", side="SELL",
+                    order_type="market", quantity=10, price=100.0,
+                    status="filled", buy_strategy="legacy",
+                    is_paper=False,
+                    created_at=sell_time,
+                )
+            )
+            await session.commit()
+
+        tracker = _make_tracker(adapter, risk, order_mgr)
+        async with db_factory() as session:
+            ts = await tracker._lookup_first_buy_time(
+                session, "LEGACY", allow_fallback=True,
+            )
+        assert ts is not None
+        expected = sell_time - timedelta(days=1)
+        assert abs((ts - expected).total_seconds()) < 1.0
+
+    @pytest.mark.asyncio
+    async def test_lookup_lenient_returns_none_with_no_orders(
+        self, adapter, risk, order_mgr, db_factory
+    ):
+        """No orders at all → None even in lenient mode. Caller falls
+        through to default time.time() (which IS right — brand-new
+        position with no order trail)."""
+        tracker = _make_tracker(adapter, risk, order_mgr)
+        async with db_factory() as session:
+            ts = await tracker._lookup_first_buy_time(
+                session, "NEVER", allow_fallback=True,
+            )
+        assert ts is None
+
+    @pytest.mark.asyncio
+    async def test_lookup_prefers_live_over_paper_in_lenient(
+        self, adapter, risk, order_mgr, db_factory
+    ):
+        """Even in lenient mode, live BUY beats paper BUY when both
+        exist (paper is only the fallback)."""
+        from datetime import datetime, timedelta
+
+        from core.models import Order
+
+        live_time = datetime.utcnow() - timedelta(days=1)
+        paper_time = datetime.utcnow() - timedelta(days=10)  # older
+        async with db_factory() as session:
+            for created, paper in [(paper_time, True), (live_time, False)]:
+                session.add(
+                    Order(
+                        account_id="ACC001",
+                        symbol="DUAL", side="BUY",
+                        order_type="market", quantity=10, price=100.0,
+                        status="filled", strategy_name="trend",
+                        is_paper=paper,
+                        created_at=created,
+                    )
+                )
+            await session.commit()
+
+        tracker = _make_tracker(adapter, risk, order_mgr)
+        async with db_factory() as session:
+            ts = await tracker._lookup_first_buy_time(
+                session, "DUAL", allow_fallback=True,
+            )
+        assert abs((ts - live_time).total_seconds()) < 1.0
+
+    @pytest.mark.asyncio
+    async def test_auto_recover_survives_db_error(
+        self, risk, order_mgr, db_factory
+    ):
+        """If the entry_unix DB lookup blows up, _auto_recover_untracked
+        must still register the position (with default entry_unix) and
+        log a warning. The position itself is more important than the
+        exact hold-time accuracy."""
+        from exchange.base import Position
+
+        adapter = AsyncMock()
+        adapter.fetch_positions = AsyncMock(return_value=[
+            Position(symbol="ERR", exchange="NASD", quantity=5,
+                     avg_price=200.0, current_price=200.0),
+        ])
+        market_data = AsyncMock()
+        market_data.get_positions = AsyncMock(
+            return_value=adapter.fetch_positions.return_value,
+        )
+
+        # session_factory that always raises when entered
+        def bad_factory():
+            class _Ctx:
+                async def __aenter__(self_):
+                    raise RuntimeError("DB unreachable")
+                async def __aexit__(self_, *a):
+                    return False
+            return _Ctx()
+
+        tracker = PositionTracker(
+            adapter=adapter, risk_manager=risk, order_manager=order_mgr,
+            market_data=market_data, session_factory=bad_factory,
+        )
+        tracker._last_auto_recover = -1e9
+        await tracker._auto_recover_untracked()
+        # Position still tracked despite DB error.
+        assert "ERR" in tracker._tracked
+
+    @pytest.mark.asyncio
+    async def test_restore_from_exchange_records_first_buy_without_strategy(
+        self, adapter, risk, order_mgr, db_factory
+    ):
+        """The 'no strategy resolution but have first_buy_time' fallback
+        branch: a symbol with only NULL-strategy BUY orders should
+        still get a real entry_unix rather than time.time()."""
+        from datetime import datetime, timedelta, timezone
+        import time as _t
+
+        from core.models import Order
+        from exchange.base import Position
+
+        old_time = datetime.utcnow() - timedelta(days=3)
+        async with db_factory() as session:
+            session.add(
+                Order(
+                    account_id="ACC001",
+                    symbol="NOSTRAT", side="BUY",
+                    order_type="market", quantity=10, price=100.0,
+                    status="filled",
+                    strategy_name=None,  # legacy: NULL strategy
+                    is_paper=False,
+                    created_at=old_time,
+                )
+            )
+            await session.commit()
+
+        adapter.fetch_positions = AsyncMock(return_value=[
+            Position(symbol="NOSTRAT", exchange="NASD", quantity=10,
+                     avg_price=100.0, current_price=105.0),
+        ])
+        tracker = _make_tracker(adapter, risk, order_mgr)
+        await tracker.restore_from_exchange(db_factory)
+        assert "NOSTRAT" in tracker._tracked
+        tracked = tracker._tracked["NOSTRAT"]
+        expected = old_time.replace(tzinfo=timezone.utc).timestamp()
+        assert abs(tracked.entry_unix - expected) < 1.0
+        elapsed = _t.time() - tracked.entry_unix
+        assert 2.9 * 86400 < elapsed < 3.1 * 86400
+
+    @pytest.mark.asyncio
     async def test_restore_from_exchange_populates_entry_unix_from_orders(
         self, adapter, risk, order_mgr, db_factory
     ):

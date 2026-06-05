@@ -908,11 +908,13 @@ class PositionTracker:
 
                 async with sf() as session:
                     for pos in positions:
-                        # 2026-06-05: capture the earliest live BUY time
+                        # 2026-06-05: capture the earliest BUY time
                         # for this symbol so the min_hold gate counts
                         # from the true entry rather than restart time.
+                        # Lenient mode — paper/SELL fallback beats a
+                        # time.time() reset.
                         first_buy = await self._lookup_first_buy_time(
-                            session, pos.symbol,
+                            session, pos.symbol, allow_fallback=True,
                         )
                         info: dict = {}
                         if first_buy:
@@ -1026,8 +1028,11 @@ class PositionTracker:
             # min_hold gate counts from the real entry, not from this
             # restart. Without this, restart on day 1 effectively
             # re-arms the 72h clock on every position.
+            # Guard on `sf` (the resolved factory used to populate entry_info)
+            # rather than the raw `session_factory` argument so callers
+            # omitting it still benefit from the tracker's stored factory.
             opened_unix: float | None = None
-            if session_factory and "first_buy_time" in entry_info.get(pos.symbol, {}):
+            if sf and "first_buy_time" in entry_info.get(pos.symbol, {}):
                 first_buy = entry_info[pos.symbol]["first_buy_time"]
                 if first_buy:
                     if first_buy.tzinfo is None:
@@ -1218,8 +1223,10 @@ class PositionTracker:
             if self._session_factory:
                 try:
                     async with self._session_factory() as session:
+                        # Lenient — paper/SELL fallback is preferable to
+                        # resetting the 72h min_hold clock to "now".
                         first_buy = await self._lookup_first_buy_time(
-                            session, pos.symbol,
+                            session, pos.symbol, allow_fallback=True,
                         )
                     if first_buy:
                         if first_buy.tzinfo is None:
@@ -1494,17 +1501,30 @@ class PositionTracker:
         self,
         session: "AsyncSession",
         symbol: str,
+        allow_fallback: bool = False,
     ) -> datetime | None:
         """Look up the earliest live BUY order time for a symbol.
 
-        Queries the orders table for the earliest filled/submitted live
-        (is_paper=False) BUY order's created_at. Returns None if no
-        matching order is found.
+        Two modes:
+        - strict (allow_fallback=False, default): only earliest live
+          (is_paper=False) BUY. Used by `_upsert_position_record` where
+          PositionRecord.opened_at must reflect a real live entry.
+        - lenient (allow_fallback=True): three-tier search used by the
+          entry_unix path so a recovery never re-arms the 72h min_hold
+          clock with `time.time()`. Tiers:
+            1. earliest live BUY (same as strict)
+            2. earliest BUY of any kind (paper included)
+            3. earliest SELL.created_at − 1d as a proxy
+
+        Returns None when nothing is found.
         """
+        from datetime import timedelta as _td
+
         from sqlalchemy import asc, select
 
         from core.models import Order
 
+        # Tier 1: earliest live BUY
         stmt = (
             select(Order.created_at)
             .where(
@@ -1517,9 +1537,54 @@ class PositionTracker:
             .order_by(asc(Order.created_at))
             .limit(1)
         )
-        result = await session.execute(stmt)
-        row = result.scalar_one_or_none()
-        return row
+        ts = (await session.execute(stmt)).scalar_one_or_none()
+        if ts is not None:
+            return ts
+
+        if not allow_fallback:
+            return None
+
+        # Tier 2: any BUY (paper included)
+        stmt = (
+            select(Order.created_at)
+            .where(
+                Order.account_id == self._account_id,
+                Order.symbol == symbol,
+                Order.side == "BUY",
+                Order.status.in_(["filled", "submitted"]),
+            )
+            .order_by(asc(Order.created_at))
+            .limit(1)
+        )
+        ts = (await session.execute(stmt)).scalar_one_or_none()
+        if ts is not None:
+            logger.debug(
+                "first_buy_time for %s fell back to paper BUY", symbol,
+            )
+            return ts
+
+        # Tier 3: derive a proxy from the earliest SELL. The original BUY
+        # came before, so any timestamp from before that SELL is safer than
+        # using time.time(). One day before is a conservative estimate.
+        stmt = (
+            select(Order.created_at)
+            .where(
+                Order.account_id == self._account_id,
+                Order.symbol == symbol,
+                Order.side == "SELL",
+            )
+            .order_by(asc(Order.created_at))
+            .limit(1)
+        )
+        ts = (await session.execute(stmt)).scalar_one_or_none()
+        if ts is not None:
+            logger.warning(
+                "first_buy_time for %s falling back to SELL.created_at − 1d "
+                "(no BUY order found — likely legacy data)", symbol,
+            )
+            return ts - _td(days=1)
+
+        return None
 
     async def _upsert_position_record(
         self,

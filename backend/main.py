@@ -1568,30 +1568,64 @@ async def lifespan(app: FastAPI):
         phases=[MarketPhase.PRE_MARKET],
     )
 
-    async def task_recommendation_revalidate():
-        """Self-heal: validate pending recs missing backtest_result + promote
-        any pending_validation rows whose validation was interrupted.
+    async def _revalidate_one_rec(rid: int, status: str) -> None:
+        """Validate a single rec and promote/reject pending_validation rows.
 
-        2026-06-05: rec #5 sat 21h with empty backtest_result because the
-        original asyncio.create_task spawn in trade_review fired and the
-        backend missed the completion. Also handles the new
-        pending_validation status from generate_recommendations.py — if
-        that script crashes after insert but before promotion, this sweep
-        finishes the job. Runs every 5 min, phase-agnostic (validator
-        self-throttles via process-wide lock).
+        Runs as a detached asyncio task so the heavy 2y backtest doesn't
+        block the trading scheduler coroutine. The validator's own
+        process-wide lock keeps multiple in-flight backtests serial.
+        """
+        from core.models import AgentRecommendation
+        from services.recommendation_validator import validate_recommendation
+        try:
+            await validate_recommendation(rid, session_factory)
+        except Exception as e:
+            logger.warning("revalidate #%d failed: %s", rid, e)
+            return
+        if status != "pending_validation":
+            return
+        async with session_factory() as session:
+            rec = await session.get(AgentRecommendation, rid)
+            if not rec or rec.status != "pending_validation":
+                return
+            result = rec.backtest_result or {}
+            passes = result.get("passes_floor")
+            if passes is False:
+                delta = result.get("delta") or {}
+                rec.status = "rejected_by_backtest"
+                rec.rejected_reason = (
+                    f"auto-reject (self-heal): backtest delta "
+                    f"ret={delta.get('ret')}, sharpe={delta.get('sharpe')}, "
+                    f"mdd={delta.get('mdd')}, pf={delta.get('pf')} (failed floor)"
+                )
+            elif passes is True or "skip" in result or "would_pass_total" in result:
+                rec.status = "pending"
+            else:
+                # validator didn't write a usable result; leave for next sweep
+                return
+            await session.commit()
+
+    async def task_recommendation_revalidate():
+        """Self-heal: find untriaged recs and detach the validator to a task.
+
+        2026-06-05 v2: never await the validator on the scheduler coroutine.
+        The scheduler runs every task serially in a single coroutine
+        (engine/scheduler.py); a single 2y backtest is 30-90s, so awaiting
+        N of them here used to starve evaluation_loop, position_sync,
+        WebSocket lifecycle, ETF engine, etc. Fix: discover the work, fire
+        one detached asyncio.task per rec. The validator's own
+        `_validation_lock` keeps backtests sequential.
+
+        We can't compare JSONB to literal {} in SQL (Postgres has no =
+        operator for json), so filter status in SQL and do the
+        empty-result check in Python.
         """
         try:
             from sqlalchemy import or_, select
 
             from core.models import AgentRecommendation
-            from services.recommendation_validator import validate_recommendation
 
             async with session_factory() as session:
-                # Two buckets: pending_validation (generator crashed mid-
-                # flight) OR pending with no backtest data yet. We can't
-                # compare JSONB to a literal {} via SQL (Postgres has no
-                # = operator for json), so filter status in SQL and do
-                # the empty-result check in Python.
                 stmt = (
                     select(AgentRecommendation.id,
                            AgentRecommendation.status,
@@ -1609,38 +1643,17 @@ async def lifespan(app: FastAPI):
             rows = [
                 (rid, st) for rid, st, br in all_rows
                 if (st == "pending_validation") or (not br)
-            ][:20]  # cap downstream work so validator queue stays sane
+            ][:20]  # cap so a flood doesn't queue forever
             if not rows:
                 return
             rec_ids = [r[0] for r in rows]
             logger.info(
-                "recommendation_revalidate: %d untriaged recs (ids=%s)",
+                "recommendation_revalidate: detaching %d untriaged recs (ids=%s)",
                 len(rec_ids), rec_ids,
             )
             for rid, status in rows:
-                try:
-                    await validate_recommendation(rid, session_factory)
-                except Exception as e:
-                    logger.warning("revalidate #%d failed: %s", rid, e)
-                    continue
-                # Promote stuck pending_validation rows post-validation.
-                if status == "pending_validation":
-                    async with session_factory() as session:
-                        rec = await session.get(AgentRecommendation, rid)
-                        if rec and rec.status == "pending_validation":
-                            result = rec.backtest_result or {}
-                            if result.get("passes_floor") is False:
-                                delta = result.get("delta") or {}
-                                rec.status = "rejected_by_backtest"
-                                rec.rejected_reason = (
-                                    f"auto-reject (self-heal): backtest delta "
-                                    f"ret={delta.get('ret')}, sharpe="
-                                    f"{delta.get('sharpe')}, mdd={delta.get('mdd')}, "
-                                    f"pf={delta.get('pf')} (failed floor)"
-                                )
-                            else:
-                                rec.status = "pending"
-                            await session.commit()
+                # Detach — don't await. validator holds its own lock.
+                asyncio.create_task(_revalidate_one_rec(rid, status))
         except Exception as e:
             logger.error("recommendation_revalidate task failed: %s", e)
 

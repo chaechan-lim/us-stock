@@ -4121,6 +4121,50 @@ class TestAntiWhipsawDefaults:
         # min_hold default 4h, position only 30 min old → block.
         assert eval_loop._check_min_hold("AAPL") is False
 
+    def test_check_min_hold_zero_entry_unix_falls_back_to_monotonic(self, eval_loop):
+        """entry_unix=0 (e.g. bad ORM coercion of NULL opened_at) must
+        NOT be treated as "55 years ago and passes". Fall back to the
+        monotonic check, which here is freshly set → block."""
+        import time as _t
+
+        tracked = MagicMock(spec=["tracked_at", "entry_unix"])
+        tracked.entry_unix = 0.0
+        tracked.tracked_at = _t.monotonic()  # just registered
+        tracker = MagicMock()
+        tracker._tracked = {"AAPL": tracked}
+        eval_loop._position_tracker = tracker
+        # 4h min_hold, monotonic delta ≈ 0 → block.
+        assert eval_loop._check_min_hold("AAPL") is False
+
+    def test_check_min_hold_negative_entry_unix_falls_back_to_monotonic(self, eval_loop):
+        """entry_unix < 0 is nonsense and must also fall back."""
+        import time as _t
+
+        tracked = MagicMock(spec=["tracked_at", "entry_unix"])
+        tracked.entry_unix = -1.0
+        tracked.tracked_at = _t.monotonic()
+        tracker = MagicMock()
+        tracker._tracked = {"AAPL": tracked}
+        eval_loop._position_tracker = tracker
+        assert eval_loop._check_min_hold("AAPL") is False
+
+    def test_check_min_hold_clock_jumped_backward(self, eval_loop):
+        """If wall-clock steps backward between BUY-record and the gate
+        check (NTP correction on a Pi), hold_secs goes negative. The
+        clamp must convert that to 0 (block) rather than letting it
+        underflow into a 'large negative < min_hold = pass' bypass."""
+        import time as _t
+
+        tracked = MagicMock(spec=["tracked_at", "entry_unix"])
+        # Position recorded 1 second in the future relative to now.
+        tracked.entry_unix = _t.time() + 1.0
+        tracked.tracked_at = _t.monotonic()
+        tracker = MagicMock()
+        tracker._tracked = {"AAPL": tracked}
+        eval_loop._position_tracker = tracker
+        # hold_secs would be ~-1 without the clamp; clamped to 0 → block.
+        assert eval_loop._check_min_hold("AAPL") is False
+
 
 class TestStopLossCounter:
     """STOCK-47: Verify whipsaw counter tracks loss sells correctly."""

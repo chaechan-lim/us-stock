@@ -166,7 +166,12 @@ async def validate_recommendation(rec_id: int, session_factory) -> None:
             rec = await session.get(AgentRecommendation, rec_id)
             if not rec:
                 return
-            if rec.status != "pending":
+            # 2026-06-05: accept the new pending_validation status as well —
+            # the pre-submission gate inserts rows in that state and calls
+            # us synchronously before flipping to pending/rejected_by_backtest.
+            # Anything else (accepted/rejected/superseded/expired) means the
+            # operator or a later step already finalised it.
+            if rec.status not in ("pending", "pending_validation"):
                 return  # operator already decided
 
             if not _is_validatable(rec.param_path):

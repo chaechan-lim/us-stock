@@ -39,6 +39,94 @@ class TestPathMapping:
         # Path that doesn't correspond to any PipelineConfig field.
         assert not _is_validatable("markets.KR.evaluation_loop.sell_cooldown_hours")
 
+    @pytest.mark.parametrize("path", sorted(_BACKTEST_PARAM_MAP.keys()))
+    def test_every_mapped_path_is_validatable(self, path):
+        """Every entry in _BACKTEST_PARAM_MAP must be reachable via
+        _is_validatable. A typo would silently route the rec to SKIP and
+        defeat the pre-submission gate."""
+        assert _is_validatable(path)
+
+    @pytest.mark.parametrize(
+        "path,field",
+        [(p, v[1]) for p, v in sorted(_BACKTEST_PARAM_MAP.items())],
+    )
+    def test_every_mapped_field_exists_on_pipeline_config(self, path, field):
+        """Each mapped PipelineConfig field must actually exist. A field
+        rename in full_pipeline.py would break validation silently —
+        validator would coerce and try to set a nonexistent attribute."""
+        from dataclasses import fields
+
+        from backtest.full_pipeline import PipelineConfig
+
+        valid = {f.name for f in fields(PipelineConfig)}
+        assert field in valid, f"path {path!r} maps to nonexistent field {field!r}"
+
+    def test_kr_and_us_paths_mirrored(self):
+        """Both markets must be represented for evaluation_loop / risk
+        params to avoid silent SKIP on the rarer market."""
+        kr_evals = {k for k in _BACKTEST_PARAM_MAP if k.startswith("markets.KR.")}
+        us_evals = {k for k in _BACKTEST_PARAM_MAP if k.startswith("markets.US.")}
+        # disabled_strategies is the only single-suffix path on each side
+        kr_suffixes = {k.split(".", 2)[2] for k in kr_evals}
+        us_suffixes = {k.split(".", 2)[2] for k in us_evals}
+        assert kr_suffixes == us_suffixes, (
+            f"KR/US path mirror broken: KR-only={kr_suffixes - us_suffixes}, "
+            f"US-only={us_suffixes - kr_suffixes}"
+        )
+
+
+class TestValidatorStatusGuard:
+    """2026-06-05: validator must accept BOTH pending and pending_validation.
+
+    Pre-submission gate inserts as pending_validation; validator returned
+    early on != "pending" and silently bypassed every backtest. Fixed by
+    expanding the guard.
+    """
+
+    @pytest.mark.asyncio
+    async def test_accepts_pending_validation_status(self, db_setup):
+        async with db_setup() as session:
+            rec = AgentRecommendation(
+                agent_type="llm_test",
+                param_path="markets.KR.evaluation_loop.opening_avoidance_minutes",
+                current_value=30, proposed_value=15,
+                status="pending_validation",
+            )
+            session.add(rec)
+            await session.commit()
+            rec_id = rec.id
+
+        await validate_recommendation(rec_id, db_setup)
+
+        async with db_setup() as session:
+            loaded = await session.get(AgentRecommendation, rec_id)
+            # Validator should have either produced a real result or
+            # explicitly marked it skip — what it must NOT do is leave
+            # backtest_result empty (== the silent-bypass regression).
+            assert loaded.backtest_result, (
+                "validator skipped a pending_validation rec — gate is bypassed"
+            )
+
+    @pytest.mark.asyncio
+    async def test_rejects_already_decided_status(self, db_setup):
+        async with db_setup() as session:
+            rec = AgentRecommendation(
+                agent_type="llm_test",
+                param_path="markets.KR.risk.max_positions",
+                current_value=18, proposed_value=22,
+                status="accepted",  # operator already acted
+            )
+            session.add(rec)
+            await session.commit()
+            rec_id = rec.id
+
+        await validate_recommendation(rec_id, db_setup)
+
+        async with db_setup() as session:
+            loaded = await session.get(AgentRecommendation, rec_id)
+            # Validator must not touch finalised rows.
+            assert not loaded.backtest_result
+
 
 class TestFloorCheck:
     def test_passes_when_no_regression(self):
