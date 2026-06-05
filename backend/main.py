@@ -1587,24 +1587,29 @@ async def lifespan(app: FastAPI):
             from services.recommendation_validator import validate_recommendation
 
             async with session_factory() as session:
-                # Two buckets: pending without backtest, OR stuck in
-                # pending_validation (generator crashed mid-flight).
+                # Two buckets: pending_validation (generator crashed mid-
+                # flight) OR pending with no backtest data yet. We can't
+                # compare JSONB to a literal {} via SQL (Postgres has no
+                # = operator for json), so filter status in SQL and do
+                # the empty-result check in Python.
                 stmt = (
-                    select(AgentRecommendation.id, AgentRecommendation.status)
+                    select(AgentRecommendation.id,
+                           AgentRecommendation.status,
+                           AgentRecommendation.backtest_result)
                     .where(
                         or_(
                             AgentRecommendation.status == "pending_validation",
-                            (AgentRecommendation.status == "pending")
-                            & or_(
-                                AgentRecommendation.backtest_result.is_(None),
-                                AgentRecommendation.backtest_result == {},
-                            ),
+                            AgentRecommendation.status == "pending",
                         )
                     )
                     .order_by(AgentRecommendation.id)
-                    .limit(20)
+                    .limit(50)
                 )
-                rows = list((await session.execute(stmt)).all())
+                all_rows = list((await session.execute(stmt)).all())
+            rows = [
+                (rid, st) for rid, st, br in all_rows
+                if (st == "pending_validation") or (not br)
+            ][:20]  # cap downstream work so validator queue stays sane
             if not rows:
                 return
             rec_ids = [r[0] for r in rows]

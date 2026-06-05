@@ -1713,6 +1713,109 @@ class TestRestoreFromDb:
         assert restored[0]["source"] == "db"
 
     @pytest.mark.asyncio
+    async def test_restore_from_exchange_populates_entry_unix_from_orders(
+        self, adapter, risk, order_mgr, db_factory
+    ):
+        """restore_from_exchange must pull first BUY time from orders so
+        the min_hold gate counts from the true entry, not restart time.
+
+        2026-06-05 regression: prior fix only patched restore_from_db.
+        restore_from_exchange ran first at startup, so positions
+        re-entered the tracker with entry_unix=time.time() (the restart
+        moment) and the 72h clock was effectively re-armed every
+        restart.
+        """
+        import time as _t
+        from datetime import datetime, timedelta, timezone
+
+        from core.models import Order
+        from exchange.base import Position
+
+        true_buy_time = datetime.utcnow() - timedelta(days=4)
+        async with db_factory() as session:
+            session.add(
+                Order(
+                    account_id="ACC001",
+                    symbol="AAPL", side="BUY",
+                    order_type="market", quantity=10, price=150.0,
+                    status="filled", strategy_name="trend",
+                    is_paper=False,
+                    created_at=true_buy_time,
+                )
+            )
+            await session.commit()
+
+        adapter.fetch_positions = AsyncMock(return_value=[
+            Position(symbol="AAPL", exchange="NASD", quantity=10,
+                     avg_price=150.0, current_price=155.0),
+        ])
+        tracker = _make_tracker(adapter, risk, order_mgr)
+        restored = await tracker.restore_from_exchange(db_factory)
+        assert len(restored) == 1
+
+        tracked = tracker._tracked["AAPL"]
+        expected = true_buy_time.replace(tzinfo=timezone.utc).timestamp()
+        assert abs(tracked.entry_unix - expected) < 1.0
+        # Sanity: tracked should look ~4 days old, not 0 seconds.
+        elapsed = _t.time() - tracked.entry_unix
+        assert 3.9 * 86400 < elapsed < 4.1 * 86400
+
+    @pytest.mark.asyncio
+    async def test_auto_recover_populates_entry_unix_from_orders(
+        self, risk, order_mgr, db_factory
+    ):
+        """_auto_recover_untracked must look up orders for entry_unix.
+
+        2026-06-05 regression: every 10 min auto-recover called track()
+        with no entry_unix → time.time() default → the 72h min_hold
+        clock effectively reset on every cycle for held positions.
+        """
+        import time as _t
+        from datetime import datetime, timedelta, timezone
+
+        from core.models import Order
+        from exchange.base import Position
+
+        true_buy_time = datetime.utcnow() - timedelta(days=5)
+        async with db_factory() as session:
+            session.add(
+                Order(
+                    account_id="ACC001",
+                    symbol="MSFT", side="BUY",
+                    order_type="market", quantity=5, price=300.0,
+                    status="filled", strategy_name="trend",
+                    is_paper=False,
+                    created_at=true_buy_time,
+                )
+            )
+            await session.commit()
+
+        adapter = AsyncMock()
+        adapter.fetch_positions = AsyncMock(return_value=[
+            Position(symbol="MSFT", exchange="NASD", quantity=5,
+                     avg_price=300.0, current_price=310.0),
+        ])
+        # market_data is what auto_recover calls first (when set);
+        # adapter is the fallback. Test the market_data path.
+        market_data = AsyncMock()
+        market_data.get_positions = AsyncMock(return_value=adapter.fetch_positions.return_value)
+
+        tracker = PositionTracker(
+            adapter=adapter, risk_manager=risk, order_manager=order_mgr,
+            market_data=market_data, session_factory=db_factory,
+        )
+        # Force auto-recover by setting last-recover to far in the past
+        tracker._last_auto_recover = -1e9
+        await tracker._auto_recover_untracked()
+
+        assert "MSFT" in tracker._tracked
+        tracked = tracker._tracked["MSFT"]
+        expected = true_buy_time.replace(tzinfo=timezone.utc).timestamp()
+        assert abs(tracked.entry_unix - expected) < 1.0
+        elapsed = _t.time() - tracked.entry_unix
+        assert 4.9 * 86400 < elapsed < 5.1 * 86400
+
+    @pytest.mark.asyncio
     async def test_restore_from_db_populates_entry_unix(
         self, adapter, risk, order_mgr, db_factory
     ):

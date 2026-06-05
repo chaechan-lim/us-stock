@@ -908,7 +908,17 @@ class PositionTracker:
 
                 async with sf() as session:
                     for pos in positions:
-                        # 1) Latest live BUY order
+                        # 2026-06-05: capture the earliest live BUY time
+                        # for this symbol so the min_hold gate counts
+                        # from the true entry rather than restart time.
+                        first_buy = await self._lookup_first_buy_time(
+                            session, pos.symbol,
+                        )
+                        info: dict = {}
+                        if first_buy:
+                            info["first_buy_time"] = first_buy
+
+                        # 1) Latest live BUY order — primary strategy source
                         stmt = (
                             select(Order)
                             .where(
@@ -924,9 +934,8 @@ class PositionTracker:
                         result = await session.execute(stmt)
                         order = result.scalar_one_or_none()
                         if order and order.strategy_name:
-                            entry_info[pos.symbol] = {
-                                "strategy": order.strategy_name,
-                            }
+                            info["strategy"] = order.strategy_name
+                            entry_info[pos.symbol] = info
                             continue
 
                         # 2) Any BUY order (including paper) as fallback
@@ -944,9 +953,8 @@ class PositionTracker:
                         result = await session.execute(stmt)
                         order = result.scalar_one_or_none()
                         if order and order.strategy_name:
-                            entry_info[pos.symbol] = {
-                                "strategy": order.strategy_name,
-                            }
+                            info["strategy"] = order.strategy_name
+                            entry_info[pos.symbol] = info
                             continue
 
                         # 3) SELL order's buy_strategy as last resort
@@ -965,9 +973,15 @@ class PositionTracker:
                         result = await session.execute(stmt)
                         order = result.scalar_one_or_none()
                         if order and order.buy_strategy:
-                            entry_info[pos.symbol] = {
-                                "strategy": order.buy_strategy,
-                            }
+                            info["strategy"] = order.buy_strategy
+                            entry_info[pos.symbol] = info
+                            continue
+
+                        # No strategy resolution but maybe we have a
+                        # first_buy_time — record it so the min_hold
+                        # gate still sees the real entry.
+                        if info:
+                            entry_info[pos.symbol] = info
             except Exception as e:
                 logger.warning("Failed to look up entry info from DB: %s", e)
 
@@ -1008,6 +1022,18 @@ class PositionTracker:
                 except Exception as e:
                     logger.debug("ATR fetch failed for %s, using defaults: %s", pos.symbol, e)
 
+            # 2026-06-05: pull true first-BUY time from orders so the
+            # min_hold gate counts from the real entry, not from this
+            # restart. Without this, restart on day 1 effectively
+            # re-arms the 72h clock on every position.
+            opened_unix: float | None = None
+            if session_factory and "first_buy_time" in entry_info.get(pos.symbol, {}):
+                first_buy = entry_info[pos.symbol]["first_buy_time"]
+                if first_buy:
+                    if first_buy.tzinfo is None:
+                        first_buy = first_buy.replace(tzinfo=timezone.utc)
+                    opened_unix = first_buy.timestamp()
+
             self.track(
                 symbol=pos.symbol,
                 entry_price=entry_price,
@@ -1015,6 +1041,7 @@ class PositionTracker:
                 strategy=strategy,
                 stop_loss_pct=stop_loss_pct,
                 take_profit_pct=take_profit_pct,
+                entry_unix=opened_unix,
             )
 
             pnl_pct = ((pos.current_price / entry_price) - 1) * 100 if entry_price > 0 else 0
@@ -1183,6 +1210,26 @@ class PositionTracker:
         for pos in positions:
             if pos.quantity <= 0 or pos.symbol in self._tracked:
                 continue
+            # 2026-06-05: pull true first-BUY time from orders so the
+            # min_hold gate doesn't reset every 10 min auto-recover.
+            # Without this a held-for-days position effectively re-arms
+            # the 72h clock on every recovery cycle.
+            opened_unix: float | None = None
+            if self._session_factory:
+                try:
+                    async with self._session_factory() as session:
+                        first_buy = await self._lookup_first_buy_time(
+                            session, pos.symbol,
+                        )
+                    if first_buy:
+                        if first_buy.tzinfo is None:
+                            first_buy = first_buy.replace(tzinfo=timezone.utc)
+                        opened_unix = first_buy.timestamp()
+                except Exception as e:
+                    logger.warning(
+                        "auto-recover entry_unix lookup failed for %s: %s",
+                        pos.symbol, e,
+                    )
             self.track(
                 symbol=pos.symbol,
                 entry_price=pos.avg_price,
@@ -1190,6 +1237,7 @@ class PositionTracker:
                 strategy="unknown",
                 stop_loss_pct=self._risk.params.default_stop_loss_pct,
                 take_profit_pct=self._risk.params.default_take_profit_pct,
+                entry_unix=opened_unix,
             )
             recovered += 1
 
