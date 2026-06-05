@@ -532,7 +532,12 @@ def _merge_sources(
 async def _insert_recommendations(
     rows: list[dict], mode: str,
 ) -> list[int]:
-    """Insert merged rows. Returns the new IDs."""
+    """Insert merged rows in status=pending_validation. Returns new IDs.
+
+    2026-06-05: status flow split — pending_validation → (pending |
+    rejected_by_backtest). Operator default view shows status=pending,
+    so failed backtests stay hidden but auditable.
+    """
     if not rows:
         return []
     f = get_session_factory()
@@ -553,26 +558,74 @@ async def _insert_recommendations(
                 expected_effect=(r.get("expected_effect") or "")[:320],
                 confidence=(r.get("confidence") or "medium")[:10],
                 risk=(r.get("risk") or "medium")[:10],
-                status="pending",
+                status="pending_validation",
                 notes=notes,
             )
             session.add(rec)
             await session.flush()
             new_ids.append(rec.id)
         await session.commit()
-    logger.info("Inserted %d recommendations: ids=%s", len(new_ids), new_ids)
+    logger.info(
+        "Inserted %d recommendations (status=pending_validation): ids=%s",
+        len(new_ids), new_ids,
+    )
     return new_ids
 
 
-async def _kickoff_validation(ids: list[int]) -> None:
-    """Schedule the auto-backtest worker (sequential via its own lock)."""
+async def _validate_and_promote(ids: list[int]) -> tuple[list[int], list[int]]:
+    """Run backtest synchronously per rec, then flip status.
+
+    2026-06-05: replaces fire-and-forget _kickoff_validation. Operator
+    only sees recs whose backtest passes the floor (or has no backtest
+    available — replay results / skip / error pass through). Auto-
+    rejected recs keep their backtest_result for audit.
+
+    Returns (promoted_ids, auto_rejected_ids).
+    """
     if not ids:
-        return
+        return [], []
+    from sqlalchemy import select
+
     from services.recommendation_validator import validate_recommendation
+
     f = get_session_factory()
+    promoted: list[int] = []
+    rejected: list[int] = []
+
     for rid in ids:
-        asyncio.create_task(validate_recommendation(rid, f))
-    logger.info("Spawned %d validator tasks", len(ids))
+        try:
+            await validate_recommendation(rid, f)
+        except Exception as e:
+            logger.warning("validate_recommendation #%d failed: %s", rid, e)
+            # On validator error, fail-safe to operator-facing pending so
+            # the rec is still triageable (with empty backtest_result so
+            # the revalidate scheduler will retry it later).
+        async with f() as session:
+            rec = await session.get(AgentRecommendation, rid)
+            if not rec or rec.status != "pending_validation":
+                continue
+            result = rec.backtest_result or {}
+            # passes_floor is only set when a real backtest delta exists.
+            # Replay / skip / error / missing → defer to operator.
+            if result.get("passes_floor") is False:
+                delta = result.get("delta") or {}
+                rec.status = "rejected_by_backtest"
+                rec.rejected_reason = (
+                    f"auto-reject: backtest delta ret={delta.get('ret')}, "
+                    f"sharpe={delta.get('sharpe')}, mdd={delta.get('mdd')}, "
+                    f"pf={delta.get('pf')} (failed floor)"
+                )
+                rejected.append(rid)
+            else:
+                rec.status = "pending"
+                promoted.append(rid)
+            await session.commit()
+
+    logger.info(
+        "Validation gate: %d promoted to pending, %d auto-rejected (ids=%s)",
+        len(promoted), len(rejected), rejected,
+    )
+    return promoted, rejected
 
 
 # ---------------------------------------------------------------------------
@@ -688,8 +741,11 @@ async def main(mode: str, dry_run: bool) -> int:
         return 0
 
     new_ids = await _insert_recommendations(merged, mode)
-    await _kickoff_validation(new_ids)
-    await _discord_summary(mode, len(claude_recs), len(codex_recs), new_ids)
+    # 2026-06-05: Synchronous backtest gate. Only recs that pass the
+    # floor (or have no usable backtest signal) reach operator-visible
+    # status=pending. Auto-rejected ones get rejected_by_backtest.
+    promoted, _rejected = await _validate_and_promote(new_ids)
+    await _discord_summary(mode, len(claude_recs), len(codex_recs), promoted)
     return 0
 
 

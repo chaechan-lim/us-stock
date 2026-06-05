@@ -1568,6 +1568,84 @@ async def lifespan(app: FastAPI):
         phases=[MarketPhase.PRE_MARKET],
     )
 
+    async def task_recommendation_revalidate():
+        """Self-heal: validate pending recs missing backtest_result + promote
+        any pending_validation rows whose validation was interrupted.
+
+        2026-06-05: rec #5 sat 21h with empty backtest_result because the
+        original asyncio.create_task spawn in trade_review fired and the
+        backend missed the completion. Also handles the new
+        pending_validation status from generate_recommendations.py — if
+        that script crashes after insert but before promotion, this sweep
+        finishes the job. Runs every 5 min, phase-agnostic (validator
+        self-throttles via process-wide lock).
+        """
+        try:
+            from sqlalchemy import or_, select
+
+            from core.models import AgentRecommendation
+            from services.recommendation_validator import validate_recommendation
+
+            async with session_factory() as session:
+                # Two buckets: pending without backtest, OR stuck in
+                # pending_validation (generator crashed mid-flight).
+                stmt = (
+                    select(AgentRecommendation.id, AgentRecommendation.status)
+                    .where(
+                        or_(
+                            AgentRecommendation.status == "pending_validation",
+                            (AgentRecommendation.status == "pending")
+                            & or_(
+                                AgentRecommendation.backtest_result.is_(None),
+                                AgentRecommendation.backtest_result == {},
+                            ),
+                        )
+                    )
+                    .order_by(AgentRecommendation.id)
+                    .limit(20)
+                )
+                rows = list((await session.execute(stmt)).all())
+            if not rows:
+                return
+            rec_ids = [r[0] for r in rows]
+            logger.info(
+                "recommendation_revalidate: %d untriaged recs (ids=%s)",
+                len(rec_ids), rec_ids,
+            )
+            for rid, status in rows:
+                try:
+                    await validate_recommendation(rid, session_factory)
+                except Exception as e:
+                    logger.warning("revalidate #%d failed: %s", rid, e)
+                    continue
+                # Promote stuck pending_validation rows post-validation.
+                if status == "pending_validation":
+                    async with session_factory() as session:
+                        rec = await session.get(AgentRecommendation, rid)
+                        if rec and rec.status == "pending_validation":
+                            result = rec.backtest_result or {}
+                            if result.get("passes_floor") is False:
+                                delta = result.get("delta") or {}
+                                rec.status = "rejected_by_backtest"
+                                rec.rejected_reason = (
+                                    f"auto-reject (self-heal): backtest delta "
+                                    f"ret={delta.get('ret')}, sharpe="
+                                    f"{delta.get('sharpe')}, mdd={delta.get('mdd')}, "
+                                    f"pf={delta.get('pf')} (failed floor)"
+                                )
+                            else:
+                                rec.status = "pending"
+                            await session.commit()
+        except Exception as e:
+            logger.error("recommendation_revalidate task failed: %s", e)
+
+    scheduler.add_task(
+        "recommendation_revalidate",
+        task_recommendation_revalidate,
+        interval_sec=300,  # 5 min
+        phases=None,  # 24/7 — recs can land any time
+    )
+
     # WebSocket lifecycle management (market hours only)
     async def task_ws_lifecycle():
         """Manage KIS WebSocket connection lifecycle.

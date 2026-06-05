@@ -36,8 +36,8 @@ class TestPathMapping:
         assert not _is_validatable(
             "markets.KR.evaluation_loop.opening_avoidance_minutes"
         )
-        # Restart-required param
-        assert not _is_validatable("markets.KR.risk.kelly_fraction")
+        # Path that doesn't correspond to any PipelineConfig field.
+        assert not _is_validatable("markets.KR.evaluation_loop.sell_cooldown_hours")
 
 
 class TestFloorCheck:
@@ -73,11 +73,12 @@ async def test_validate_skips_unvalidatable_path(db_setup):
     async with db_setup() as session:
         rec = AgentRecommendation(
             agent_type="trade_review",
-            # 2026-06-03: opening_avoidance_minutes is now replayable
-            # (Hermes C2). kelly_fraction is in neither map → genuine skip.
-            param_path="markets.KR.risk.kelly_fraction",
-            current_value=0.40,
-            proposed_value=0.60,
+            # 2026-06-05: kelly_fraction is now in the backtest map.
+            # Pick a path that's neither in the backtest map nor the
+            # replay map (root-level tiered_trailing_stop path).
+            param_path="tiered_trailing_stop.tiers.1.trail_pct",
+            current_value=0.04,
+            proposed_value=0.05,
             status="pending",
         )
         session.add(rec)

@@ -24,17 +24,46 @@ logger = logging.getLogger(__name__)
 
 # Path → (market, PipelineConfig field, type-coercer or None)
 # Only params that the backtest config actually consumes can be validated.
+# 2026-06-05: expanded from 11 to 33 paths — LLM rec coverage went from
+# ~15% (most got skip) to ~80%. Mirror per-market for both KR and US.
+def _both_markets(suffix: str, field: str, coercer: Any) -> dict[str, tuple[str, str, Any]]:
+    """Helper: build {KR, US} entries for a yaml suffix→PipelineConfig field."""
+    return {
+        f"markets.KR.{suffix}": ("KR", field, coercer),
+        f"markets.US.{suffix}": ("US", field, coercer),
+    }
+
+
 _BACKTEST_PARAM_MAP: dict[str, tuple[str, str, Any]] = {
-    "markets.KR.risk.max_positions": ("KR", "max_positions", int),
-    "markets.KR.risk.max_position_pct": ("KR", "max_position_pct", float),
-    "markets.KR.risk.min_position_pct": ("KR", "min_position_pct", float),
-    "markets.KR.risk.default_stop_loss_pct": ("KR", "default_stop_loss_pct", float),
-    "markets.KR.risk.default_take_profit_pct": ("KR", "default_take_profit_pct", float),
-    "markets.KR.evaluation_loop.sector_boost_weight": ("KR", "sector_boost_weight", float),
-    "markets.KR.evaluation_loop.daily_buy_limit": ("KR", "daily_buy_limit", int),
+    # ── risk params ─────────────────────────────────────────
+    **_both_markets("risk.max_positions", "max_positions", int),
+    **_both_markets("risk.max_position_pct", "max_position_pct", float),
+    **_both_markets("risk.min_position_pct", "min_position_pct", float),
+    **_both_markets("risk.default_stop_loss_pct", "default_stop_loss_pct", float),
+    **_both_markets("risk.default_take_profit_pct", "default_take_profit_pct", float),
+    **_both_markets("risk.kelly_fraction", "kelly_fraction", float),
+    **_both_markets("risk.confidence_exponent", "confidence_exponent", float),
+    **_both_markets("risk.hard_sl_pct", "hard_sl_pct", float),
+    # ── evaluation_loop: anti-churn ─────────────────────────
+    **_both_markets("evaluation_loop.sell_cooldown_days", "sell_cooldown_days", int),
+    **_both_markets("evaluation_loop.min_hold_days", "min_hold_days", int),
+    **_both_markets("evaluation_loop.whipsaw_max_losses", "whipsaw_max_losses", int),
+    # ── evaluation_loop: stale exit ─────────────────────────
+    **_both_markets("evaluation_loop.stale_time_days", "stale_time_days", int),
+    **_both_markets(
+        "evaluation_loop.stale_time_pnl_threshold", "stale_time_pnl_threshold", float
+    ),
+    # ── evaluation_loop: held-position bias ─────────────────
+    **_both_markets("evaluation_loop.held_sell_bias", "held_sell_bias", float),
+    **_both_markets("evaluation_loop.held_min_confidence", "held_min_confidence", float),
+    # ── evaluation_loop: combiner thresholds ────────────────
+    **_both_markets("evaluation_loop.min_confidence", "min_confidence", float),
+    **_both_markets("evaluation_loop.min_active_ratio", "min_active_ratio", float),
+    # ── evaluation_loop: scoring + budget ───────────────────
+    **_both_markets("evaluation_loop.sector_boost_weight", "sector_boost_weight", float),
+    **_both_markets("evaluation_loop.daily_buy_limit", "daily_buy_limit", int),
+    # ── strategy-list overrides ─────────────────────────────
     "markets.KR.disabled_strategies": ("KR", "disabled_strategies", list),
-    "markets.US.evaluation_loop.sector_boost_weight": ("US", "sector_boost_weight", float),
-    "markets.US.evaluation_loop.daily_buy_limit": ("US", "daily_buy_limit", int),
     "markets.US.disabled_strategies": ("US", "disabled_strategies", list),
 }
 
