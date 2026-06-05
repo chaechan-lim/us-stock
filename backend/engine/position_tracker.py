@@ -300,7 +300,15 @@ class PositionTracker:
         # Defensive exits (SL, trailing stop) always count as loss sells
         # even if fill_price > entry (e.g. trailing stop after partial gain).
         # Planned exits (TP, breakeven) never count as loss sells.
-        is_loss = reason in ("stop_loss", "trailing_stop", "tiered_trailing_stop")
+        # STATE-H2 (2026-06-05): protective sells (regime_protect /
+        # negative_sentiment) are by definition risk-driven losses;
+        # count them against the whipsaw budget the same way SL exits do.
+        # position_cleanup is also a forced exit on a stale/losing
+        # position — same accounting.
+        is_loss = reason in (
+            "stop_loss", "trailing_stop", "tiered_trailing_stop",
+            "regime_protect", "negative_sentiment", "position_cleanup",
+        )
 
         self.untrack(symbol)
 
@@ -412,7 +420,15 @@ class PositionTracker:
                 "handle_sell_fill: %s already untracked — firing callbacks for sell cooldown",
                 symbol,
             )
-            is_loss = reason in ("stop_loss", "trailing_stop", "tiered_trailing_stop")
+            # STATE-H2 (2026-06-05): protective sells (regime_protect /
+            # negative_sentiment) are by definition risk-driven losses;
+            # count them against the whipsaw budget the same way SL exits do.
+            # position_cleanup is also a forced exit on a stale/losing
+            # position — same accounting.
+            is_loss = reason in (
+                "stop_loss", "trailing_stop", "tiered_trailing_stop",
+                "regime_protect", "negative_sentiment", "position_cleanup",
+            )
             sell_ts = time.time()
             for cb in self._on_sell_callbacks:
                 try:

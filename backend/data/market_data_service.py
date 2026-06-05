@@ -135,9 +135,16 @@ class MarketDataService:
                 for c in candles
             ])
 
-        if len(self._ohlcv_cache) >= MAX_CACHE_ENTRIES:
-            self._evict_oldest(self._ohlcv_cache)
-        self._ohlcv_cache[cache_key] = (df, now)
+        # RES-H1 (2026-06-05): only cache non-empty DataFrames.
+        # Caching an empty result for the full 5-min TTL meant every
+        # strategy lost data for that symbol for 5 minutes whenever
+        # both yfinance AND the KIS fallback returned nothing (e.g.
+        # yfinance HTML scraping breaks during a backtest run). Empty
+        # is a transient signal — don't pin it.
+        if not df.empty:
+            if len(self._ohlcv_cache) >= MAX_CACHE_ENTRIES:
+                self._evict_oldest(self._ohlcv_cache)
+            self._ohlcv_cache[cache_key] = (df, now)
         return df
 
     def _fetch_yfinance(self, symbol: str, timeframe: str, limit: int) -> pd.DataFrame:

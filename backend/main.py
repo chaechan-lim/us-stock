@@ -1060,7 +1060,22 @@ async def lifespan(app: FastAPI):
                     # "trend_following:stop_loss" → "stop_loss") for notifications.
                     if change["side"] == "SELL":
                         strategy = change.get("strategy", "")
-                        reason = strategy.split(":")[-1] if ":" in strategy else ""
+                        # STATE-H2 (2026-06-05): protective_sells emit
+                        # strategy names like "negative_sentiment(-0.42)"
+                        # or "regime_protect(pnl=-2.1%)" — no colon →
+                        # reason="" → is_loss=False → whipsaw counter
+                        # silently bypassed. Map these explicitly so
+                        # the counter sees them as losses.
+                        if ":" in strategy:
+                            reason = strategy.split(":")[-1]
+                        elif strategy.startswith("regime_protect"):
+                            reason = "regime_protect"
+                        elif strategy.startswith("negative_sentiment"):
+                            reason = "negative_sentiment"
+                        elif strategy in ("position_cleanup", "profit_protection"):
+                            reason = strategy
+                        else:
+                            reason = ""
                         await position_tracker.handle_sell_fill(
                             symbol=change["symbol"],
                             filled_price=change.get("filled_price"),
@@ -2234,7 +2249,22 @@ async def lifespan(app: FastAPI):
                     # untrack the position and update PnL via position_tracker.
                     if change["side"] == "SELL":
                         strategy = change.get("strategy", "")
-                        reason = strategy.split(":")[-1] if ":" in strategy else ""
+                        # STATE-H2 (2026-06-05): protective_sells emit
+                        # strategy names like "negative_sentiment(-0.42)"
+                        # or "regime_protect(pnl=-2.1%)" — no colon →
+                        # reason="" → is_loss=False → whipsaw counter
+                        # silently bypassed. Map these explicitly so
+                        # the counter sees them as losses.
+                        if ":" in strategy:
+                            reason = strategy.split(":")[-1]
+                        elif strategy.startswith("regime_protect"):
+                            reason = "regime_protect"
+                        elif strategy.startswith("negative_sentiment"):
+                            reason = "negative_sentiment"
+                        elif strategy in ("position_cleanup", "profit_protection"):
+                            reason = strategy
+                        else:
+                            reason = ""
                         await kr_position_tracker.handle_sell_fill(
                             symbol=change["symbol"],
                             filled_price=change.get("filled_price"),

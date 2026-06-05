@@ -18,6 +18,18 @@ def get_engine(config: DatabaseConfig | None = None):
             echo=config.echo,
             pool_size=10,
             max_overflow=20,
+            # RES-H2 (2026-06-05): bounded pool wait. SQLAlchemy default
+            # is 30s, but with 35 scheduler tasks + 2 eval loops + per-
+            # signal FunnelEvent persists, pool exhaustion under burst
+            # used to silently block for 30s before TimeoutError. Cap
+            # at 10s so callers get a fast failure they can log.
+            pool_timeout=10,
+            # Detect Postgres connections killed by the network /
+            # restart / idle timeout before handing them out.
+            pool_pre_ping=True,
+            # Recycle long-idle connections so we don't reuse one that
+            # the broker silently closed.
+            pool_recycle=300,
         )
     return _engine
 

@@ -131,6 +131,43 @@ async def portfolio_summary(
     }
 
 
+async def _refresh_usd_krw(request: Request) -> float:
+    """Refresh the module-level USD/KRW cache from the live US adapter.
+
+    FIN-H1 (2026-06-05): the cache used to update ONLY when /summary
+    fired. /returns and /trade-summary read the same module global,
+    so they computed cross-currency totals against whatever stale rate
+    /summary had cached. The user observed 4291만 (live, fresh rate)
+    vs 4302만 (snapshot equity, snapshot's own rate). Now every
+    cross-currency endpoint calls this helper at entry.
+
+    Falls back to the adapter's last seen rate, then to USD_KRW_FALLBACK,
+    so a transient API error never returns 0.
+    """
+    global _cached_usd_krw
+    us_md = getattr(request.app.state, "market_data", None)
+    if us_md:
+        try:
+            rate = await us_md.get_exchange_rate()
+            if rate and rate > 0:
+                _cached_usd_krw = rate
+                return rate
+        except Exception as e:
+            logger.warning("USD/KRW fetch failed: %s", e)
+    adapter = getattr(request.app.state, "adapter", None)
+    if adapter:
+        cached = getattr(adapter, "_last_exchange_rate", _cached_usd_krw)
+        try:
+            cached_f = float(cached)
+            if cached_f > 0:
+                _cached_usd_krw = cached_f
+        except (TypeError, ValueError):
+            pass  # MagicMock / non-numeric — leave cache alone
+    if _cached_usd_krw <= 0:
+        _cached_usd_krw = USD_KRW_FALLBACK
+    return _cached_usd_krw
+
+
 async def _combined_summary(request: Request) -> dict:
     """Build unified summary from both US and KR adapters."""
     global _cached_usd_krw
@@ -168,20 +205,9 @@ async def _combined_summary(request: Request) -> dict:
     usd_total = us_balance.total if us_balance else 0
     usd_available = us_balance.available if us_balance else 0
 
-    # Fetch exchange rate — prefer MarketDataService cache (5-min TTL),
-    # fall back to adapter's cached rate from last balance fetch.
-    adapter = getattr(request.app.state, "adapter", None)
-    if us_md:
-        try:
-            rate = await us_md.get_exchange_rate()
-            if rate > 0:
-                _cached_usd_krw = rate
-        except Exception as e:
-            logger.warning("Exchange rate fetch failed: %s", e)
-    elif adapter:
-        _cached_usd_krw = getattr(adapter, "_last_exchange_rate", _cached_usd_krw)
-    if _cached_usd_krw <= 0:
-        _cached_usd_krw = USD_KRW_FALLBACK
+    # FIN-H1: single helper updates the module cache so every
+    # cross-currency endpoint sees the same rate.
+    await _refresh_usd_krw(request)
 
     # Total equity — combine KR and US totals, avoiding deposit double-count.
     # In 통합증거금 accounts, the KRW deposit (예수금) appears in BOTH:
@@ -411,7 +437,9 @@ async def portfolio_returns(request: Request):
         "monthly": now - timedelta(days=30),
     }
 
-    rate = _cached_usd_krw if _cached_usd_krw > 0 else USD_KRW_FALLBACK
+    # FIN-H1: refresh the rate at every call instead of reading whatever
+    # /summary cached last.
+    rate = await _refresh_usd_krw(request)
 
     async with _session_factory() as session:
         result = {}
@@ -995,6 +1023,11 @@ async def trade_summary_periods(request: Request, market: str | None = None):
 
     if not _session_factory:
         return _empty_summary()
+
+    # FIN-H1: refresh USD/KRW so combined-currency PnL conversion uses
+    # the same rate /summary would. Previously _cached_usd_krw could be
+    # hours stale if /summary hadn't been hit recently.
+    await _refresh_usd_krw(request)
 
     try:
         from db.trade_repository import TradeRepository

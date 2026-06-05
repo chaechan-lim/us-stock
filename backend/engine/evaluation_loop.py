@@ -2107,7 +2107,13 @@ class EvaluationLoop:
                 logger.debug("Skipping BUY for %s: same signal within 24h", symbol)
                 self._bump_reject("same_signal_24h")
                 return
-            self._last_signal[symbol] = ("BUY", time.time())
+            # CON-H2 (2026-06-05): _last_signal used to be set HERE,
+            # before place_buy ran. If the order then failed (network,
+            # KIS reject, sizing return None), the 24h dedup gate was
+            # still armed and blocked every subsequent attempt for the
+            # rest of the day. Now we set it only after the order
+            # actually returns from place_buy (search for the matching
+            # comment below).
 
             # Event calendar checks (earnings proximity, FOMC day)
             if self._event_calendar:
@@ -2374,6 +2380,18 @@ class EvaluationLoop:
             if order:
                 self._daily_buy_count += 1
                 self._buy_flow_counters["buys_placed"] += 1
+                # CON-H2 (2026-06-05): arm 24h dedup ONLY on successful
+                # order placement. Pre-fix the gate was armed at the
+                # signal stage so a network error / KIS reject silently
+                # blocked the next 24h of attempts.
+                self._last_signal[symbol] = ("BUY", time.time())
+                # STATE-H3 (2026-06-05): invalidate the per-cycle
+                # position cache so downstream sector-cap, sizing-up
+                # and max-positions checks within this same cycle
+                # see the BUY that just executed. Without this, two
+                # rapid BUYs in the same cycle could both pass the
+                # sector-cap check against the pre-BUY snapshot.
+                self._cycle_positions = None
                 # Hermes Phase 3: record placed buy for counterfactual
                 # baseline (so replay knows which signals already passed
                 # all gates, not just which were rejected).

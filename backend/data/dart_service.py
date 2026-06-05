@@ -199,7 +199,20 @@ class DARTInsiderService:
         return self._corp_map.get(stock_code, "")
 
     def get_signal_adjustment(self, symbol: str) -> float:
-        """Return confidence adjustment [-0.10, +0.10] for symbol."""
+        """Return confidence adjustment [-0.10, +0.10] for symbol.
+
+        RES-H4 (2026-06-05): if `refresh()` last succeeded more than
+        2× the configured lookback window ago, return neutral. Before
+        this, a DART/KIS outage that broke `refresh()` would leave
+        stale ±0.10 adjustments active indefinitely, biasing every
+        trade decision based on insider data from weeks past.
+        """
+        if self._last_refresh is None:
+            return 0.0
+        age_secs = (now_utc_naive() - self._last_refresh).total_seconds()
+        max_age = 2 * self._lookback_days * 86400
+        if age_secs > max_age:
+            return 0.0
         return self._signal_cache.get(symbol, 0.0)
 
     def to_dict(self) -> dict:
