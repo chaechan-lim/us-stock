@@ -12,6 +12,7 @@ from sqlalchemy import delete, desc, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from core.models import PortfolioSnapshot
+from core.timeutil import now_utc_naive
 from data.market_data_service import MarketDataService
 
 logger = logging.getLogger(__name__)
@@ -294,7 +295,7 @@ class PortfolioManager:
             cash_flow=cash_flow,
             usd_krw_rate=usd_krw_rate,
             integrated_total_krw=integrated_total_krw,
-            recorded_at=datetime.utcnow(),
+            recorded_at=now_utc_naive(),
         )
 
         async with self._session_factory() as session:
@@ -349,7 +350,7 @@ class PortfolioManager:
 
     async def _calculate_daily_pnl(self, current_equity: float) -> float | None:
         """Calculate PnL vs the first snapshot of today."""
-        today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+        today_start = now_utc_naive().replace(hour=0, minute=0, second=0, microsecond=0)
 
         async with self._session_factory() as session:
             stmt = (
@@ -377,7 +378,7 @@ class PortfolioManager:
 
     async def get_equity_history(self, days: int = 30) -> list[dict]:
         """Get equity curve from snapshots."""
-        since = datetime.utcnow() - timedelta(days=days)
+        since = now_utc_naive() - timedelta(days=days)
 
         async with self._session_factory() as session:
             stmt = (
@@ -414,7 +415,7 @@ class PortfolioManager:
         unit. Rows where the field is NULL (legacy snapshots before
         2026-05-06) are skipped.
         """
-        since = datetime.utcnow() - timedelta(days=days)
+        since = now_utc_naive() - timedelta(days=days)
 
         async with self._session_factory() as session:
             stmt = (

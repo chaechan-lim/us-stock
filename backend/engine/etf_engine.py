@@ -17,6 +17,7 @@ from typing import Any
 import pandas as pd
 from sqlalchemy import select, desc
 
+from core.timeutil import now_utc_naive
 from data.market_data_service import MarketDataService
 from data.market_state import MarketStateDetector, MarketRegime, MarketState
 from scanner.etf_universe import ETFUniverse
@@ -815,7 +816,7 @@ class ETFEngine:
         if session_factory:
             try:
                 from core.models import Order  # already cached in sys.modules if first import succeeded
-                cutoff = datetime.utcnow() - timedelta(
+                cutoff = now_utc_naive() - timedelta(
                     hours=self._risk.sell_cooldown_hours,
                 )
                 async with session_factory() as session:

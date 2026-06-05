@@ -6,6 +6,7 @@ from datetime import date, datetime, timedelta
 from typing import Optional
 from zoneinfo import ZoneInfo
 
+from core.timeutil import now_utc_naive
 from fastapi import APIRouter, Depends, Request
 from sqlalchemy import func, select
 
@@ -403,7 +404,7 @@ async def portfolio_returns(request: Request):
     if not _session_factory:
         return {"daily": None, "weekly": None, "monthly": None}
 
-    now = datetime.utcnow()
+    now = now_utc_naive()
     periods = {
         "daily": now - timedelta(days=1),
         "weekly": now - timedelta(days=7),
@@ -593,7 +594,7 @@ def _build_equity_timeline(
 ) -> list[tuple[datetime, float, float]]:
     """Build a combined equity timeline using carry-forward for mismatched timestamps.
 
-    In production, US and KR save_snapshot() each call datetime.utcnow()
+    In production, US and KR save_snapshot() each call now_utc_naive()
     independently, so their recorded_at values differ by at least milliseconds.
     Exact-timestamp aggregation would compare single-market equity values against
     each other, producing nonsensical sub-period returns.
@@ -873,7 +874,7 @@ async def performance_metrics(
         if market:
             orders = [o for o in orders if getattr(o, "market", "US") == market]
         # Last `days` window
-        cutoff = datetime.utcnow() - timedelta(days=days)
+        cutoff = now_utc_naive() - timedelta(days=days)
         orders = [o for o in orders if (o.filled_at or o.created_at or cutoff) >= cutoff]
         trade_dicts = [
             {

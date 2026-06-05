@@ -4,13 +4,14 @@ import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from config import AppConfig
 from core.models import Base
+from core.timeutil import now_utc_naive
 from db.session import get_engine
 from api.router import api_router
 from api.ws import install_log_handler
@@ -1040,7 +1041,7 @@ async def lifespan(app: FastAPI):
                             "strategy": change.get("strategy", ""),
                             "status": "filled",
                             "market": "US",
-                            "created_at": datetime.utcnow().isoformat(),
+                            "created_at": now_utc_naive().isoformat(),
                         }
                     )
                     # STOCK-52: When a pending SELL order is confirmed filled,
@@ -1185,7 +1186,7 @@ async def lifespan(app: FastAPI):
         from db.trade_repository import TradeRepository
         from datetime import timedelta
 
-        now = datetime.utcnow()
+        now = now_utc_naive()
         max_watchlist = 100
         min_age_days = 7  # Don't remove recently added
 
@@ -2192,7 +2193,7 @@ async def lifespan(app: FastAPI):
                             "strategy": change.get("strategy", ""),
                             "status": "filled",
                             "market": "KR",
-                            "created_at": datetime.utcnow().isoformat(),
+                            "created_at": now_utc_naive().isoformat(),
                         }
                     )
                     # STOCK-52: When a pending SELL order is confirmed filled,
@@ -2388,7 +2389,7 @@ async def lifespan(app: FastAPI):
         try:
             from datetime import datetime, timedelta
             from sqlalchemy import text
-            cutoff = datetime.utcnow() - timedelta(days=30)
+            cutoff = now_utc_naive() - timedelta(days=30)
             async with session_factory() as session:
                 result = await session.execute(
                     text("DELETE FROM funnel_events WHERE ts < :cutoff"),

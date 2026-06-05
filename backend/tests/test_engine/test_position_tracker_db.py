@@ -1854,6 +1854,108 @@ class TestRestoreFromDb:
         assert abs((ts - live_time).total_seconds()) < 1.0
 
     @pytest.mark.asyncio
+    async def test_ensure_tracked_fills_individual_gap(
+        self, risk, order_mgr, db_factory
+    ):
+        """ensure_tracked must register an exchange position missing
+        from _tracked, with entry_unix pulled from orders. This is the
+        gap-fill that prevents fail-closed _check_min_hold from
+        permanently blocking cleanup SELLs on a single dropped symbol.
+
+        Key difference from _auto_recover_untracked: works even when
+        OTHER symbols are already tracked (the recover path early-
+        returns when _tracked is non-empty).
+        """
+        import time as _t
+        from datetime import datetime, timedelta, timezone
+
+        from core.models import Order
+        from exchange.base import Position
+
+        true_buy = datetime.utcnow() - timedelta(days=4)
+        async with db_factory() as session:
+            session.add(
+                Order(
+                    account_id="ACC001",
+                    symbol="GAP", side="BUY",
+                    order_type="market", quantity=5, price=100.0,
+                    status="filled", strategy_name="trend",
+                    is_paper=False,
+                    created_at=true_buy,
+                )
+            )
+            await session.commit()
+
+        adapter = AsyncMock()
+        tracker = _make_tracker(adapter, risk, order_mgr)
+        # Seed an UNRELATED tracked position so _auto_recover_untracked
+        # wouldn't fire (it only fires when _tracked is empty).
+        tracker.track("OTHER", 50.0, 5, strategy="manual")
+        tracker._session_factory = db_factory
+
+        positions = [
+            Position(symbol="OTHER", exchange="NASD", quantity=5,
+                     avg_price=50.0, current_price=50.0),
+            Position(symbol="GAP", exchange="NASD", quantity=5,
+                     avg_price=100.0, current_price=110.0),
+        ]
+        recovered = await tracker.ensure_tracked(positions)
+        assert recovered == 1
+        assert "GAP" in tracker._tracked
+        # entry_unix matches the 4-day-old BUY, NOT time.time() now.
+        gap = tracker._tracked["GAP"]
+        expected = true_buy.replace(tzinfo=timezone.utc).timestamp()
+        assert abs(gap.entry_unix - expected) < 1.0
+        elapsed = _t.time() - gap.entry_unix
+        assert 3.9 * 86400 < elapsed < 4.1 * 86400
+
+    @pytest.mark.asyncio
+    async def test_ensure_tracked_is_idempotent(
+        self, risk, order_mgr, db_factory
+    ):
+        """ensure_tracked must not re-track already-tracked symbols
+        (would reset entry_unix and re-arm the 72h clock)."""
+        import time as _t
+
+        from exchange.base import Position
+
+        adapter = AsyncMock()
+        tracker = _make_tracker(adapter, risk, order_mgr)
+        tracker._session_factory = db_factory
+
+        # Manually set entry_unix to 10 days ago.
+        tracker.track("HELD", 100.0, 5, strategy="trend")
+        original_unix = _t.time() - 10 * 86400
+        tracker._tracked["HELD"].entry_unix = original_unix
+
+        positions = [
+            Position(symbol="HELD", exchange="NASD", quantity=5,
+                     avg_price=100.0, current_price=110.0),
+        ]
+        recovered = await tracker.ensure_tracked(positions)
+        assert recovered == 0
+        # entry_unix preserved — NOT overwritten with time.time().
+        assert tracker._tracked["HELD"].entry_unix == original_unix
+
+    @pytest.mark.asyncio
+    async def test_ensure_tracked_skips_zero_quantity(
+        self, risk, order_mgr, db_factory
+    ):
+        """Defensive: positions with qty 0 (closed) must not be re-tracked."""
+        from exchange.base import Position
+
+        adapter = AsyncMock()
+        tracker = _make_tracker(adapter, risk, order_mgr)
+
+        positions = [
+            Position(symbol="ZERO", exchange="NASD", quantity=0,
+                     avg_price=100.0, current_price=110.0),
+        ]
+        recovered = await tracker.ensure_tracked(positions)
+        assert recovered == 0
+        assert "ZERO" not in tracker._tracked
+
+    @pytest.mark.asyncio
     async def test_auto_recover_survives_db_error(
         self, risk, order_mgr, db_factory
     ):

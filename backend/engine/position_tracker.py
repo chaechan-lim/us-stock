@@ -16,6 +16,8 @@ import logging
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+
+from core.timeutil import now_utc_naive
 from typing import TYPE_CHECKING, Callable
 
 from data.market_data_service import MarketDataService
@@ -1210,50 +1212,76 @@ class PositionTracker:
             logger.debug("Auto-recovery: no exchange positions found")
             return
 
-        # Track any exchange positions not already tracked
-        recovered = 0
-        for pos in positions:
-            if pos.quantity <= 0 or pos.symbol in self._tracked:
-                continue
-            # 2026-06-05: pull true first-BUY time from orders so the
-            # min_hold gate doesn't reset every 10 min auto-recover.
-            # Without this a held-for-days position effectively re-arms
-            # the 72h clock on every recovery cycle.
-            opened_unix: float | None = None
-            if self._session_factory:
-                try:
-                    async with self._session_factory() as session:
-                        # Lenient — paper/SELL fallback is preferable to
-                        # resetting the 72h min_hold clock to "now".
-                        first_buy = await self._lookup_first_buy_time(
-                            session, pos.symbol, allow_fallback=True,
-                        )
-                    if first_buy:
-                        if first_buy.tzinfo is None:
-                            first_buy = first_buy.replace(tzinfo=timezone.utc)
-                        opened_unix = first_buy.timestamp()
-                except Exception as e:
-                    logger.warning(
-                        "auto-recover entry_unix lookup failed for %s: %s",
-                        pos.symbol, e,
-                    )
-            self.track(
-                symbol=pos.symbol,
-                entry_price=pos.avg_price,
-                quantity=int(pos.quantity),
-                strategy="unknown",
-                stop_loss_pct=self._risk.params.default_stop_loss_pct,
-                take_profit_pct=self._risk.params.default_take_profit_pct,
-                entry_unix=opened_unix,
-            )
-            recovered += 1
-
+        # Delegate per-symbol gap-fill to ensure_tracked so the inline
+        # loop and the per-cycle gap-fill share one implementation.
+        recovered = await self.ensure_tracked(positions)
         if recovered:
             logger.warning(
                 "Auto-recovered %d untracked %s positions for SL/TP monitoring",
                 recovered,
                 self._market,
             )
+
+    async def _track_from_exchange_pos(self, pos: "Position") -> None:
+        """Track a single exchange position, pulling entry_unix from orders.
+
+        Shared between `_auto_recover_untracked` (full tracker rebuild
+        when tracker is empty) and `ensure_tracked` (per-cycle gap-fill
+        when individual symbols are missing).
+        """
+        opened_unix: float | None = None
+        if self._session_factory:
+            try:
+                async with self._session_factory() as session:
+                    # Lenient — paper/SELL fallback is preferable to
+                    # resetting the 72h min_hold clock to "now".
+                    first_buy = await self._lookup_first_buy_time(
+                        session, pos.symbol, allow_fallback=True,
+                    )
+                if first_buy:
+                    if first_buy.tzinfo is None:
+                        first_buy = first_buy.replace(tzinfo=timezone.utc)
+                    opened_unix = first_buy.timestamp()
+            except Exception as e:
+                logger.warning(
+                    "entry_unix lookup failed for %s: %s", pos.symbol, e,
+                )
+        self.track(
+            symbol=pos.symbol,
+            entry_price=pos.avg_price,
+            quantity=int(pos.quantity),
+            strategy="unknown",
+            stop_loss_pct=self._risk.params.default_stop_loss_pct,
+            take_profit_pct=self._risk.params.default_take_profit_pct,
+            entry_unix=opened_unix,
+        )
+
+    async def ensure_tracked(self, exchange_positions: "list[Position]") -> int:
+        """Track held positions missing from _tracked. Returns gap-fill count.
+
+        2026-06-05: per-cycle complement to `_auto_recover_untracked`,
+        which only fires when `_tracked` is entirely empty. Without this,
+        a single position dropping out of the tracker (race, partial
+        reconciliation failure, etc.) silently disables the min_hold
+        gate for that symbol — fail-closed `_check_min_hold` blocks
+        legitimate cleanup SELLs forever.
+
+        Called from EvaluationLoop after computing `held` so every
+        symbol downstream has a valid `entry_unix` source. Idempotent
+        on already-tracked symbols.
+        """
+        recovered = 0
+        for pos in exchange_positions:
+            if pos.quantity <= 0 or pos.symbol in self._tracked:
+                continue
+            await self._track_from_exchange_pos(pos)
+            recovered += 1
+        if recovered:
+            logger.info(
+                "ensure_tracked: filled %d %s tracker gaps",
+                recovered, self._market,
+            )
+        return recovered
 
     async def sync_to_db(self, session_factory=None) -> int:
         """Synchronize all in-memory tracked positions to the positions DB table.
@@ -1629,11 +1657,11 @@ class PositionTracker:
                 record.current_price = current_price
             if unrealized_pnl is not None:
                 record.unrealized_pnl = unrealized_pnl
-            record.updated_at = datetime.utcnow()
+            record.updated_at = now_utc_naive()
         else:
             # Look up actual first buy time from orders table
             first_buy_time = await self._lookup_first_buy_time(session, symbol)
-            opened_at = first_buy_time if first_buy_time else datetime.utcnow()
+            opened_at = first_buy_time if first_buy_time else now_utc_naive()
 
             record = PositionRecord(
                 account_id=self._account_id,
@@ -1651,7 +1679,7 @@ class PositionTracker:
                 highest_price=tracked.highest_price,  # STOCK-58: Persist highest price
                 partial_profit_taken=tracked.partial_profit_taken,  # STOCK-58: Persist partial profit flag
                 opened_at=opened_at,
-                updated_at=datetime.utcnow(),
+                updated_at=now_utc_naive(),
             )
             session.add(record)
 

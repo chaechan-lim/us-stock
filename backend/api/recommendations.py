@@ -5,6 +5,8 @@ proposed config changes from agents (trade_review for now).
 """
 
 from datetime import datetime
+
+from core.timeutil import now_utc_naive
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
@@ -150,7 +152,7 @@ async def accept_recommendation(
 
         # Step 3: mark accepted.
         rec.status = "accepted"
-        rec.applied_at = datetime.utcnow()
+        rec.applied_at = now_utc_naive()
         if body and body.notes:
             rec.notes = body.notes
         await session.commit()

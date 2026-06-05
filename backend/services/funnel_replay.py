@@ -39,6 +39,8 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta
+
+from core.timeutil import now_utc_naive
 from typing import Any
 
 from sqlalchemy import and_, func, select
@@ -100,7 +102,7 @@ async def replay_recommendation(
     if handler is None:  # programmer error — handler name typo
         return {"error": f"handler {handler_name!r} not defined"}
 
-    since = datetime.utcnow() - timedelta(days=lookback_days)
+    since = now_utc_naive() - timedelta(days=lookback_days)
     return await handler(
         session=session,
         market=market,
@@ -151,7 +153,7 @@ async def _replay_daily_limit(
 
     return {
         "method": "funnel_replay",
-        "lookback_days": (datetime.utcnow() - since).days,
+        "lookback_days": (now_utc_naive() - since).days,
         "filter": f"market={market} reject_reason={reject_reason}",
         "replayed_rejections": total_rejects,
         "would_pass_under_proposed": would_pass,
@@ -207,7 +209,7 @@ async def _replay_opening_avoidance(
 
     return {
         "method": "funnel_replay",
-        "lookback_days": (datetime.utcnow() - since).days,
+        "lookback_days": (now_utc_naive() - since).days,
         "filter": f"market={market} reject_reason={reject_reason}",
         "replayed_rejections": total,
         "would_pass_under_proposed": would_pass,
@@ -268,7 +270,7 @@ async def _replay_sell_cooldown(
 
     return {
         "method": "funnel_replay",
-        "lookback_days": (datetime.utcnow() - since).days,
+        "lookback_days": (now_utc_naive() - since).days,
         "filter": f"market={market} reject_reason={reject_reason}",
         "replayed_rejections": total,
         "would_pass_under_proposed": would_pass,

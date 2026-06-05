@@ -10,6 +10,7 @@ from datetime import datetime, timedelta
 
 from exchange.base import ExchangeAdapter, OrderResult
 from engine.risk_manager import RiskManager, PositionSizeResult
+from core.timeutil import now_utc_naive
 
 logger = logging.getLogger(__name__)
 
@@ -205,7 +206,7 @@ class OrderManager:
                 filled_quantity=filled_qty,
                 filled_price=result.filled_price,
                 slippage=slippage,
-                created_at=datetime.utcnow().isoformat(),
+                created_at=now_utc_naive().isoformat(),
                 exchange=exchange,
             )
             self._active_orders[result.order_id] = order
@@ -348,7 +349,7 @@ class OrderManager:
                 filled_quantity=filled_qty,
                 filled_price=result.filled_price,
                 slippage=slippage,
-                created_at=datetime.utcnow().isoformat(),
+                created_at=now_utc_naive().isoformat(),
                 exchange=exchange,
             )
             self._active_orders[result.order_id] = order
@@ -631,7 +632,7 @@ class OrderManager:
         if not self._active_orders or ttl_minutes <= 0:
             return []
 
-        now = datetime.utcnow()
+        now = now_utc_naive()
         cutoff = now - timedelta(minutes=ttl_minutes)
         cancelled = []
 

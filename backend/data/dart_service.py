@@ -26,6 +26,8 @@ from pathlib import Path
 
 import aiohttp
 
+from core.timeutil import now_utc_naive
+
 logger = logging.getLogger(__name__)
 
 DART_BASE_URL = "https://opendart.fss.or.kr/api"
@@ -185,7 +187,7 @@ class DARTInsiderService:
                 else:
                     self._signal_cache[symbol] = 0.0
 
-        self._last_refresh = datetime.utcnow()
+        self._last_refresh = now_utc_naive()
 
     def _stock_to_corp(self, stock_code: str) -> str:
         """Resolve 6-digit KRX code to 8-digit DART corp_code.

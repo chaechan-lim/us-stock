@@ -1084,6 +1084,22 @@ class EvaluationLoop:
             exchange_held = {p.symbol for p in exchange_positions if p.quantity > 0}
             held = held | exchange_held
             position_map = {p.symbol: p for p in exchange_positions if p.quantity > 0}
+            # 2026-06-05: gap-fill tracker for any held symbols that
+            # dropped out. Without this, `_check_min_hold` returns
+            # fail-closed for the missing symbol and stuck SELLs (incl.
+            # position_cleanup at -3% to -15% PnL) silently block,
+            # leaving the position to mature unchecked.
+            if self._position_tracker:
+                try:
+                    held_positions = [
+                        p for p in exchange_positions if p.quantity > 0
+                    ]
+                    await self._position_tracker.ensure_tracked(held_positions)
+                except Exception as e:
+                    logger.warning(
+                        "ensure_tracked failed: %s — min_hold may fail-closed "
+                        "on untracked symbols this cycle", e,
+                    )
         except Exception as e:
             self._cycle_positions = None
             logger.warning(
