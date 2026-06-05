@@ -2022,7 +2022,18 @@ async def lifespan(app: FastAPI):
         US tickers (alpha) to Finnhub and KR codes (6-digit numeric) to
         DART internally.
         """
-        if not earnings_svc.available:
+        # Bug-019 (2026-06-05): the previous guard short-circuited on
+        # the Finnhub-only `earnings_svc.available` flag, which made
+        # KR-only deployments (DART_API_KEY set, no FINNHUB_API_KEY)
+        # silently skip refresh_all → DART._last_refresh stayed None →
+        # every KR symbol got the neutral 0.0 adjustment forever.
+        # Now we gate on EITHER service being usable so a single-side
+        # operator posture still drives the refresh.
+        kr_insider_ready = bool(
+            getattr(event_calendar, "kr_insider", None)
+            and event_calendar.kr_insider.enabled
+        )
+        if not earnings_svc.available and not kr_insider_ready:
             return
         try:
             from db.trade_repository import TradeRepository

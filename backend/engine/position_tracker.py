@@ -1414,16 +1414,39 @@ class PositionTracker:
             return 0
 
         # Fetch current prices from exchange to populate current_price/unrealized_pnl
+        # Also build a separate `exchange_held` set keyed on quantity>0
+        # — see STATE-B3 prune block below.
         price_map: dict[str, float] = {}
+        exchange_held: set[str] = set()
+        broker_fetch_ok = False
         if self._tracked:
             try:
                 if self._market_data:
                     positions = await self._market_data.get_positions()
                 else:
                     positions = await self._adapter.fetch_positions()
+                # Two separate signals from one broker call:
+                #   - price_map: symbols with a non-zero current price
+                #     (only those can populate PnL on the DB row)
+                #   - exchange_held: symbols the broker says we own
+                #     (regardless of whether a price was returned —
+                #     halted stocks, post-market unpriced ETFs and
+                #     throttled responses can all have current_price=0
+                #     while quantity>0)
                 price_map = {p.symbol: p.current_price for p in positions if p.current_price > 0}
+                exchange_held = {p.symbol for p in positions if p.quantity > 0}
+                broker_fetch_ok = True
             except Exception as e:
-                logger.debug("Failed to fetch prices for DB sync: %s", e)
+                # Bug-merged-007: do NOT proceed with the prune branch
+                # below on broker failure. A transient EGW00133 / pool
+                # timeout used to fall through to "KIS confirms gone"
+                # and delete every legitimately-held DB row when the
+                # tracker was partially restored.
+                logger.warning(
+                    "Broker fetch failed for DB sync — skipping the "
+                    "exchange-confirmed-gone prune branch this cycle: %s",
+                    e,
+                )
 
         # Re-resolve "unknown" strategies from order history
         unknown_symbols = [sym for sym, t in self._tracked.items() if t.strategy in ("unknown", "")]
@@ -1447,17 +1470,26 @@ class PositionTracker:
 
                 # Remove DB rows for positions no longer tracked.
                 #
-                # Three deletion paths, from most-trusted to most-cautious:
+                # Deletion paths, from most-trusted to most-cautious:
                 #   1. The symbol is in `pending_remove` — untrack() was
                 #      called explicitly. Safe to delete.
                 #   2. The tracker has SOME entries but is missing this
-                #      symbol AND the broker also says we don't hold it.
+                #      symbol AND the broker confirms we don't hold it.
                 #      Reconciles the case where an external SELL
                 #      happened without our untrack() flow firing.
                 #   3. Otherwise — tracker is wholly empty (restart
-                #      race) or KIS still reports the symbol as held
-                #      — preserve the DB row.
-                exchange_held: set[str] = set(price_map.keys())  # populated above
+                #      race), broker fetch failed, or KIS still reports
+                #      the symbol as held — preserve the DB row.
+                #
+                # Bug-merged-007 (2026-06-05): path-2 used to consult
+                # `set(price_map.keys())` which excludes any held
+                # position whose current_price is 0 (halted /
+                # throttled response / unpriced ETF), wiping
+                # legitimately-held DB rows. Now consults the
+                # quantity-based `exchange_held` set built above; and
+                # the entire prune branch is gated on
+                # `broker_fetch_ok` so a transient broker failure
+                # doesn't trigger mass-delete either.
                 stmt = select(PositionRecord).where(
                     PositionRecord.account_id == self._account_id,
                     PositionRecord.market == self._market,
@@ -1487,8 +1519,14 @@ class PositionTracker:
                     # signal = restart race; preserve.
                     if tracker_wholly_empty:
                         continue
-                    # Path 3b: KIS still reports it held; preserve and
-                    # trust the broker.
+                    # Path 3b: broker fetch failed — we don't know
+                    # whether KIS still holds this symbol. Preserve.
+                    if not broker_fetch_ok:
+                        continue
+                    # Path 3c: KIS still reports it held; preserve and
+                    # trust the broker. Now uses the quantity-based
+                    # `exchange_held` set (not price_map.keys()) so
+                    # zero-priced held positions are kept.
                     if db_pos.symbol in exchange_held:
                         logger.warning(
                             "sync_to_db: %s held on exchange but missing "
@@ -1497,7 +1535,7 @@ class PositionTracker:
                         )
                         continue
                     # Path 2: tracker has other entries, missing this
-                    # one AND KIS confirms gone → safe to delete.
+                    # one AND broker confirms gone → safe to delete.
                     await session.delete(db_pos)
 
                 # Upsert all currently tracked positions with current prices

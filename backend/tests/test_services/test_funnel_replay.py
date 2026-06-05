@@ -87,12 +87,18 @@ class TestDailyLimitReplay:
 
 
 class TestOpeningAvoidanceReplay:
+    # Bug-002 (2026-06-05): ts is stored as naive UTC (now_utc_naive
+    # default). KR open is 09:00 KST = 00:00 UTC, so an event "N min
+    # into the session" has naive-UTC ts at 00:N. The replay handler
+    # converts to Asia/Seoul before extracting hour/minute. Tests
+    # previously stored ts at hour=9 UTC and accidentally passed
+    # because the comparison was unit-inconsistent.
     async def test_shorter_window_passes_more(self, session):
         base = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
-        # KR open = 09:00. Event at 09:10 (10 min in) and 09:25 (25 min in)
+        # 10/25/40 min into the KR session (09:10/09:25/09:40 KST)
         for minute_offset in (10, 25, 40):
             session.add(FunnelEvent(
-                ts=base + timedelta(hours=9, minutes=minute_offset),
+                ts=base + timedelta(minutes=minute_offset),
                 market="KR", symbol=f"S{minute_offset}", strategy_name="t",
                 signal_confidence=0.6, decision="rejected",
                 reject_reason="opening_avoidance", price=100.0,
@@ -110,8 +116,9 @@ class TestOpeningAvoidanceReplay:
 
     async def test_longer_window_passes_fewer(self, session):
         base = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+        # 35 min into the KR session = naive-UTC 00:35 → KST 09:35
         session.add(FunnelEvent(
-            ts=base + timedelta(hours=9, minutes=35),
+            ts=base + timedelta(minutes=35),
             market="KR", symbol="X", strategy_name="t",
             signal_confidence=0.6, decision="rejected",
             reject_reason="opening_avoidance", price=100.0,

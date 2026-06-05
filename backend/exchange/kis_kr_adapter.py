@@ -106,6 +106,9 @@ class KISKRAdapter(ExchangeAdapter):
         self._tot_evlu_amt: float = 0.0  # 총평가금액 (통합증거금: KR+overseas)
         self._scts_evlu_amt: float = 0.0  # 국내주식 평가금액
         self._dnca_tot_amt: float = 0.0   # 예수금 총액
+        # Bug-009-1 (2026-06-05): mirror for `invested` so the api_empty
+        # restore branch can log a sensible value instead of 0.
+        self._pchs_amt_smtl_amt: float = 0.0  # 매입금액합계
         self._integrated_total_asset: float = 0.0  # CTRP6548R 통합 총자산
         self._integrated_total_asset_ts: float = 0.0  # last fetch time
         # RES-B1 (2026-06-05): KIS REST throttle shared with US adapter.
@@ -398,6 +401,7 @@ class KISKRAdapter(ExchangeAdapter):
             self._scts_evlu_amt = stock_eval
             self._tot_evlu_amt = tot_evlu_new
             self._dnca_tot_amt = deposit
+            self._pchs_amt_smtl_amt = invested
         else:
             logger.warning(
                 "KR balance API returned empty output2; keeping cached "
@@ -407,6 +411,7 @@ class KISKRAdapter(ExchangeAdapter):
             # Use cached values for the rest of this call
             stock_eval = self._scts_evlu_amt
             deposit = self._dnca_tot_amt
+            invested = self._pchs_amt_smtl_amt
 
         # Get actual orderable amount via 주문가능조회
         # dnca_tot_amt includes unsettled US stock buys — not actual buying power

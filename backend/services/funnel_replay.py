@@ -38,7 +38,8 @@ listed (not silently dropped).
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from core.timeutil import now_utc_naive
 from typing import Any
@@ -67,11 +68,23 @@ _REPLAY_HANDLERS: dict[str, tuple[str, str, str]] = {
 }
 
 
-# Per-market trading session start time (UTC offset already baked into
-# ts column since we store local-naive datetimes per main.py convention)
+# Per-market trading session start time, in market-local wall-clock.
+#
+# Bug-002 (2026-06-05): the prior comment claimed UTC offset was
+# "baked into ts" — wrong. FunnelEvent.ts uses `now_utc_naive` which
+# is naive UTC (after the utcnow→core.timeutil migration). Comparing
+# UTC `ts.hour*60+ts.minute` to a 09:00 KST anchor wrapped via +1440
+# and made `would_pass_under_proposed` ≈100% for every realistic
+# threshold, silently biasing operator-facing replay summaries.
+# Now: convert ts (naive UTC) to the market's local timezone before
+# extracting hour/minute.
 _MARKET_OPEN = {
     "KR": (9, 0),    # 09:00 KST
-    "US": (9, 30),   # 09:30 ET
+    "US": (9, 30),   # 09:30 ET — DST handled by zoneinfo
+}
+_MARKET_TZ = {
+    "KR": ZoneInfo("Asia/Seoul"),
+    "US": ZoneInfo("America/New_York"),
 }
 
 
@@ -185,6 +198,7 @@ async def _replay_opening_avoidance(
 
     open_h, open_m = _MARKET_OPEN.get(market, (9, 30))
     open_total_min = open_h * 60 + open_m
+    local_tz = _MARKET_TZ.get(market, ZoneInfo("UTC"))
 
     q = select(FunnelEvent.ts).where(
         and_(
@@ -199,8 +213,15 @@ async def _replay_opening_avoidance(
     total = len(rows)
     would_pass = 0
     for row in rows:
+        # Bug-002: ts is naive UTC (now_utc_naive default). Attach the
+        # UTC zone, then convert to market-local before extracting
+        # hour/minute so the comparison against `open_total_min` (in
+        # market-local wall-clock) is unit-consistent.
         ts = row.ts
-        minute_of_day = ts.hour * 60 + ts.minute
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        local_ts = ts.astimezone(local_tz)
+        minute_of_day = local_ts.hour * 60 + local_ts.minute
         elapsed = minute_of_day - open_total_min
         if elapsed < 0:
             elapsed += 24 * 60     # pre-open noise (rare); wrap
