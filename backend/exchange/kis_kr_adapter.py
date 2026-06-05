@@ -97,7 +97,7 @@ _MRKT_DIV = {"KRX": "J", "KOSDAQ": "K"}
 class KISKRAdapter(ExchangeAdapter):
     """KIS REST API adapter for Korean domestic stocks."""
 
-    def __init__(self, config: KISConfig, auth: KISAuth):
+    def __init__(self, config: KISConfig, auth: KISAuth, rate_limiter=None):
         self._config = config
         self._auth = auth
         self._session: aiohttp.ClientSession | None = None
@@ -108,6 +108,10 @@ class KISKRAdapter(ExchangeAdapter):
         self._dnca_tot_amt: float = 0.0   # 예수금 총액
         self._integrated_total_asset: float = 0.0  # CTRP6548R 통합 총자산
         self._integrated_total_asset_ts: float = 0.0  # last fetch time
+        # RES-B1 (2026-06-05): KIS REST throttle shared with US adapter.
+        # Without this, KR balance/orders/holiday calls bypassed the
+        # 20/s limit and contributed to today's EGW00133 storm.
+        self._rate_limiter = rate_limiter
 
     async def initialize(self) -> None:
         self._session = aiohttp.ClientSession()
@@ -1090,6 +1094,8 @@ class KISKRAdapter(ExchangeAdapter):
         url = f"{self._config.base_url}{path}"
         data: dict[str, Any] = {}
         for attempt in range(max_retries):
+            if self._rate_limiter:
+                await self._rate_limiter.acquire()
             headers = self._auth.get_auth_headers(tr_id)
             async with self._session.get(url, headers=headers, params=params) as resp:
                 if resp.status >= 400:
@@ -1137,6 +1143,8 @@ class KISKRAdapter(ExchangeAdapter):
         url = f"{self._config.base_url}{path}"
         data: dict[str, Any] = {}
         for attempt in range(max_retries):
+            if self._rate_limiter:
+                await self._rate_limiter.acquire()
             headers = self._auth.get_auth_headers(tr_id, hashkey)
             async with self._session.post(url, headers=headers, json=body) as resp:
                 if resp.status >= 400:

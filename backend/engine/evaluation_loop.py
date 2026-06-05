@@ -218,6 +218,13 @@ class EvaluationLoop:
         # Per-cycle position cache — set at start of _evaluate_all, cleared after.
         # Downstream methods use _get_positions() which returns this cache when fresh.
         self._cycle_positions: list | None = None
+        # CON-B1 (2026-06-05): serialise concurrent _evaluate_all calls.
+        # The scheduler awaits one tick at a time, but POST /engine/run-
+        # evaluation lets MCP / operator re-enter the same coroutine,
+        # which races on _cycle_positions, _last_signal, _daily_buy_count,
+        # _recent_signals etc. Same-symbol double BUYs are possible
+        # without this guard.
+        self._evaluate_lock = asyncio.Lock()
 
     async def _get_positions(self) -> list:
         """Return cached positions from current eval cycle, or fetch fresh."""
@@ -1055,7 +1062,25 @@ class EvaluationLoop:
 
         SELLs execute immediately. BUYs are ranked by confidence so
         the highest-conviction signals get filled first when cash is limited.
+
+        CON-B1 (2026-06-05): wrapped in `_evaluate_lock` so a manual
+        /engine/run-evaluation cannot race the scheduler tick — two
+        concurrent passes shared `_last_signal`, `_daily_buy_count`,
+        `_cycle_positions`, and could double-fire a BUY for the same
+        symbol if `has_pending_order` hadn't yet recorded the first.
         """
+        if self._evaluate_lock.locked():
+            logger.warning(
+                "Skipping concurrent _evaluate_all on %s — another caller "
+                "is mid-cycle (CON-B1 guard)", self._market,
+            )
+            return
+        async with self._evaluate_lock:
+            await self._evaluate_all_locked()
+
+    async def _evaluate_all_locked(self) -> None:
+        """Locked body — same code as before. Split out so callers that
+        already hold the lock (none today) can bypass."""
         # Update factor scores periodically
         now = time.time()
         if now - self._last_factor_update > self._factor_update_interval:

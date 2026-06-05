@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import time
 
 from fastapi import APIRouter, Request
 
@@ -10,6 +11,18 @@ from engine.scheduler import get_market_phase
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/engine", tags=["engine"])
+
+# CON-B2 (2026-06-05): module-level guard against spawning a second
+# detached `scheduler.start()` task. POST /engine/start used to
+# `asyncio.create_task(scheduler.start())` without storing the ref,
+# so a repeated call (Claude Desktop loop, button mash) would launch
+# a parallel scheduler that races every task. The first guard layer is
+# `scheduler.running`; this is the second layer for the moments
+# between create_task and the scheduler actually flipping the flag.
+_start_task: asyncio.Task | None = None
+# Rate limit: minimum interval between `/engine/run-evaluation` calls.
+_LAST_EVAL_REQUEST_TS: float = 0.0
+_EVAL_MIN_INTERVAL_SEC = 30
 
 
 @router.get("/status")
@@ -24,12 +37,18 @@ async def engine_status(request: Request):
 @router.post("/start")
 async def start_engine(request: Request):
     """Start the trading scheduler."""
+    global _start_task
     scheduler = getattr(request.app.state, "scheduler", None)
     if not scheduler:
         return {"status": "error", "detail": "Scheduler not initialized"}
     if scheduler.running:
         return {"status": "already_running"}
-    asyncio.create_task(scheduler.start())
+    # CON-B2: double-spawn guard. If a previous start() task hasn't yet
+    # set scheduler.running=True (or it's mid-startup), refuse rather
+    # than launching a second one.
+    if _start_task is not None and not _start_task.done():
+        return {"status": "starting", "detail": "Start already in progress"}
+    _start_task = asyncio.create_task(scheduler.start())
     notification = getattr(request.app.state, "notification", None)
     if notification:
         await notification.notify_system_event("engine_start", "Trading engine started")
@@ -169,7 +188,25 @@ async def adaptive_weights_status(request: Request):
 
 @router.post("/evaluate")
 async def run_evaluation(request: Request):
-    """Manually trigger one evaluation cycle (for testing outside market hours)."""
+    """Manually trigger one evaluation cycle (for testing outside market hours).
+
+    CON-B1 + RES-H3 (2026-06-05): hard-cap one call per
+    `_EVAL_MIN_INTERVAL_SEC` seconds so an MCP loop / Claude Desktop
+    button-press can't hammer the scheduler tick. The actual race
+    protection lives inside `EvaluationLoop._evaluate_all`, but
+    catching it at the API edge avoids waking the eval coroutine
+    only to reject the call.
+    """
+    global _LAST_EVAL_REQUEST_TS
+    now = time.time()
+    if now - _LAST_EVAL_REQUEST_TS < _EVAL_MIN_INTERVAL_SEC:
+        wait = _EVAL_MIN_INTERVAL_SEC - (now - _LAST_EVAL_REQUEST_TS)
+        return {
+            "status": "rate_limited",
+            "detail": f"min interval {_EVAL_MIN_INTERVAL_SEC}s; retry in {wait:.0f}s",
+        }
+    _LAST_EVAL_REQUEST_TS = now
+
     eval_loop = getattr(request.app.state, "evaluation_loop", None)
     if not eval_loop:
         return {"status": "error", "detail": "Evaluation loop not initialized"}

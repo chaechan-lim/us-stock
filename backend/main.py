@@ -280,6 +280,11 @@ async def lifespan(app: FastAPI):
     if created_idxs:
         logger.info("Auto-migration created indexes: %s", ", ".join(created_idxs))
 
+    # RES-B1 (2026-06-05): create RateLimiter before any adapter so
+    # the live KIS adapters can share the same 20/s budget on their
+    # direct _get/_post calls. Paper adapters ignore the limiter.
+    rate_limiter = RateLimiter(max_per_second=5 if config.is_paper else 20)
+
     # Initialize exchange adapter
     if config.is_paper:
         from exchange.paper_adapter import PaperAdapter
@@ -296,7 +301,7 @@ async def lifespan(app: FastAPI):
             base_url=config.kis.base_url,
             redis_client=cache if cache.available else None,
         )
-        adapter = KISAdapter(config.kis, auth)
+        adapter = KISAdapter(config.kis, auth, rate_limiter=rate_limiter)
         await adapter.initialize()
 
     app.state.adapter = adapter
@@ -314,7 +319,10 @@ async def lifespan(app: FastAPI):
     else:
         from exchange.kis_kr_adapter import KISKRAdapter
 
-        kr_adapter = KISKRAdapter(config.kis, auth)
+        # Share the same throttle so KR + US calls compete for the same
+        # 20-req-per-second budget (KIS limit is per app_key, not per
+        # market). `rate_limiter` was created above in the live branch.
+        kr_adapter = KISKRAdapter(config.kis, auth, rate_limiter=rate_limiter)
         await kr_adapter.initialize()
     app.state.kr_adapter = kr_adapter
     logger.info("KR adapter initialized (mode=%s)", config.trading.mode)
@@ -337,8 +345,8 @@ async def lifespan(app: FastAPI):
         kis_ws = KISWebSocket(auth=auth, ws_url=config.kis.ws_url)
     app.state.kis_ws = kis_ws
 
-    # Initialize services
-    rate_limiter = RateLimiter(max_per_second=5 if config.is_paper else 20)
+    # Initialize services (rate_limiter was created above and is shared
+    # with both adapters and MarketDataService)
     market_data = MarketDataService(adapter=adapter, rate_limiter=rate_limiter)
     app.state.market_data = market_data
     app.state.indicator_svc = IndicatorService()
@@ -2857,6 +2865,50 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# RES-B2 (2026-06-05): Bearer-token gate on write endpoints. The
+# CLAUDE.md doc claimed this was implemented but only CORS was wired
+# up — `POST /api/v1/engine/start`, `/stop`, `/evaluate`,
+# `/recommendations/{id}/accept` were all reachable anonymously on
+# :8001. Token comes from $AUTH_API_TOKEN; empty disables the gate
+# (preserves dev workflow). GET endpoints + /health are exempt.
+_AUTH_TOKEN = os.environ.get("AUTH_API_TOKEN", "").strip()
+_AUTH_EXEMPT_PATHS = {
+    "/health",
+    "/docs",
+    "/openapi.json",
+    "/redoc",
+}
+
+
+@app.middleware("http")
+async def bearer_auth_middleware(request, call_next):
+    if not _AUTH_TOKEN:
+        # Auth disabled — preserve dev / local mode.
+        return await call_next(request)
+    if request.method == "GET":
+        # GETs are read-only; allow without token.
+        return await call_next(request)
+    if request.url.path in _AUTH_EXEMPT_PATHS:
+        return await call_next(request)
+    # CORS preflight needs to pass through without auth.
+    if request.method == "OPTIONS":
+        return await call_next(request)
+
+    auth = request.headers.get("authorization", "")
+    if not auth.startswith("Bearer "):
+        from fastapi.responses import JSONResponse
+        return JSONResponse(
+            {"detail": "Missing Bearer token"}, status_code=401,
+        )
+    token = auth[len("Bearer "):].strip()
+    if token != _AUTH_TOKEN:
+        from fastapi.responses import JSONResponse
+        return JSONResponse(
+            {"detail": "Invalid token"}, status_code=403,
+        )
+    return await call_next(request)
 
 
 @app.get("/health")

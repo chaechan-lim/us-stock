@@ -104,6 +104,7 @@ class KISAdapter(ExchangeAdapter):
         config: Union[KISConfig, AccountConfig],
         auth: KISAuth,
         account_id: str = "ACC001",
+        rate_limiter=None,  # RES-B1 (2026-06-05): injected from main.py
     ):
         self._config = config
         self._auth = auth
@@ -117,6 +118,12 @@ class KISAdapter(ExchangeAdapter):
         self._tot_dncl_krw: float = 0.0  # CTRP6504R tot_dncl_amt (예수금, 통합증거금 공유)
         self._us_position_value_krw: float = 0.0  # CTRP6504R evlu_amt_smtl (미주 보유 평가금액)
         self._withdrawable_total_krw: float = 0.0  # CTRP6504R wdrw_psbl_tot_amt (통합 주문가능예수금)
+        # RES-B1: KIS REST 20/s real, 5/s paper. Direct `_get`/`_post`
+        # calls (orders, balance, holiday API, ranking APIs) used to
+        # bypass this limiter — only MarketDataService and
+        # UniverseExpander were rate-limited. Today's EGW00133 / 1-min
+        # token storm was the predictable consequence.
+        self._rate_limiter = rate_limiter
 
     async def initialize(self) -> None:
         self._session = aiohttp.ClientSession()
@@ -923,6 +930,11 @@ class KISAdapter(ExchangeAdapter):
         url = f"{self._config.base_url}{path}"
         data = {}
         for attempt in range(max_retries):
+            # RES-B1: throttle every request through the same limiter as
+            # MarketDataService so concurrent order/balance/scanner
+            # calls share the 20-req-per-second budget.
+            if self._rate_limiter:
+                await self._rate_limiter.acquire()
             headers = self._auth.get_auth_headers(tr_id)
             async with self._session.get(url, headers=headers, params=params) as resp:
                 if resp.status >= 400:
@@ -975,6 +987,8 @@ class KISAdapter(ExchangeAdapter):
         url = f"{self._config.base_url}{path}"
         data = {}
         for attempt in range(max_retries):
+            if self._rate_limiter:
+                await self._rate_limiter.acquire()
             headers = self._auth.get_auth_headers(tr_id, hashkey)
             async with self._session.post(url, headers=headers, json=body) as resp:
                 if resp.status >= 400:
