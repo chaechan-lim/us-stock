@@ -19,6 +19,16 @@ const api = axios.create({
   timeout: 15_000,
 })
 
+// SEC-B1 (2026-06-06): backend bearer middleware applies to every
+// non-exempt path including GETs. Frontend supplies the token via
+// Vite env (VITE_API_TOKEN). Without it the dashboard cannot reach
+// the API in live mode — leave undefined for dev / paper.
+const apiToken = (import.meta as ImportMeta & { env: { VITE_API_TOKEN?: string } })
+  .env?.VITE_API_TOKEN
+if (apiToken) {
+  api.defaults.headers.common['Authorization'] = `Bearer ${apiToken}`
+}
+
 // Accounts
 export const fetchAccounts = () =>
   api.get<AccountInfo[]>('/accounts/').then(r => r.data)
