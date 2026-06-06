@@ -29,6 +29,53 @@ if (apiToken) {
   api.defaults.headers.common['Authorization'] = `Bearer ${apiToken}`
 }
 
+// HIGH-14 (2026-06-07): global response interceptor for hot error
+// classes. Surfaces a CustomEvent any layout banner can subscribe to,
+// without coupling axios to a specific toast library. Per-call .catch
+// handlers still see the original error so they can fall through.
+export interface ApiErrorEvent {
+  status: number
+  url: string | undefined
+  message: string
+  level: 'auth' | 'rate' | 'server'
+}
+function emitApiError(detail: ApiErrorEvent): void {
+  try {
+    window.dispatchEvent(new CustomEvent('apiError', { detail }))
+  } catch {
+    /* SSR / non-DOM environments — ignore */
+  }
+}
+api.interceptors.response.use(
+  r => r,
+  err => {
+    const status = err?.response?.status ?? 0
+    const url = err?.config?.url
+    if (status === 401 || status === 403) {
+      emitApiError({
+        status, url,
+        message: status === 401
+          ? '인증 토큰이 없거나 만료되었습니다. VITE_API_TOKEN 확인 필요.'
+          : '권한이 없습니다 (403).',
+        level: 'auth',
+      })
+    } else if (status === 429) {
+      emitApiError({
+        status, url,
+        message: '요청이 너무 많습니다. 잠시 후 다시 시도하세요 (429).',
+        level: 'rate',
+      })
+    } else if (status >= 500) {
+      emitApiError({
+        status, url,
+        message: `서버 오류 (${status}). 백엔드 로그를 확인하세요.`,
+        level: 'server',
+      })
+    }
+    return Promise.reject(err)
+  },
+)
+
 // Accounts
 export const fetchAccounts = () =>
   api.get<AccountInfo[]>('/accounts/').then(r => r.data)

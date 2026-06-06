@@ -10,7 +10,7 @@ from core.timeutil import now_utc_naive
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import desc, select
 
 from core.models import AgentRecommendation
@@ -37,11 +37,13 @@ class RecommendationDTO(BaseModel):
 
 
 class RejectBody(BaseModel):
-    reason: str | None = None
+    # M23 (2026-06-07): bound free-form text to prevent abuse / DB bloat.
+    # 500 chars covers any realistic operator rejection note.
+    reason: str | None = Field(default=None, max_length=500)
 
 
 class AcceptBody(BaseModel):
-    notes: str | None = None
+    notes: str | None = Field(default=None, max_length=500)
 
 
 def _to_dto(r: AgentRecommendation) -> RecommendationDTO:

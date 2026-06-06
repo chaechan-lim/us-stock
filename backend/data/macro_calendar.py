@@ -1,7 +1,11 @@
 """Macro event calendar — FOMC, CPI, Jobs Report dates.
 
-Hardcoded 2026 calendar. No API calls needed.
+Hardcoded 2026 + 2027 calendar. No API calls needed.
 Used by evaluation loop to reduce sizing on high-volatility event days.
+
+M17 (2026-06-07): 2027 dates added. FOMC dates from the Fed's published
+2027 schedule. CPI dates approximated (BLS publishes ~12 months out,
+verify in Dec 2026). Jobs dates: first Friday of each month rule.
 """
 
 from __future__ import annotations
@@ -69,14 +73,66 @@ _JOBS_2026 = [
     ("2026-12-04", "Jobs Report (Nov 2026)"),
 ]
 
+# 2027 FOMC meeting dates (Fed's published schedule, verify in Dec 2026)
+_FOMC_2027 = [
+    ("2027-01-26", "FOMC Meeting Day 1"),
+    ("2027-01-27", "FOMC Decision Day"),
+    ("2027-03-16", "FOMC Meeting Day 1"),
+    ("2027-03-17", "FOMC Decision Day"),
+    ("2027-04-27", "FOMC Meeting Day 1"),
+    ("2027-04-28", "FOMC Decision Day"),
+    ("2027-06-15", "FOMC Meeting Day 1"),
+    ("2027-06-16", "FOMC Decision Day"),
+    ("2027-07-27", "FOMC Meeting Day 1"),
+    ("2027-07-28", "FOMC Decision Day"),
+    ("2027-09-21", "FOMC Meeting Day 1"),
+    ("2027-09-22", "FOMC Decision Day"),
+    ("2027-11-02", "FOMC Meeting Day 1"),
+    ("2027-11-03", "FOMC Decision Day"),
+    ("2027-12-14", "FOMC Meeting Day 1"),
+    ("2027-12-15", "FOMC Decision Day"),
+]
+
+# 2027 CPI release dates (BLS schedule, approximate — verify Dec 2026)
+_CPI_2027 = [
+    ("2027-01-13", "CPI Report (Dec 2026)"),
+    ("2027-02-10", "CPI Report (Jan 2027)"),
+    ("2027-03-10", "CPI Report (Feb 2027)"),
+    ("2027-04-13", "CPI Report (Mar 2027)"),
+    ("2027-05-12", "CPI Report (Apr 2027)"),
+    ("2027-06-09", "CPI Report (May 2027)"),
+    ("2027-07-13", "CPI Report (Jun 2027)"),
+    ("2027-08-11", "CPI Report (Jul 2027)"),
+    ("2027-09-14", "CPI Report (Aug 2027)"),
+    ("2027-10-13", "CPI Report (Sep 2027)"),
+    ("2027-11-10", "CPI Report (Oct 2027)"),
+    ("2027-12-09", "CPI Report (Nov 2027)"),
+]
+
+# 2027 Jobs Report — first Friday of each month
+_JOBS_2027 = [
+    ("2027-01-08", "Jobs Report (Dec 2026)"),
+    ("2027-02-05", "Jobs Report (Jan 2027)"),
+    ("2027-03-05", "Jobs Report (Feb 2027)"),
+    ("2027-04-02", "Jobs Report (Mar 2027)"),
+    ("2027-05-07", "Jobs Report (Apr 2027)"),
+    ("2027-06-04", "Jobs Report (May 2027)"),
+    ("2027-07-02", "Jobs Report (Jun 2027)"),
+    ("2027-08-06", "Jobs Report (Jul 2027)"),
+    ("2027-09-03", "Jobs Report (Aug 2027)"),
+    ("2027-10-01", "Jobs Report (Sep 2027)"),
+    ("2027-11-05", "Jobs Report (Oct 2027)"),
+    ("2027-12-03", "Jobs Report (Nov 2027)"),
+]
+
 
 def _build_events() -> list[MacroEvent]:
     events = []
-    for d, desc in _FOMC_2026:
+    for d, desc in _FOMC_2026 + _FOMC_2027:
         events.append(MacroEvent(date=d, event_type="FOMC", description=desc))
-    for d, desc in _CPI_2026:
+    for d, desc in _CPI_2026 + _CPI_2027:
         events.append(MacroEvent(date=d, event_type="CPI", description=desc))
-    for d, desc in _JOBS_2026:
+    for d, desc in _JOBS_2026 + _JOBS_2027:
         events.append(MacroEvent(date=d, event_type="JOBS", description=desc))
     events.sort(key=lambda e: e.date)
     return events

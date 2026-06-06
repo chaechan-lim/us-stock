@@ -1,7 +1,7 @@
 """Watchlist API endpoints (DB-backed)."""
 
 from fastapi import APIRouter, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from db.session import get_session_factory
 from db.trade_repository import TradeRepository
@@ -10,9 +10,12 @@ router = APIRouter(prefix="/watchlist", tags=["watchlist"])
 
 
 class WatchlistAdd(BaseModel):
-    symbol: str
-    exchange: str = "NASD"
-    market: str = "US"
+    # M23 (2026-06-07): bound free-form strings — KIS symbols are
+    # 5-6 alphanumeric (US) or 6-digit (KR); exchange/market codes are
+    # 4-char enums. Padding leaves room for ETFs/exotic listings.
+    symbol: str = Field(..., min_length=1, max_length=20, pattern=r"^[A-Za-z0-9._-]+$")
+    exchange: str = Field(default="NASD", max_length=10)
+    market: str = Field(default="US", max_length=4)
 
 
 async def _get_symbols(market: str = "US") -> list[dict]:
