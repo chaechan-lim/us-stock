@@ -356,7 +356,12 @@ class OrderManager:
             return order
 
         except Exception as e:
-            logger.error("Failed to place buy order for %s: %s", symbol, e)
+            # LOG-H9 (2026-06-06): exc_info=True so the traceback lands
+            # in journald — without it the symptom is harder to chase
+            # than the bug.
+            logger.error(
+                "Failed to place buy order for %s: %s", symbol, e, exc_info=True,
+            )
             return None
 
     async def place_sell(
@@ -496,7 +501,9 @@ class OrderManager:
             return order
 
         except Exception as e:
-            logger.error("Failed to place sell order for %s: %s", symbol, e)
+            logger.error(
+                "Failed to place sell order for %s: %s", symbol, e, exc_info=True,
+            )
             return None
 
     async def cancel(self, order_id: str, symbol: str) -> bool:

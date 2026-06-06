@@ -19,6 +19,7 @@ from typing import Any, TYPE_CHECKING
 import pandas as pd
 
 from core.constants import USD_KRW_FALLBACK
+from core.tasks import spawn as _spawn_bg
 from analytics.factor_model import FactorScores, MultiFactorModel
 from analytics.signal_quality import SignalQualityTracker
 from core.enums import SignalType
@@ -239,9 +240,15 @@ class EvaluationLoop:
         # call site automatically gets symbol/strategy/price context.
         sym = getattr(self, "_current_symbol", None)
         if sym:
-            asyncio.create_task(self._persist_funnel_event(
-                sym, decision="rejected", reason=reason,
-            ))
+            # RES-H7: tracked spawn — without retention the GC can
+            # cancel this row write mid-await, dropping funnel data
+            # silently. Exceptions are now logged.
+            _spawn_bg(
+                self._persist_funnel_event(
+                    sym, decision="rejected", reason=reason,
+                ),
+                name=f"funnel_reject:{sym}:{reason}",
+            )
 
     async def _persist_funnel_event(
         self, symbol: str, decision: str, reason: str | None = None,
@@ -273,10 +280,18 @@ class EvaluationLoop:
         """Roll over _daily_buy_count, _reject_counters, _buy_flow_counters
         when the date changes. Must run before any per-signal counter touch
         so the first BUY of a new day is attributed to the new day.
-        """
-        from datetime import date as _date
 
-        today = _date.today().isoformat()
+        DT-H8 (2026-06-06): server is Asia/Seoul. `date.today()` rolls
+        at 00:00 KST = 10:00 ET, so US daily_buy_count + reject_counters
+        used to zero ~30 min after US open — effectively doubling the
+        daily_buy_limit and re-arming reject gates mid-session.
+        Now we anchor on the market's local timezone via zoneinfo.
+        """
+        from datetime import datetime as _dt
+        from zoneinfo import ZoneInfo
+
+        tz = ZoneInfo("America/New_York") if self._market == "US" else ZoneInfo("Asia/Seoul")
+        today = _dt.now(tz).date().isoformat()
         if self._daily_buy_date != today:
             self._daily_buy_count = 0
             self._daily_buy_date = today
@@ -389,6 +404,42 @@ class EvaluationLoop:
         self._min_hold_secs = value
         logger.info(
             "Market %s: min_hold_secs=%d (%.2fh)", self._market, value, value / 3600
+        )
+
+    def set_held_overrides(
+        self,
+        held_sell_bias: float | None = None,
+        held_min_confidence: float | None = None,
+        stale_pnl_threshold: float | None = None,
+        profit_protection_pct: float | None = None,
+    ) -> None:
+        """Apply held-position knobs from global.* yaml.
+
+        CFG-H5 (2026-06-06): the engine reads these four params via
+        `getattr(self, '_held_sell_bias', <default>)` etc. with no
+        corresponding setter. Operator yaml edits + LLM-accepted
+        recommendations through `services.yaml_mutator` updated the
+        yaml file but the live behavior used the hard-coded fallback
+        forever. Comments in strategies.yaml cite backtest deltas
+        (`V2_relax_-10 +8.8pp`) so the operator assumed they were
+        live. They were not. Now main calls this on startup AND
+        hot-reload so the values actually bind.
+        """
+        if held_sell_bias is not None:
+            self._held_sell_bias = float(held_sell_bias)
+        if held_min_confidence is not None:
+            self._held_min_confidence = float(held_min_confidence)
+        if stale_pnl_threshold is not None:
+            self._stale_pnl_threshold = float(stale_pnl_threshold)
+        if profit_protection_pct is not None:
+            self._profit_protection_pct = float(profit_protection_pct)
+        logger.info(
+            "Market %s: held overrides hsb=%s hmc=%s spt=%s ppp=%s",
+            self._market,
+            getattr(self, "_held_sell_bias", None),
+            getattr(self, "_held_min_confidence", None),
+            getattr(self, "_stale_pnl_threshold", None),
+            getattr(self, "_profit_protection_pct", None),
         )
 
     def set_stale_time_exit(
@@ -2393,11 +2444,12 @@ class EvaluationLoop:
                 # sector-cap check against the pre-BUY snapshot.
                 self._cycle_positions = None
                 # Hermes Phase 3: record placed buy for counterfactual
-                # baseline (so replay knows which signals already passed
-                # all gates, not just which were rejected).
-                asyncio.create_task(self._persist_funnel_event(
-                    symbol, decision="placed",
-                ))
+                # baseline. RES-H7: tracked spawn so a GC-cancelled task
+                # doesn't drop the placement row.
+                _spawn_bg(
+                    self._persist_funnel_event(symbol, decision="placed"),
+                    name=f"funnel_placed:{symbol}",
+                )
 
             # Register position for SL/TP/trailing stop monitoring
             if order and self._position_tracker:

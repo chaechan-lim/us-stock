@@ -103,6 +103,17 @@ def _apply_kr_eval_overrides(
     # get_market_evaluation_loop_config always returns a dict (possibly empty).
     kr_eval_cfg = config_loader.get_market_evaluation_loop_config("KR")
 
+    # CFG-H5 (2026-06-06): bind global.held_* / stale_pnl /
+    # profit_protection from yaml so operator edits + LLM
+    # recommendations don't sit inert behind a getattr fallback.
+    global_cfg = config_loader.global_config or {}
+    kr_loop.set_held_overrides(
+        held_sell_bias=global_cfg.get("held_sell_bias"),
+        held_min_confidence=global_cfg.get("held_min_confidence"),
+        stale_pnl_threshold=global_cfg.get("stale_pnl_threshold"),
+        profit_protection_pct=global_cfg.get("profit_protection_pct"),
+    )
+
     v = kr_eval_cfg.get("sell_cooldown_days")
     kr_loop.set_sell_cooldown_secs(int(v * 86400) if v is not None else default_cooldown_secs)
 
@@ -202,6 +213,16 @@ def _apply_us_eval_overrides(
     us_disabled = config_loader.get_market_disabled_strategies("US")
     _warn_if_disabled_empty("US", us_disabled)
     us_loop.set_disabled_strategies(us_disabled)
+
+    # CFG-H5 (2026-06-06): bind global.held_* / stale_pnl /
+    # profit_protection (US mirror of the KR call above).
+    global_cfg = config_loader.global_config or {}
+    us_loop.set_held_overrides(
+        held_sell_bias=global_cfg.get("held_sell_bias"),
+        held_min_confidence=global_cfg.get("held_min_confidence"),
+        stale_pnl_threshold=global_cfg.get("stale_pnl_threshold"),
+        profit_protection_pct=global_cfg.get("profit_protection_pct"),
+    )
 
     us_park = config_loader.get_market_cash_parking_config("US")
     us_loop.set_cash_parking_config(
