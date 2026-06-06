@@ -1538,7 +1538,14 @@ class PositionTracker:
                     # one AND broker confirms gone → safe to delete.
                     await session.delete(db_pos)
 
-                # Upsert all currently tracked positions with current prices
+                # PERF-H11 (2026-06-07): bulk-fetch existing rows once,
+                # then route through the per-symbol upsert with the
+                # prefetched record so each iteration avoids its own
+                # SELECT. Was a 20-30 round-trip serial pause every
+                # sync; now one round-trip + Python loop.
+                existing_map: dict[str, "PositionRecord"] = {
+                    db_pos.symbol: db_pos for db_pos in db_positions
+                }
                 for symbol, tracked in self._tracked.items():
                     current_price = price_map.get(symbol)
                     await self._upsert_position_record(
@@ -1546,6 +1553,7 @@ class PositionTracker:
                         symbol,
                         tracked,
                         current_price=current_price,
+                        existing_record=existing_map.get(symbol),
                     )
 
                 await session.commit()
@@ -1826,24 +1834,31 @@ class PositionTracker:
         symbol: str,
         tracked: TrackedPosition,
         current_price: float | None = None,
+        existing_record: "PositionRecord | None" = None,
     ) -> None:
         """Upsert a PositionRecord within an existing session (no commit).
 
         Args:
             current_price: Current market price. When provided, also computes
                 and stores unrealized_pnl.
+            existing_record: PERF-H11 (2026-06-07): when caller already
+                has the row from a bulk SELECT, pass it here to skip
+                the per-symbol round-trip. None = look up.
         """
         from sqlalchemy import select
 
         from core.models import PositionRecord
 
-        stmt = select(PositionRecord).where(
-            PositionRecord.account_id == self._account_id,
-            PositionRecord.market == self._market,
-            PositionRecord.symbol == symbol,
-        )
-        result = await session.execute(stmt)
-        record = result.scalar_one_or_none()
+        if existing_record is not None:
+            record = existing_record
+        else:
+            stmt = select(PositionRecord).where(
+                PositionRecord.account_id == self._account_id,
+                PositionRecord.market == self._market,
+                PositionRecord.symbol == symbol,
+            )
+            result = await session.execute(stmt)
+            record = result.scalar_one_or_none()
 
         # Calculate unrealized PnL when current price is available
         unrealized_pnl: float | None = None

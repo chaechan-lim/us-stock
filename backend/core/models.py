@@ -58,6 +58,13 @@ class Order(Base):
         Index("idx_orders_is_paper", "is_paper"),
         Index("idx_orders_kis_order_id", "kis_order_id"),
         Index("idx_orders_account_market_symbol", "account_id", "market", "symbol"),
+        # DB-M6 (2026-06-07): composite index for has_pending_order /
+        # restore_trade_log lookup path (account_id + symbol + side +
+        # status + created_at). Was a full table scan on hot path.
+        Index(
+            "idx_orders_account_symbol_side_status_created",
+            "account_id", "symbol", "side", "status", "created_at",
+        ),
     )
 
 
@@ -304,4 +311,11 @@ class FunnelEvent(Base):
         Index("idx_funnel_ts", "ts"),
         Index("idx_funnel_market_ts", "market", "ts"),
         Index("idx_funnel_decision_reason", "decision", "reject_reason"),
+        # DB-M6 (2026-06-07): composite index for counterfactual-replay
+        # WHERE market=? AND decision='rejected' AND reject_reason=?
+        # ORDER BY ts DESC scan — was a partial scan on (market,ts).
+        Index(
+            "idx_funnel_market_decision_reason_ts",
+            "market", "decision", "reject_reason", "ts",
+        ),
     )

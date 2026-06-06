@@ -228,6 +228,20 @@ _EXPECTED_INDEXES: Sequence[tuple[str, str, str]] = [
     ("positions", "idx_positions_account_market_symbol", "account_id, market, symbol"),
     ("portfolio_snapshots", "idx_snapshots_account_market", "account_id, market"),
     ("strategy_logs", "idx_strategy_logs_account_symbol", "account_id, symbol"),
+    # DB-M6 (2026-06-07): indexes for hot query patterns surfaced by
+    # the 15-dim review. funnel_replay filters by (market, decision,
+    # reject_reason, ts); position_tracker queries orders by
+    # (account_id, symbol, side, status, created_at desc).
+    (
+        "funnel_events",
+        "idx_funnel_market_decision_reason_ts",
+        "market, decision, reject_reason, ts",
+    ),
+    (
+        "orders",
+        "idx_orders_account_symbol_side_status_created",
+        "account_id, symbol, side, status, created_at",
+    ),
 ]
 
 
@@ -329,6 +343,41 @@ async def ensure_indexes(engine: AsyncEngine) -> list[str]:
                 )
 
         await conn.run_sync(_sync_check_and_create)
+
+        # DB-M5 (2026-06-07): partial UNIQUE on orders.kis_order_id to
+        # retire the application-level dedup workaround in
+        # restore_trade_log. Predicate excludes NULL / empty strings
+        # (paper orders without a real KIS id) so we don't conflict
+        # with backfilled placeholders. Postgres-only (SQLite tests
+        # use a different schema dialect).
+        if conn.engine.dialect.name == "postgresql":
+            try:
+                exists_row = await conn.execute(text(
+                    "SELECT 1 FROM pg_indexes "
+                    "WHERE indexname = 'uq_orders_kis_order_id_live'"
+                ))
+                already_exists = exists_row.scalar() is not None
+                if not already_exists:
+                    await conn.execute(text(
+                        "CREATE UNIQUE INDEX IF NOT EXISTS "
+                        "uq_orders_kis_order_id_live ON orders(kis_order_id) "
+                        "WHERE kis_order_id IS NOT NULL "
+                        "AND kis_order_id <> ''"
+                    ))
+                    created.append("uq_orders_kis_order_id_live")
+                    logger.info(
+                        "Created partial UNIQUE on orders.kis_order_id "
+                        "(non-null, non-empty)"
+                    )
+            except Exception as e:
+                # Pre-existing duplicates would block creation. Don't
+                # fail startup — surface the error and let operator
+                # dedup manually via migrate_dedup_orders.py.
+                logger.warning(
+                    "Could not create UNIQUE on orders.kis_order_id "
+                    "(likely pre-existing duplicate rows): %s",
+                    e,
+                )
 
     if created:
         logger.info(

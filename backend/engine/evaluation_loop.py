@@ -1160,6 +1160,18 @@ class EvaluationLoop:
             exchange_held = {p.symbol for p in exchange_positions if p.quantity > 0}
             held = held | exchange_held
             position_map = {p.symbol: p for p in exchange_positions if p.quantity > 0}
+            # M11 (2026-06-07): push intraday unrealized PnL into
+            # RiskManager so the daily-loss circuit reflects real-time
+            # drawdown from open positions, not just realized SELLs.
+            try:
+                unrealized_sum = float(sum(
+                    getattr(p, "unrealized_pnl", 0.0) or 0.0
+                    for p in exchange_positions
+                    if p.quantity > 0
+                ))
+                self._risk_manager.set_unrealized_pnl(unrealized_sum)
+            except Exception as e:
+                logger.debug("set_unrealized_pnl skipped: %s", e)
             # 2026-06-05: gap-fill tracker for any held symbols that
             # dropped out. Without this, `_check_min_hold` returns
             # fail-closed for the missing symbol and stuck SELLs (incl.

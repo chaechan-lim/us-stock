@@ -112,6 +112,11 @@ class RiskManager:
         self._params = params or RiskParams()
         self._account_id = account_id
         self._daily_pnl: float = 0.0
+        # M11 (2026-06-07): unrealized intraday PnL — set per-cycle by
+        # the eval loop. Combined with _daily_pnl for the daily-loss
+        # circuit so a -3% drawdown from open positions halts new BUYs
+        # even when no SELLs have realized yet.
+        self._unrealized_pnl: float = 0.0
         self._market_regimes: dict[str, str] = {}  # {"US": "bull", "KR": "sideways"}
         self._eval_regime: str = "uptrend"  # Current regime for adaptive sizing
         self._kelly = KellyPositionSizer(
@@ -403,8 +408,11 @@ class RiskManager:
         # Check daily loss limit using uncapped portfolio value (STOCK-56).
         # Using the market-capped value here would inflate the loss percentage
         # proportionally to the allocation split and cause premature halts.
-        if self._daily_pnl < 0 and uncapped_portfolio_value > 0:
-            daily_loss_pct = abs(self._daily_pnl) / uncapped_portfolio_value
+        # M11 (2026-06-07): include _unrealized_pnl so an open-position
+        # drawdown halts BUYs even when no SELLs have closed yet.
+        total_pnl = self._daily_pnl + self._unrealized_pnl
+        if total_pnl < 0 and uncapped_portfolio_value > 0:
+            daily_loss_pct = abs(total_pnl) / uncapped_portfolio_value
             if daily_loss_pct >= self._params.daily_loss_limit_pct:
                 return PositionSizeResult(
                     quantity=0,
@@ -526,8 +534,10 @@ class RiskManager:
             return reject
 
         # Check daily loss limit using uncapped portfolio value (STOCK-56).
-        if self._daily_pnl < 0 and uncapped_portfolio_value > 0:
-            daily_loss_pct = abs(self._daily_pnl) / uncapped_portfolio_value
+        # M11 (2026-06-07): realized + unrealized for true intraday DD.
+        total_pnl = self._daily_pnl + self._unrealized_pnl
+        if total_pnl < 0 and uncapped_portfolio_value > 0:
+            daily_loss_pct = abs(total_pnl) / uncapped_portfolio_value
             if daily_loss_pct >= self._params.daily_loss_limit_pct:
                 return PositionSizeResult(
                     quantity=0,
@@ -835,8 +845,10 @@ class RiskManager:
             return reject
 
         # Check daily loss limit using uncapped portfolio value (STOCK-56).
-        if self._daily_pnl < 0 and uncapped_portfolio_value > 0:
-            daily_loss_pct = abs(self._daily_pnl) / uncapped_portfolio_value
+        # M11 (2026-06-07): realized + unrealized for true intraday DD.
+        total_pnl = self._daily_pnl + self._unrealized_pnl
+        if total_pnl < 0 and uncapped_portfolio_value > 0:
+            daily_loss_pct = abs(total_pnl) / uncapped_portfolio_value
             if daily_loss_pct >= self._params.daily_loss_limit_pct:
                 return PositionSizeResult(
                     quantity=0,
@@ -1044,7 +1056,20 @@ class RiskManager:
 
     def reset_daily(self) -> None:
         self._daily_pnl = 0.0
+        self._unrealized_pnl = 0.0
         self._persist_daily_pnl()
+
+    def set_unrealized_pnl(self, pnl: float) -> None:
+        """M11 (2026-06-07): set intraday unrealized PnL for daily-loss
+        circuit. Called by EvaluationLoop per cycle with
+        sum(pos.unrealized_pnl for pos in current_positions). Combined
+        with _daily_pnl in the loss-percentage calculation so a
+        sustained drawdown halts BUYs even with no SELLs realized yet.
+        Process-memory only — no persist."""
+        try:
+            self._unrealized_pnl = float(pnl)
+        except (TypeError, ValueError):
+            self._unrealized_pnl = 0.0
 
     @property
     def params(self) -> RiskParams:
@@ -1078,8 +1103,10 @@ class RiskManager:
             return False, "portfolio value non-positive"
 
         # Daily loss limit — applies regardless of strategy.
-        if self._daily_pnl < 0:
-            daily_loss_pct = abs(self._daily_pnl) / portfolio_value
+        # M11 (2026-06-07): realized + unrealized for true intraday DD.
+        total_pnl = self._daily_pnl + self._unrealized_pnl
+        if total_pnl < 0:
+            daily_loss_pct = abs(total_pnl) / portfolio_value
             if daily_loss_pct >= self._params.daily_loss_limit_pct:
                 return False, (
                     f"daily loss limit hit "

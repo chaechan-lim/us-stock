@@ -154,3 +154,24 @@ def next_kr_trading_day(start: date) -> date:
         if d.weekday() < 5 and not is_kr_holiday(d):
             return d
     return d  # 14-day window exhausted; return whatever we have
+
+
+def is_us_trading_day(d: date) -> bool:
+    """True iff `d` is a US weekday and not a known NYSE holiday."""
+    return d.weekday() < 5 and not is_us_holiday(d)
+
+
+def previous_us_trading_day(start: date) -> date:
+    """Most recent US trading day on-or-before `start`.
+
+    Used by the daily post-market script to skip Sunday/holiday runs:
+    Sunday-KST 06:00 targets Saturday-ET which is not a session; walk
+    back until we hit Friday (or the last weekday before a long
+    weekend).
+    """
+    d = start
+    for _ in range(14):
+        if is_us_trading_day(d):
+            return d
+        d = d - timedelta(days=1)
+    return d  # 14-day window exhausted; return whatever we have
