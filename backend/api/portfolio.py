@@ -94,6 +94,11 @@ async def portfolio_summary(
     until then account_id is accepted for validation only — the returned data
     reflects all accounts regardless of which account_id is provided.
     """
+    # HIGH-13 (2026-06-07): account_id was silently ignored — frontend
+    # received an all-accounts view but had no way to know its filter
+    # was a no-op. Surface this on the response so callers can warn
+    # the user instead of pretending the number is filtered.
+    account_filter_applied = False  # always False until multi-adapter lands
     if account_id is not None:
         logger.warning(
             "account_id=%s provided to /portfolio/summary but per-account "
@@ -101,7 +106,10 @@ async def portfolio_summary(
             account_id,
         )
     if market == "ALL":
-        return await _combined_summary(request)
+        combined = await _combined_summary(request)
+        combined["account_id"] = account_id
+        combined["account_filter_applied"] = account_filter_applied
+        return combined
 
     md = get_market_data(request, market)
     if not md:
@@ -128,6 +136,10 @@ async def portfolio_summary(
         "total_unrealized_pnl": total_unrealized_pnl,
         "total_unrealized_pnl_pct": total_unrealized_pnl_pct,
         "total_equity": balance.total,
+        # HIGH-13 (2026-06-07): always echo so frontend can detect
+        # the no-op filter case symmetrically with the ALL branch.
+        "account_id": account_id,
+        "account_filter_applied": account_filter_applied,
     }
 
 
