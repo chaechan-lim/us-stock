@@ -170,7 +170,7 @@ class ETFEngine:
             actions["sector"].extend(sector_actions)
 
         # Step 4: Check total ETF exposure
-        exposure_actions = self._check_exposure_limits(positions, balance)
+        exposure_actions = await self._check_exposure_limits(positions, balance)
         actions["risk"].extend(exposure_actions)
 
         return actions
@@ -713,28 +713,111 @@ class ETFEngine:
         cap = balance.total * self._risk.max_portfolio_pct
         return max(0.0, cap - etf_value)
 
-    def _check_exposure_limits(self, positions=None, balance=None) -> list[str]:
-        """Warn if total ETF exposure exceeds max_portfolio_pct."""
-        actions = []
+    async def _check_exposure_limits(self, positions=None, balance=None) -> list[str]:
+        """Force-trim ETF exposure when it exceeds max_portfolio_pct.
+
+        M12 (2026-06-07): previously logged a WARN and continued.
+        Operator had no signal beyond a Discord-less log line, and
+        existing positions could remain over the cap indefinitely if
+        they appreciated past it after entry. Now we actively trim the
+        largest ETF position by enough shares to bring total exposure
+        back under the cap. min_hold blocks emit CRITICAL via
+        logger.error so they surface in Discord (forwarded by the
+        alert sink).
+        """
+        actions: list[str] = []
 
         if not balance or not positions or balance.total <= 0:
             return actions
 
-        etf_value = 0.0
-        for pos in positions:
-            if self._etf.is_leveraged(pos.symbol) or pos.symbol in [
-                s.etf for s in self._etf.get_all_sectors().values()
-            ]:
-                etf_value += pos.current_price * pos.quantity if pos.current_price else 0
+        sector_etfs = {s.etf for s in self._etf.get_all_sectors().values()}
+        etf_positions = [
+            p for p in positions
+            if (self._etf.is_leveraged(p.symbol) or p.symbol in sector_etfs)
+            and p.quantity > 0
+        ]
+        if not etf_positions:
+            return actions
 
+        etf_value = sum(
+            (p.current_price or 0) * p.quantity for p in etf_positions
+        )
         exposure_pct = etf_value / balance.total
-        if exposure_pct > self._risk.max_portfolio_pct:
-            msg = (
-                f"ETF exposure {exposure_pct:.1%} exceeds limit "
-                f"{self._risk.max_portfolio_pct:.0%}"
+        cap_pct = self._risk.max_portfolio_pct
+        if exposure_pct <= cap_pct:
+            return actions
+
+        msg = (
+            f"ETF exposure {exposure_pct:.1%} exceeds limit "
+            f"{cap_pct:.0%} — forced trim"
+        )
+        actions.append(msg)
+        logger.warning("ETF Engine: %s", msg)
+
+        # Compute the over-cap value we need to reduce by.
+        target_value = balance.total * cap_pct
+        over_value = etf_value - target_value
+
+        # Trim largest position first (greedy) until under cap. Min-hold
+        # blocks bubble up as CRITICAL — operator must act manually.
+        sorted_etfs = sorted(
+            etf_positions,
+            key=lambda p: (p.current_price or 0) * p.quantity,
+            reverse=True,
+        )
+        for pos in sorted_etfs:
+            if over_value <= 0:
+                break
+            price = float(pos.current_price or 0)
+            if price <= 0:
+                continue
+            can_sell, reason = self._can_sell_etf(pos.symbol)
+            if not can_sell:
+                logger.error(
+                    "ETF Engine: CRITICAL — cannot trim %s for cap breach "
+                    "(%.1f%% > %.0f%%): %s. Operator intervention needed.",
+                    pos.symbol, exposure_pct * 100, cap_pct * 100, reason,
+                )
+                actions.append(
+                    f"BLOCKED trim {pos.symbol}: {reason}"
+                )
+                continue
+            shares_to_sell = int(min(pos.quantity, over_value / price + 1))
+            shares_to_sell = max(1, shares_to_sell)
+            try:
+                sell_result = await self._order_manager.place_sell(
+                    symbol=pos.symbol,
+                    quantity=shares_to_sell,
+                    price=price,
+                    strategy_name="etf_engine_cap_trim",
+                    exchange=self._etf.get_exchange(pos.symbol),
+                    entry_price=pos.avg_price,
+                    buy_strategy="etf_engine",
+                )
+            except Exception as e:
+                logger.error(
+                    "ETF Engine: cap-trim SELL %s failed: %s",
+                    pos.symbol, e, exc_info=True,
+                )
+                continue
+            if sell_result is None:
+                logger.warning(
+                    "ETF Engine: cap-trim SELL %s returned None",
+                    pos.symbol,
+                )
+                continue
+            self._last_sell_times[pos.symbol] = time.time()
+            actions.append(
+                f"TRIM SELL {pos.symbol} {shares_to_sell}@{price:.2f} "
+                f"(cap {cap_pct:.0%})"
             )
-            actions.append(msg)
-            logger.warning("ETF Engine: %s", msg)
+            over_value -= shares_to_sell * price
+            logger.info(
+                "ETF Engine: TRIM %s %d shares @ %.2f to honor cap "
+                "%.0f%% (was %.1f%%)",
+                pos.symbol, shares_to_sell, price,
+                cap_pct * 100, exposure_pct * 100,
+            )
 
         return actions
 

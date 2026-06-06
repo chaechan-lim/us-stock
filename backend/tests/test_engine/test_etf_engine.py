@@ -677,25 +677,54 @@ class TestHoldLimits:
 class TestExposureLimits:
     """Test portfolio exposure limit checks."""
 
-    def test_warns_on_high_etf_exposure(self, engine, mock_market_data):
-        # Total portfolio = 100k, ETF positions = 40k (40% > 30% limit)
-        pos1 = MagicMock(symbol="TQQQ", quantity=200, current_price=100.0)
-        pos2 = MagicMock(symbol="XLK", quantity=200, current_price=100.0)
+    @pytest.mark.asyncio
+    async def test_force_trims_on_high_etf_exposure(self, engine, mock_market_data):
+        # M12 (2026-06-07): cap breaches now actively trim the largest
+        # ETF position. Total portfolio = 100k, ETF = 40k (40% > 30%).
+        # Engine should issue a SELL via place_sell + return TRIM action.
+        from unittest.mock import AsyncMock
+
+        pos1 = MagicMock(symbol="TQQQ", quantity=200, current_price=100.0, avg_price=95.0)
+        pos2 = MagicMock(symbol="XLK", quantity=200, current_price=100.0, avg_price=95.0)
         positions = [pos1, pos2]
         balance = MagicMock(total=100000, available=50000)
 
-        actions = engine._check_exposure_limits(positions, balance)
-        assert len(actions) == 1
-        assert "exceeds" in actions[0]
+        # Stub place_sell so we don't hit a real adapter
+        engine._order_manager.place_sell = AsyncMock(return_value=MagicMock())
+        # Allow sell (no min_hold blocker)
+        engine._can_sell_etf = MagicMock(return_value=(True, ""))
 
-    def test_no_warning_within_limits(self, engine, mock_market_data):
+        actions = await engine._check_exposure_limits(positions, balance)
+        assert any("exceeds" in a for a in actions)
+        assert any(a.startswith("TRIM SELL") for a in actions)
+        engine._order_manager.place_sell.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_no_warning_within_limits(self, engine, mock_market_data):
         # Total = 100k, ETF = 10k (10% < 30% limit)
-        pos = MagicMock(symbol="TQQQ", quantity=20, current_price=50.0)
+        pos = MagicMock(symbol="TQQQ", quantity=20, current_price=50.0, avg_price=45.0)
         positions = [pos]
         balance = MagicMock(total=100000, available=50000)
 
-        actions = engine._check_exposure_limits(positions, balance)
+        actions = await engine._check_exposure_limits(positions, balance)
         assert actions == []
+
+    @pytest.mark.asyncio
+    async def test_min_hold_block_surfaces_critical(self, engine, mock_market_data):
+        """M12: when min_hold blocks the trim, action list flags BLOCKED."""
+        from unittest.mock import AsyncMock
+
+        pos1 = MagicMock(symbol="TQQQ", quantity=200, current_price=100.0, avg_price=95.0)
+        pos2 = MagicMock(symbol="XLK", quantity=200, current_price=100.0, avg_price=95.0)
+        positions = [pos1, pos2]
+        balance = MagicMock(total=100000, available=50000)
+
+        engine._order_manager.place_sell = AsyncMock(return_value=MagicMock())
+        engine._can_sell_etf = MagicMock(return_value=(False, "min_hold 4h"))
+
+        actions = await engine._check_exposure_limits(positions, balance)
+        assert any(a.startswith("BLOCKED trim") for a in actions)
+        engine._order_manager.place_sell.assert_not_awaited()
 
 
 class TestEtfPortfolioHeadroom:

@@ -951,7 +951,14 @@ class EvaluationLoop:
                     signal = await strategy.analyze(df, symbol)
                     signals.append(signal)
                 except Exception as e:
-                    logger.warning("Strategy %s failed on %s: %s", strategy.name, symbol, e)
+                    from core.log_dedup import warn_once_per
+                    warn_once_per(
+                        logger,
+                        f"strat_fail:{strategy.name}:{symbol}",
+                        300.0,  # 5min — long enough to skip a few cycles
+                        "Strategy %s failed on %s: %s",
+                        strategy.name, symbol, e,
+                    )
 
             # Get per-stock blended weights
             market_weights = self._registry.get_profile_weights(self._market_state)
@@ -1253,9 +1260,23 @@ class EvaluationLoop:
                         )
                         signals.append(signal)
                     except asyncio.TimeoutError:
-                        logger.warning("Strategy %s timed out on %s", strategy.name, symbol)
+                        from core.log_dedup import warn_once_per
+                        warn_once_per(
+                            logger,
+                            f"strat_timeout:{strategy.name}:{symbol}",
+                            300.0,
+                            "Strategy %s timed out on %s",
+                            strategy.name, symbol,
+                        )
                     except Exception as e:
-                        logger.warning("Strategy %s failed on %s: %s", strategy.name, symbol, e)
+                        from core.log_dedup import warn_once_per
+                        warn_once_per(
+                            logger,
+                            f"strat_fail:{strategy.name}:{symbol}",
+                            300.0,
+                            "Strategy %s failed on %s: %s",
+                            strategy.name, symbol, e,
+                        )
 
                 market_weights = self._registry.get_profile_weights(self._market_state)
                 weights = self._adaptive.get_weights(symbol, market_weights)
@@ -1990,7 +2011,14 @@ class EvaluationLoop:
             exchange = "KRX" if self._market == "KR" else self._exchange_resolver.resolve(symbol)
             price = await self._market_data.get_price(symbol, exchange)
         except Exception as e:
-            logger.warning("Real-time price fetch failed for %s, using OHLCV close: %s", symbol, e)
+            from core.log_dedup import warn_once_per
+            warn_once_per(
+                logger,
+                f"price_fetch_fail:{symbol}",
+                300.0,
+                "Real-time price fetch failed for %s, using OHLCV close: %s",
+                symbol, e,
+            )
             price = float(df.iloc[-1]["close"])
 
         # Hermes Phase 3: stash context for _bump_reject / _persist_funnel_event

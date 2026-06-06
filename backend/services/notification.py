@@ -452,8 +452,21 @@ class NotificationService:
         fields: dict | None = None,
     ) -> bool:
         """Send to all configured adapters, record history, apply throttle."""
+        # M15 (2026-06-07): CRITICAL alerts must surface even when
+        # notifications are disabled or no adapter is wired. Operator
+        # may have intentionally muted INFO/WARN but still wants the
+        # circuit-breaker / fail-closed / cap-breach lines in journal.
+        is_critical = level == AlertLevel.CRITICAL
+
         if not self._enabled:
-            logger.debug("Notification disabled, skipping: %s", plain_text[:80])
+            if is_critical:
+                logger.critical(
+                    "Notifications DISABLED but CRITICAL alert raised "
+                    "(category=%s symbol=%s): %s — %s",
+                    category, symbol or "-", title, plain_text[:200],
+                )
+            else:
+                logger.debug("Notification disabled, skipping: %s", plain_text[:80])
             return False
 
         if self._is_throttled(category, symbol, level):
@@ -471,7 +484,14 @@ class NotificationService:
 
         configured = [a for a in self._adapters if a.is_configured]
         if not configured:
-            logger.warning("No notification adapters configured")
+            if is_critical:
+                logger.critical(
+                    "No notification adapter configured but CRITICAL "
+                    "alert raised (category=%s symbol=%s): %s — %s",
+                    category, symbol or "-", title, plain_text[:200],
+                )
+            else:
+                logger.warning("No notification adapters configured")
             return False
 
         success = False
@@ -495,10 +515,22 @@ class NotificationService:
 
     async def send(self, message: str, level: AlertLevel = AlertLevel.INFO) -> bool:
         """Legacy send interface."""
+        is_critical = level == AlertLevel.CRITICAL
         if not self._enabled:
+            if is_critical:
+                logger.critical(
+                    "Notifications DISABLED but CRITICAL alert raised: %s",
+                    message[:200],
+                )
             return False
         configured = [a for a in self._adapters if a.is_configured]
         if not configured:
+            if is_critical:
+                logger.critical(
+                    "No notification adapter configured but CRITICAL "
+                    "alert raised: %s",
+                    message[:200],
+                )
             return False
         success = False
         for adapter in configured:
