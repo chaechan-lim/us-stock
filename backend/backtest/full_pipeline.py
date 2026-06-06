@@ -294,6 +294,10 @@ class PipelineConfig:
     # Strategy selection
     disabled_strategies: list[str] = field(default_factory=list)  # Strategies to skip
 
+    # BACKTEST-H3 (2026-06-06): deterministic RNG seed.
+    # None → 0 (reproducible). Override to vary scenarios in sweeps.
+    seed: int | None = None
+
     # Cash parking: invest idle cash in index ETF
     enable_cash_parking: bool = False
     cash_parking_symbol: str = "SPY"
@@ -428,6 +432,16 @@ class FullPipelineBacktest:
 
     def __init__(self, config: PipelineConfig | None = None):
         self._config = config or PipelineConfig()
+
+        # BACKTEST-H3 (2026-06-06): deterministic RNG seeded from
+        # config. extended_hours fill path used to call raw
+        # random.random() on the unseeded module-level RNG, so two
+        # identical backtests produced different trades, PnL, and
+        # passes_floor. Every recommendation verdict that touched
+        # extended_hours_* (or even unrelated ones, since the shared
+        # RNG advances together) was non-deterministic noise.
+        seed = getattr(self._config, "seed", None)
+        self._rng = random.Random(0 if seed is None else int(seed))
 
         # Resolve market-dependent defaults
         cfg = self._config
@@ -1812,8 +1826,8 @@ class FullPipelineBacktest:
             if active_positions >= cfg.max_positions + 5:
                 break
 
-            # Fill probability check
-            if random.random() > cfg.extended_hours_fill_probability:
+            # Fill probability check (BACKTEST-H3: deterministic per-instance RNG)
+            if self._rng.random() > cfg.extended_hours_fill_probability:
                 continue
 
             data = stock_data.get(symbol)

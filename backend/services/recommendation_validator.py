@@ -87,31 +87,71 @@ def _is_validatable(param_path: str) -> bool:
 
 
 def _build_baseline_config(market: str) -> dict:
-    """Return PipelineConfig kwargs matching the current live config."""
+    """Return PipelineConfig kwargs matching the CURRENT LIVE config.
+
+    BACKTEST-H1 (2026-06-06): the prior version hard-coded
+    PipelineConfig defaults from months ago. Live KR now runs
+    min_confidence=0.20, kelly_fraction=0.40, trailing_activation=
+    0.10/stop=0.04, vol_scaling enabled, etc. — the validator was
+    measuring deltas against a system that doesn't exist. Every LLM
+    recommendation verdict on the operator's decision path was
+    judged against fiction. Now we pull from the same loader that
+    `main._apply_kr_eval_overrides` / `_apply_us_eval_overrides` use,
+    so baseline = live.
+    """
     from strategies.config_loader import StrategyConfigLoader
 
     loader = StrategyConfigLoader()
     disabled = loader.get_market_disabled_strategies(market)
-    if market == "KR":
-        kw = dict(
-            market="KR", initial_equity=100_000_000,
-            default_stop_loss_pct=0.12, default_take_profit_pct=0.20,
-            max_positions=18, max_position_pct=0.20, min_position_pct=0.04,
-            sell_cooldown_days=1, whipsaw_max_losses=2, min_hold_days=1,
-            slippage_pct=0.08, volume_adjusted_slippage=True,
-            min_confidence=0.30, sector_boost_weight=0.3,
-            disabled_strategies=disabled,
-        )
-    else:
-        kw = dict(
-            market="US", initial_equity=100_000,
-            default_stop_loss_pct=0.08, default_take_profit_pct=0.20,
-            max_positions=20, max_position_pct=0.10, min_position_pct=0.05,
-            sell_cooldown_days=1, whipsaw_max_losses=2, min_hold_days=1,
-            slippage_pct=0.05, volume_adjusted_slippage=True,
-            min_confidence=0.30, sector_boost_weight=0.2,
-            disabled_strategies=disabled,
-        )
+    risk = loader.get_market_risk_config(market) or {}
+    eval_cfg = loader.get_market_evaluation_loop_config(market) or {}
+    vol = risk.get("volatility_scaling") or {}
+
+    initial_equity = 100_000_000 if market == "KR" else 100_000
+    default_slippage = 0.08 if market == "KR" else 0.05
+
+    kw = dict(
+        market=market,
+        initial_equity=initial_equity,
+        # Risk params from yaml (markets.<M>.risk.*)
+        default_stop_loss_pct=float(
+            risk.get(
+                "default_stop_loss_pct",
+                0.12 if market == "KR" else 0.08,
+            )
+        ),
+        default_take_profit_pct=float(risk.get("default_take_profit_pct", 0.20)),
+        max_positions=int(risk.get("max_positions", 18 if market == "KR" else 20)),
+        max_position_pct=float(
+            risk.get("max_position_pct", 0.20 if market == "KR" else 0.10)
+        ),
+        min_position_pct=float(
+            risk.get("min_position_pct", 0.05 if market == "KR" else 0.05)
+        ),
+        kelly_fraction=float(risk.get("kelly_fraction", 0.40)),
+        # Evaluation-loop params from yaml (markets.<M>.evaluation_loop.*)
+        sell_cooldown_days=int(eval_cfg.get("sell_cooldown_days", 1)),
+        whipsaw_max_losses=int(eval_cfg.get("whipsaw_max_losses", 2)),
+        min_hold_days=int(eval_cfg.get("min_hold_days", 1)),
+        min_confidence=float(eval_cfg.get("min_confidence") or 0.30),
+        sector_boost_weight=float(
+            eval_cfg.get("sector_boost_weight", 0.3 if market == "KR" else 0.2)
+        ),
+        stale_time_days=int(eval_cfg.get("stale_time_days", 0)),
+        stale_time_pnl_threshold=float(eval_cfg.get("stale_time_pnl_threshold", 0.0)),
+        daily_buy_limit=int(eval_cfg.get("daily_buy_limit", 0)),
+        # Sizing+slippage
+        slippage_pct=default_slippage,
+        volume_adjusted_slippage=True,
+        # Vol scaling (live KR has it enabled per the kr_lever Pareto)
+        enable_vol_scaling=bool(vol),
+        vol_scale_target_risk_pct=float(vol.get("target_risk_pct", 0.04)),
+        vol_scale_min=float(vol.get("min_scale", 0.5)),
+        vol_scale_max=float(vol.get("max_scale", 1.5)),
+        enforce_min_position_pct_floor=True,
+        # Disabled strategy list
+        disabled_strategies=disabled,
+    )
     return kw
 
 
