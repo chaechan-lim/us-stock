@@ -113,6 +113,10 @@ class KISAdapter(ExchangeAdapter):
         self._is_paper = "vts" in config.base_url
         self._tr = TR_ID_PAPER if self._is_paper else TR_ID_LIVE
         self._last_exchange_rate: float = USD_KRW_FALLBACK
+        # M10 (2026-06-06): true when the last FX fetch failed and
+        # callers are using either the cached or USD_KRW_FALLBACK
+        # value. Surfaced via /health so the operator sees stale FX.
+        self._fx_stale: bool = False
         self._usd_deposit_krw: float = 0.0  # 달러예수금 (KRW equivalent)
         self._tot_asst_krw: float = 0.0  # CTRP6504R tot_asst_amt (해외자산+예수금)
         self._tot_dncl_krw: float = 0.0  # CTRP6504R tot_dncl_amt (예수금, 통합증거금 공유)
@@ -432,7 +436,14 @@ class KISAdapter(ExchangeAdapter):
         return 0.0
 
     async def _fetch_exchange_rate(self) -> float:
-        """Fetch USD/KRW exchange rate from KIS API."""
+        """Fetch USD/KRW exchange rate from KIS API.
+
+        M10 (2026-06-06): used to log fetch failures at DEBUG and
+        silently return 0 — caller fell through to USD_KRW_FALLBACK,
+        sizing US trades from KRW cash against a stale rate without
+        the operator ever knowing. Now: WARN with traceback and set
+        a stale-flag the dashboard can surface.
+        """
         try:
             params = {
                 "AUTH": "",
@@ -449,9 +460,18 @@ class KISAdapter(ExchangeAdapter):
             rate = _safe_float(output.get("t_rate", 0))
             if rate > 0:
                 logger.debug("Exchange rate from KIS: %.2f", rate)
+                self._fx_stale = False
                 return rate
+            logger.warning(
+                "KIS FX rate fetch returned no t_rate field — flagging stale "
+                "(operator should expect cross-currency math to drift)",
+            )
         except Exception as e:
-            logger.debug("Exchange rate fetch failed: %s", e)
+            logger.warning(
+                "KIS FX rate fetch failed (%s) — flagging stale.",
+                e, exc_info=True,
+            )
+        self._fx_stale = True
         return 0.0
 
     async def fetch_positions(self) -> list[Position]:

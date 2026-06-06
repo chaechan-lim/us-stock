@@ -140,7 +140,18 @@ class KISAuth:
             data = await resp.json()
             key = data.get("approval_key")
             if not key:
-                logger.error("KIS approval key missing from response: %s", data)
+                # M14 (2026-06-06): KIS does not normally echo app keys
+                # but the body has historically included partial token
+                # fragments. Whitelist safe fields instead of dumping
+                # the whole dict to logs / Discord.
+                safe_summary = {
+                    k: data.get(k)
+                    for k in ("rt_cd", "msg_cd", "msg1", "error_description")
+                }
+                logger.error(
+                    "KIS approval key missing — response (redacted): %s",
+                    safe_summary,
+                )
                 raise RuntimeError("Failed to obtain KIS WebSocket approval key")
             self._approval_key = key
 

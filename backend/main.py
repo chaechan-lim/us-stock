@@ -11,6 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from config import AppConfig
 from core.models import Base
+from core.tasks import drain as _drain_bg_tasks, spawn as _spawn_bg
 from core.timeutil import now_utc_naive
 from db.session import get_engine
 from api.router import api_router
@@ -1748,7 +1749,12 @@ async def lifespan(app: FastAPI):
             )
             for rid, status in rows:
                 # Detach — don't await. validator holds its own lock.
-                asyncio.create_task(_revalidate_one_rec(rid, status))
+                # RES-H7: tracked spawn so a GC-cancelled task doesn't
+                # silently drop a recommendation revalidation.
+                _spawn_bg(
+                    _revalidate_one_rec(rid, status),
+                    name=f"revalidate:#{rid}",
+                )
         except Exception as e:
             logger.error("recommendation_revalidate task failed: %s", e)
 
@@ -1893,8 +1899,12 @@ async def lifespan(app: FastAPI):
                         validate_recommendation,
                     )
                     for rid in new_rec_ids:
-                        asyncio.create_task(
-                            validate_recommendation(rid, session_factory)
+                        # RES-H7: tracked spawn — without retention the
+                        # validator coroutine can be GC-cancelled mid-
+                        # backtest and the rec sits in pending_validation.
+                        _spawn_bg(
+                            validate_recommendation(rid, session_factory),
+                            name=f"trade_review_validate:#{rid}",
                         )
                     logger.info(
                         "Spawned %d backtest validations for new recommendations",
@@ -2897,7 +2907,8 @@ async def lifespan(app: FastAPI):
             except Exception as e:
                 logger.error("Failed to send startup failure notification: %s", e)
 
-    asyncio.create_task(_initial_data_fetch(), name="initial-data-fetch")
+    # RES-H7: tracked spawn for the startup background fetch.
+    _spawn_bg(_initial_data_fetch(), name="initial-data-fetch")
 
     # Auto-start scheduler (store task ref to detect crashes)
     _scheduler_task = asyncio.create_task(scheduler.start(), name="scheduler")
@@ -2924,13 +2935,54 @@ async def lifespan(app: FastAPI):
 
     yield
 
-    # Shutdown
+    # Shutdown.
+    #
+    # RES-H7 (2026-06-06): scheduler.stop() only flips `_running=False`;
+    # without explicitly waiting for the in-flight tick to finish, the
+    # adapter teardown a few lines below races against an active
+    # eval cycle. A KIS call mid-await would raise "Session is
+    # closed", a DB commit would hand back into a disposed pool, and
+    # an in-flight order could be left half-submitted (POST sent,
+    # response never persisted). Now we:
+    #   1. stop the scheduler (sets the flag),
+    #   2. await the scheduler task with a bounded timeout so a stuck
+    #      tick can't block shutdown forever,
+    #   3. drain tracked background tasks (funnel persists,
+    #      revalidations, validator spawns, initial-data-fetch),
+    #   4. close adapters / cache / engine.
     if scheduler.running:
         await scheduler.stop()
+    sched_task = getattr(app.state, "scheduler_task", None)
+    if sched_task and not sched_task.done():
+        try:
+            await asyncio.wait_for(sched_task, timeout=15)
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Scheduler tick did not finish within 15s — cancelling",
+            )
+            sched_task.cancel()
+            try:
+                await sched_task
+            except Exception:
+                pass
+    drained = await _drain_bg_tasks(timeout=10)
+    logger.info("Drained %d background tasks", drained)
     if kis_ws and kis_ws.is_connected:
         await kis_ws.close()
     await news_service.close()
     await naver_news_service.close()
+    # External-service aiohttp sessions also need closing — without
+    # this each systemd restart leaks a few sockets per service.
+    for svc in (
+        getattr(app.state, "earnings_svc", None),
+        getattr(app.state, "insider_svc", None),
+        getattr(app.state, "kr_insider_svc", None),
+    ):
+        if svc is not None and hasattr(svc, "close"):
+            try:
+                await svc.close()
+            except Exception as e:
+                logger.debug("svc.close() failed: %s", e)
     await cache.close()
     await adapter.close()
     await kr_adapter.close()

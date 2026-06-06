@@ -244,7 +244,7 @@ class TestDailyBuyLimit:
         eval_loop._daily_buy_count = 1  # already at limit
         from datetime import date as _date
 
-        eval_loop._daily_buy_date = _date.today().isoformat()
+        eval_loop._daily_buy_date = (__import__("datetime").datetime.now(__import__("zoneinfo").ZoneInfo("America/New_York" if eval_loop._market == "US" else "Asia/Seoul")).date().isoformat())
 
         # confidence=0.8 signal (below 0.90 override threshold)
         await eval_loop.evaluate_symbol("AAPL")
@@ -258,7 +258,7 @@ class TestDailyBuyLimit:
         eval_loop._daily_buy_count = 1
         from datetime import date as _date
 
-        eval_loop._daily_buy_date = _date.today().isoformat()
+        eval_loop._daily_buy_date = (__import__("datetime").datetime.now(__import__("zoneinfo").ZoneInfo("America/New_York" if eval_loop._market == "US" else "Asia/Seoul")).date().isoformat())
 
         # Set strategy to return 0.95 confidence
         strategy = mock_registry.get_enabled.return_value[0]
@@ -279,7 +279,7 @@ class TestDailyBuyLimit:
         eval_loop._daily_buy_count = 4  # 80% used
         from datetime import date as _date
 
-        eval_loop._daily_buy_date = _date.today().isoformat()
+        eval_loop._daily_buy_date = (__import__("datetime").datetime.now(__import__("zoneinfo").ZoneInfo("America/New_York" if eval_loop._market == "US" else "Asia/Seoul")).date().isoformat())
 
         # Signal with 0.60 confidence — should be blocked (need 0.75)
         strategy = mock_registry.get_enabled.return_value[0]
