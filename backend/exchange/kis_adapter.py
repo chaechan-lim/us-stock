@@ -126,7 +126,14 @@ class KISAdapter(ExchangeAdapter):
         self._rate_limiter = rate_limiter
 
     async def initialize(self) -> None:
-        self._session = aiohttp.ClientSession()
+        # ERR-B2 (2026-06-06): default to a 10s total / 5s connect
+        # timeout. Without this every _get/_post can block forever on
+        # a hung KIS socket — evaluation_loop holds its lock,
+        # position_check stalls, SL never fires. Per-call retries in
+        # the EGW00201 path convert TimeoutError into a normal retry.
+        self._session = aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=10, connect=5),
+        )
         await self._auth.initialize()
         logger.info(
             "KIS adapter initialized (account=%s, mode=%s)",

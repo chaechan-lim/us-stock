@@ -57,7 +57,12 @@ class KISAuth:
         if self._session and not self._session.closed:
             # Already initialized — skip to avoid session leak
             return
-        self._session = aiohttp.ClientSession()
+        # ERR-B2 (2026-06-06): bound auth requests so a hung KIS
+        # auth-domain socket can't freeze every coroutine waiting on
+        # ensure_valid_token.
+        self._session = aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=10, connect=5),
+        )
         # Try to restore token from Redis first (avoid 1/day limit)
         if self._redis:
             await self._restore_from_redis()

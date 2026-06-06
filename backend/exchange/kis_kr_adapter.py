@@ -117,7 +117,12 @@ class KISKRAdapter(ExchangeAdapter):
         self._rate_limiter = rate_limiter
 
     async def initialize(self) -> None:
-        self._session = aiohttp.ClientSession()
+        # ERR-B2 (2026-06-06): mirror the US adapter — 10s total /
+        # 5s connect timeout to prevent KIS socket hangs from
+        # freezing the eval loop forever.
+        self._session = aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=10, connect=5),
+        )
         await self._auth.initialize()
         logger.info(
             "KIS KR adapter initialized (mode=%s)",

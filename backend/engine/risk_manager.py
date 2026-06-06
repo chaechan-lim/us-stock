@@ -119,6 +119,71 @@ class RiskManager:
             kelly_fraction=self._params.kelly_fraction,
             min_position_pct=self._params.min_position_pct,
         )
+        # RISK-H6 (2026-06-06): restart-amnesia guard. _daily_pnl used
+        # to live only in process memory — a systemd restart after a
+        # -2.9% session re-armed a fresh -3% loss budget. We now
+        # persist it via Redis when available; rehydrate at boot via
+        # restore_daily_pnl().
+        self._cache_client = None  # set by main.py via attach_cache()
+        self._cache_market: str | None = None
+        self._cache_key_prefix = "risk:daily_pnl"
+
+    def attach_cache(self, client, market: str) -> None:
+        """Attach a Redis client + market label for persistent _daily_pnl.
+
+        Called once at startup by main.py after the cache is built.
+        Setting both enables persist + rehydrate; missing either falls
+        back to memory-only (same as before).
+        """
+        self._cache_client = client
+        self._cache_market = market
+
+    def _cache_key(self) -> str | None:
+        if not self._cache_client or not self._cache_market:
+            return None
+        try:
+            from datetime import datetime
+            from zoneinfo import ZoneInfo
+            tz = ZoneInfo("America/New_York") if self._cache_market == "US" else ZoneInfo("Asia/Seoul")
+            local_date = datetime.now(tz).date().isoformat()
+            return (
+                f"{self._cache_key_prefix}:{self._account_id}:"
+                f"{self._cache_market}:{local_date}"
+            )
+        except Exception:
+            return None
+
+    async def restore_daily_pnl(self) -> bool:
+        """Pull persisted daily_pnl from cache at startup. Returns
+        True when a value was restored."""
+        key = self._cache_key()
+        if not key:
+            return False
+        try:
+            raw = await self._cache_client.get(key)
+            if raw is None:
+                return False
+            self._daily_pnl = float(raw)
+            return True
+        except Exception:
+            return False
+
+    def _persist_daily_pnl(self) -> None:
+        """Best-effort persist; called from update_daily_pnl /
+        reset_daily. Fire-and-forget by design — cache outages
+        can't block trading decisions."""
+        key = self._cache_key()
+        if not key:
+            return
+        try:
+            import asyncio
+            # 36h TTL: covers an overnight + late catch-up before
+            # task_daily_reset rolls over.
+            coro = self._cache_client.set(key, str(self._daily_pnl), ex=36 * 3600)
+            if asyncio.iscoroutine(coro):
+                asyncio.create_task(coro)
+        except Exception:
+            pass
 
     def set_eval_regime(self, regime: str) -> None:
         """Set current market regime for adaptive position/exposure sizing."""
@@ -975,9 +1040,11 @@ class RiskManager:
 
     def update_daily_pnl(self, pnl: float) -> None:
         self._daily_pnl += pnl
+        self._persist_daily_pnl()
 
     def reset_daily(self) -> None:
         self._daily_pnl = 0.0
+        self._persist_daily_pnl()
 
     @property
     def params(self) -> RiskParams:
@@ -986,3 +1053,56 @@ class RiskManager:
     @property
     def daily_pnl(self) -> float:
         return self._daily_pnl
+
+    def check_safety_gates(
+        self,
+        symbol: str,
+        portfolio_value: float,
+        current_positions: int,
+        order_value: float = 0.0,
+        skip_position_limit: bool = False,
+    ) -> tuple[bool, str]:
+        """RISK-B4 (2026-06-06): gate-only check usable by callers that
+        already computed sizing themselves (ETFEngine, cash_parking).
+
+        Previously they fed a sizing_override + skip_position_limit=True
+        into OrderManager.place_buy, which bypassed RiskManager
+        entirely — so daily_loss_limit_pct, max_total_exposure,
+        max_positions all got ignored on ETF + parking buys. A -3% day
+        could close the loss circuit for individual stocks while ETF
+        and parking buys kept firing.
+
+        Returns (allowed, reason). Reason is empty on allow.
+        """
+        if portfolio_value <= 0:
+            return False, "portfolio value non-positive"
+
+        # Daily loss limit — applies regardless of strategy.
+        if self._daily_pnl < 0:
+            daily_loss_pct = abs(self._daily_pnl) / portfolio_value
+            if daily_loss_pct >= self._params.daily_loss_limit_pct:
+                return False, (
+                    f"daily loss limit hit "
+                    f"({daily_loss_pct:.2%} >= "
+                    f"{self._params.daily_loss_limit_pct:.2%})"
+                )
+
+        # Max positions — ETFEngine has its own caps so allows opt-out.
+        if not skip_position_limit:
+            if current_positions >= self._params.max_positions:
+                return False, (
+                    f"max_positions reached "
+                    f"({current_positions}/{self._params.max_positions})"
+                )
+
+        # Total exposure ceiling for single order.
+        if order_value > 0 and self._params.max_total_exposure_pct > 0:
+            proj_exposure_pct = order_value / portfolio_value
+            if proj_exposure_pct > self._params.max_total_exposure_pct:
+                return False, (
+                    f"single order exceeds max_total_exposure_pct "
+                    f"({proj_exposure_pct:.2%} > "
+                    f"{self._params.max_total_exposure_pct:.2%})"
+                )
+
+        return True, ""

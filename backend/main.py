@@ -508,6 +508,30 @@ async def lifespan(app: FastAPI):
         ).get("max_scale", 1.5),
     )
     kr_risk_manager = RiskManager(params=kr_risk_params)
+
+    # RISK-H6 (2026-06-06): attach Redis-backed persistence to both
+    # RiskManagers so `_daily_pnl` survives systemd restart. Without
+    # this a restart after a -2.9% session re-arms a fresh -3% loss
+    # budget. Cache may be unavailable in paper/dev — attach
+    # unconditionally and let RiskManager fall back to memory-only.
+    if cache and cache.available:
+        risk_manager.attach_cache(cache, "US")
+        kr_risk_manager.attach_cache(cache, "KR")
+        try:
+            us_restored = await risk_manager.restore_daily_pnl()
+            kr_restored = await kr_risk_manager.restore_daily_pnl()
+            if us_restored:
+                logger.info(
+                    "US daily_pnl restored from cache: %.2f",
+                    risk_manager.daily_pnl,
+                )
+            if kr_restored:
+                logger.info(
+                    "KR daily_pnl restored from cache: %.2f",
+                    kr_risk_manager.daily_pnl,
+                )
+        except Exception as e:
+            logger.warning("Daily PnL restore failed: %s", e)
     order_manager = OrderManager(
         adapter=adapter,
         risk_manager=risk_manager,
@@ -2899,21 +2923,51 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# SEC-B1 (2026-06-06): CORS lockdown. Earlier config used
+# allow_origins=['*'] WITH allow_credentials=True, which makes
+# browsers reflect the requesting Origin and set Allow-Credentials:
+# true. Any random page the operator visited could then issue
+# credentialed GETs against /portfolio/summary, /positions, /trades,
+# etc. Now: explicit whitelist for the dashboards we ship, optional
+# extra origins via env, no wildcard with credentials.
+_DEFAULT_ALLOWED_ORIGINS = [
+    "http://localhost:3001",
+    "http://127.0.0.1:3001",
+    "https://localhost:8443",
+    "https://127.0.0.1:8443",
+]
+_extra_origins = [
+    o.strip()
+    for o in os.environ.get("ALLOWED_ORIGINS", "").split(",")
+    if o.strip()
+]
+_ALLOWED_ORIGINS = _DEFAULT_ALLOWED_ORIGINS + _extra_origins
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_ALLOWED_ORIGINS,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type"],
 )
 
 
-# RES-B2 (2026-06-05): Bearer-token gate on write endpoints. The
-# CLAUDE.md doc claimed this was implemented but only CORS was wired
-# up — `POST /api/v1/engine/start`, `/stop`, `/evaluate`,
-# `/recommendations/{id}/accept` were all reachable anonymously on
-# :8001. Token comes from $AUTH_API_TOKEN; empty disables the gate
-# (preserves dev workflow). GET endpoints + /health are exempt.
+# SEC-B1 (2026-06-06): Bearer auth lockdown — replaces the earlier
+# fail-open / GETs-exempt middleware.
+#
+# Key changes vs RES-B2 (2026-06-05):
+#   • Fail-CLOSED at startup when running live without a token.
+#     Previously `if not _AUTH_TOKEN: return await call_next(request)`
+#     silently disabled the entire gate the moment systemd forgot to
+#     pass AUTH_API_TOKEN, exposing /portfolio/positions, /trades,
+#     equity history, and (worse) POST /engine/start.
+#   • Drop the blanket GET exemption. GETs leak the live portfolio.
+#     We still skip /health, /docs, /openapi.json, /redoc so monitoring
+#     and the API explorer keep working.
+#   • Constant-time token compare via secrets.compare_digest — prevents
+#     length / first-byte-differ timing side channel.
+import secrets
+
 _AUTH_TOKEN = os.environ.get("AUTH_API_TOKEN", "").strip()
 _AUTH_EXEMPT_PATHS = {
     "/health",
@@ -2923,13 +2977,34 @@ _AUTH_EXEMPT_PATHS = {
 }
 
 
+def _auth_required_for_live() -> bool:
+    """Live trading must have a token. Paper / dev keep the old
+    fall-through so local development isn't broken."""
+    try:
+        cfg = AppConfig()
+        return cfg.is_live
+    except Exception:
+        # Config unreadable — be conservative.
+        return True
+
+
+if _auth_required_for_live() and not _AUTH_TOKEN:
+    # Fail-closed startup: refuse to run in live mode without a token.
+    # Print rather than logger so the error is visible even if logging
+    # init failed.
+    print(
+        "[FATAL] AUTH_API_TOKEN is required in live mode (SEC-B1). "
+        "Set it in deploy/usstock-backend.service or env and restart.",
+        file=__import__("sys").stderr,
+    )
+    raise SystemExit(2)
+
+
 @app.middleware("http")
 async def bearer_auth_middleware(request, call_next):
     if not _AUTH_TOKEN:
-        # Auth disabled — preserve dev / local mode.
-        return await call_next(request)
-    if request.method == "GET":
-        # GETs are read-only; allow without token.
+        # Paper/dev mode — gate disabled. Hardened at startup
+        # above so live deployments cannot reach this branch.
         return await call_next(request)
     if request.url.path in _AUTH_EXEMPT_PATHS:
         return await call_next(request)
@@ -2944,7 +3019,9 @@ async def bearer_auth_middleware(request, call_next):
             {"detail": "Missing Bearer token"}, status_code=401,
         )
     token = auth[len("Bearer "):].strip()
-    if token != _AUTH_TOKEN:
+    # SEC-B1: constant-time compare. `!=` is timing-leaky and the
+    # token here is operator-controlled, so the leak window is real.
+    if not secrets.compare_digest(token, _AUTH_TOKEN):
         from fastapi.responses import JSONResponse
         return JSONResponse(
             {"detail": "Invalid token"}, status_code=403,

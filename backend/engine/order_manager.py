@@ -149,8 +149,73 @@ class OrderManager:
                 )
                 return None
 
+        # RISK-B3 (2026-06-06): Fat-finger guard. Caller's `price`
+        # ultimately becomes a KIS limit. evaluation_loop falls back
+        # to df.iloc[-1]['close'] on a fetch error, so a stale/corrupt
+        # OHLCV row can hand KIS a zero, negative, or 10× price.
+        # A runaway limit on a thin US name fills far above market;
+        # KR daily-limit-up still permits +30%. Reject the order
+        # before it reaches the broker.
+        if price is None or price <= 0:
+            logger.error(
+                "Buy rejected for %s: invalid price %s — feed corruption?",
+                symbol, price,
+            )
+            if self._notification:
+                await self._notification.notify_order_rejected(
+                    symbol, f"invalid_price:{price}",
+                )
+            return None
+        if self._market_data is not None:
+            try:
+                last_close = await self._market_data.get_price(symbol)
+                if last_close and last_close > 0:
+                    deviation = abs(price - last_close) / last_close
+                    # 10% bound covers a normal day's range comfortably
+                    # while catching feed corruption / fat-finger.
+                    if deviation > 0.10:
+                        logger.error(
+                            "Buy rejected for %s: limit price %.4f deviates "
+                            "%.1f%% from last_close %.4f (>10%% sanity bound)",
+                            symbol, price, deviation * 100, last_close,
+                        )
+                        if self._notification:
+                            await self._notification.notify_order_rejected(
+                                symbol,
+                                f"price_sanity:{price:.4f}_vs_close_{last_close:.4f}"
+                                f"_dev_{deviation:.1%}",
+                            )
+                        return None
+            except Exception as e:
+                # Don't block the order on a price-lookup failure —
+                # this is a guard, not a hard requirement.
+                logger.debug("Price sanity check skipped for %s: %s", symbol, e)
+
         if sizing_override is not None:
             sizing = sizing_override
+            # RISK-B4: sizing_override callers (ETFEngine,
+            # cash_parking) used to skip RiskManager entirely. Now we
+            # still gate them through the safety check — daily loss
+            # limit, max positions, max exposure — without
+            # re-running sizing math.
+            order_value = float(sizing.quantity) * float(price)
+            allowed, reason = self._risk.check_safety_gates(
+                symbol=symbol,
+                portfolio_value=portfolio_value,
+                current_positions=current_positions,
+                order_value=order_value,
+                skip_position_limit=skip_position_limit,
+            )
+            if not allowed:
+                logger.warning(
+                    "Buy (sizing_override) rejected for %s by safety gate: %s",
+                    symbol, reason,
+                )
+                if self._notification:
+                    await self._notification.notify_order_rejected(
+                        symbol, f"safety_gate:{reason}",
+                    )
+                return None
         else:
             sizing = self._risk.calculate_position_size(
                 symbol=symbol,
