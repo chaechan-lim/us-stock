@@ -129,16 +129,53 @@ class TestComputeEWTargets:
             inverse_vs_cash_ratio=0.5,
         ))
         sectors = ["091160", "305720"]
+        # NB: _compute_ew_targets receives the SLEEVE equity (already
+        # capped by the caller). Here we pass the sleeve directly.
         targets, hedge, inv = base_engine._compute_ew_targets(
             equity=10_000_000, n_signals_active=2, sector_syms=sectors,
         )
         # 50% hedge, 25% inverse, 25% cash, 50% sectors
         assert hedge == 0.50
-        assert abs(inv - 2_500_000) < 1.0   # 25% of equity
+        assert abs(inv - 2_500_000) < 1.0   # 25% of sleeve
         assert abs(targets["114800"] - 2_500_000) < 1.0
-        # Each sector gets (50% of equity) / 2 = 25% = 2.5M
+        # Each sector gets (50% of sleeve) / 2 = 25% = 2.5M
         for sym in sectors:
             assert abs(targets[sym] - 2_500_000) < 1.0
+
+
+class TestSleeveCapping:
+    """2026-06-09: equity_cap_pct bounds the sleeve so individual-stock
+    strategies (same account) keep their capital."""
+
+    async def test_targets_capped_to_sleeve_pct(self, base_engine):
+        from engine.risk_manager import PositionSizeResult
+
+        base_engine.set_ew_hedge_config(EWHedgeConfig(
+            enabled=True, inverse_etf="114800", regime_proxy="069500",
+            equity_cap_pct=0.30,
+        ))
+        base_engine._compute_regime_signals = AsyncMock(
+            return_value=(False, False, False),
+        )
+        base_engine._market_data.get_positions = AsyncMock(return_value=[])
+        base_engine._market_data.get_balance = AsyncMock(return_value=MagicMock(
+            total=30_000_000, available=30_000_000, locked=0, currency="KRW",
+        ))
+        base_engine._market_data.get_price = AsyncMock(return_value=10_000.0)
+        base_engine._can_buy_etf = MagicMock(return_value=(True, ""))
+
+        await base_engine.evaluate(MagicMock(), sector_data=None)
+
+        # Total BUY allocation must be ≤ 30% of equity (sleeve cap).
+        # 7 sectors × per-sector target = sleeve = 30% × 30M = 9M.
+        total_alloc = sum(
+            c.kwargs["sizing_override"].allocation_usd
+            for c in base_engine._order_manager.place_buy.await_args_list
+        )
+        # Allow small rounding from int(qty) truncation
+        assert total_alloc <= 30_000_000 * 0.30 + 100_000
+        # And it should deploy meaningfully (not near-zero)
+        assert total_alloc > 30_000_000 * 0.25
 
 
 class TestRegimeSignals:

@@ -86,12 +86,20 @@ class EWHedgeConfig:
     breadth_threshold: float = 0.30
     # Gate: minimum active signals to trigger ANY hedge
     min_signals_for_hedge: int = 2
-    # Hedge ratio when triggered (fraction of equity to hedge bucket)
+    # Hedge ratio when triggered (fraction of the SLEEVE to hedge bucket)
     hedge_ratio: float = 0.50
     # Split of hedge bucket between inverse ETF and cash (0.5 = half each)
     inverse_vs_cash_ratio: float = 0.5
     # Tolerance band — don't trade if current position within ±N% of target
     rebalance_tolerance: float = 0.05
+    # 2026-06-09: equity_cap_pct bounds the EW hedge sleeve. KR runs the
+    # individual-stock strategies on the SAME account, so deploying 100%
+    # of equity into ETFs would starve them. This caps the EW basket +
+    # hedge at N% of total equity (matches the legacy ETF
+    # max_portfolio_pct=0.30 discipline); the rest stays with the stock
+    # engine. Backtest validated full-capital EW b&h; the sleeve scales
+    # the absolute return ~proportionally while keeping the risk thesis.
+    equity_cap_pct: float = 0.30
 
 
 class ETFEngine:
@@ -1343,7 +1351,15 @@ class ETFEngine:
         balance = await self._market_data.get_balance()
         if balance.total <= 0:
             return actions
-        equity = float(balance.total)
+        total_equity = float(balance.total)
+        # 2026-06-09: bound the EW hedge sleeve so the individual-stock
+        # strategies (which share this KR account) keep their capital.
+        # All target weights are computed against the capped sleeve, not
+        # total equity. cash_available is still passed through to
+        # OrderManager so a cash shortfall (stocks holding the rest)
+        # naturally caps actual fills too.
+        sleeve_cap = max(0.0, min(1.0, cfg.equity_cap_pct))
+        equity = total_equity * sleeve_cap
 
         targets, hedge_ratio, inv_target = self._compute_ew_targets(
             equity, n_active, sector_syms,

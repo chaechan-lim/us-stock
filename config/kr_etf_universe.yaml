@@ -73,7 +73,11 @@ ew_hedge:
   breadth_threshold: 0.30
   # Gate: 2-of-2 signals required (vol disabled → both S2+S3 must fire)
   min_signals_for_hedge: 2
-  # When triggered, hedge 50% of equity (25% inverse + 25% cash)
+  # When triggered, hedge 50% of the SLEEVE (25% inverse + 25% cash)
   hedge_ratio: 0.50
   inverse_vs_cash_ratio: 0.5
   rebalance_tolerance: 0.05
+  # 2026-06-09: bound the EW hedge sleeve to 30% of KR equity so the
+  # individual-stock strategies (same account) keep their capital.
+  # All target weights computed against this capped sleeve.
+  equity_cap_pct: 0.30
