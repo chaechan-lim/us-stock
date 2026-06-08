@@ -3001,11 +3001,13 @@ async def lifespan(app: FastAPI):
     await naver_news_service.close()
     # External-service aiohttp sessions also need closing — without
     # this each systemd restart leaks a few sockets per service.
-    for svc in (
-        getattr(app.state, "earnings_svc", None),
-        getattr(app.state, "insider_svc", None),
-        getattr(app.state, "kr_insider_svc", None),
-    ):
+    # bug_004 (2026-06-09): these services are never assigned to
+    # app.state (only event_calendar is), so the old getattr() lookups
+    # all returned None and the loop was a no-op. Reference the in-scope
+    # lifespan locals directly — they're still bound at the shutdown
+    # site (single lifespan coroutine). DARTInsiderService has no
+    # close(), so the hasattr gate filters it out harmlessly.
+    for svc in (earnings_svc, insider_svc, kr_insider_svc):
         if svc is not None and hasattr(svc, "close"):
             try:
                 await svc.close()
@@ -3044,13 +3046,14 @@ _extra_origins = [
 ]
 _ALLOWED_ORIGINS = _DEFAULT_ALLOWED_ORIGINS + _extra_origins
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=_ALLOWED_ORIGINS,
-    allow_credentials=True,
-    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type"],
-)
+# bug_008 (2026-06-09): CORSMiddleware is registered AFTER
+# bearer_auth_middleware (further down) so that — under Starlette's
+# LIFO wrapping (last-added = outermost) — CORS becomes the OUTER
+# layer. Otherwise the auth middleware's short-circuit 401/403
+# JSONResponses never traverse CORS, arrive without
+# Access-Control-Allow-Origin, and browsers reject them as opaque
+# CORS errors instead of delivering the status to the frontend
+# (ApiErrorBanner). See the add_middleware call below the auth mw.
 
 
 # SEC-B1 (2026-06-06): Bearer auth lockdown — replaces the earlier
@@ -3128,6 +3131,20 @@ async def bearer_auth_middleware(request, call_next):
             {"detail": "Invalid token"}, status_code=403,
         )
     return await call_next(request)
+
+
+# bug_008 (2026-06-09): registered AFTER bearer_auth_middleware so CORS
+# is the OUTER layer (Starlette LIFO). This guarantees auth-failure
+# (401/403) responses carry Access-Control-Allow-Origin headers, so the
+# browser delivers the status to client.ts → ApiErrorBanner instead of
+# blocking it as an opaque CORS error.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_ALLOWED_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type"],
+)
 
 
 @app.get("/health")

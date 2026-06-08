@@ -107,6 +107,7 @@ class OrderManager:
         atr: float | None = None,
         sizing_override: PositionSizeResult | None = None,
         skip_position_limit: bool = False,
+        skip_already_held: bool = False,
         session: str = "regular",
     ) -> ManagedOrder | None:
         """Place a buy order after risk checks and deduplication.
@@ -116,6 +117,10 @@ class OrderManager:
                 internal sizing calculation when provided.
             skip_position_limit: If True, bypasses max_positions check (used by
                 ETF engine which has its own position limits).
+            skip_already_held: If True, bypasses the already-held guard. Used
+                by continuous-rebalance callers (ETF EW hedge) that legitimately
+                top up positions toward a target weight. The default-False
+                preserves the fail-closed dedup for every normal BUY path.
         """
         # Duplicate check: prevent double-buying same symbol
         if self.has_pending_order(symbol, "BUY"):
@@ -128,7 +133,11 @@ class OrderManager:
         # STOCK-26: On failure, reject the buy (fail-safe). Previously this
         # silently swallowed errors, allowing duplicate buys when the API
         # was down.
-        if self._market_data:
+        # bug_009 (2026-06-09): skip_already_held lets continuous-rebalance
+        # callers (EW hedge) top up held positions. Position-check failures
+        # still fail closed even when skipping the held guard — a down API
+        # must not let an unbounded add-on through.
+        if self._market_data and not skip_already_held:
             try:
                 exchange_positions = await self._market_data.get_positions()
                 if any(p.symbol == symbol and p.quantity > 0 for p in exchange_positions):

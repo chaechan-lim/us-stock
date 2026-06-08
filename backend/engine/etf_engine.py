@@ -1482,8 +1482,21 @@ class ETFEngine:
             # Use the standard place_buy path with sizing_override so
             # RiskManager gates (daily_loss, exposure, etc.) still
             # apply via OrderManager.
+            # bug_001 (2026-06-09): sizing_override must be a
+            # PositionSizeResult, not a tuple — OrderManager reads
+            # .quantity/.allowed/.reason. Mirror the regime/sector BUY
+            # paths (etf_engine.py:540, :690).
+            # bug_009 (2026-06-09): skip_already_held=True so a top-up
+            # toward target weight isn't rejected by the held guard.
             allocation_usd = qty * price
             risk_per_share = price * self._risk.default_stop_loss_pct
+            sizing = PositionSizeResult(
+                quantity=qty,
+                allocation_usd=allocation_usd,
+                risk_per_share=risk_per_share,
+                reason="etf_ew_hedge_entry",
+                allowed=True,
+            )
             try:
                 buy_res = await self._order_manager.place_buy(
                     symbol=sym,
@@ -1493,8 +1506,9 @@ class ETFEngine:
                     current_positions=len(positions),
                     strategy_name="etf_ew_hedge_entry",
                     exchange=self._etf.get_exchange(sym),
-                    sizing_override=(qty, allocation_usd, risk_per_share),
+                    sizing_override=sizing,
                     skip_position_limit=True,
+                    skip_already_held=True,
                 )
                 if buy_res is not None:
                     actions["ew_hedge"].append(

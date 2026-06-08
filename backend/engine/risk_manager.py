@@ -186,7 +186,14 @@ class RiskManager:
             # task_daily_reset rolls over.
             coro = self._cache_client.set(key, str(self._daily_pnl), ex=36 * 3600)
             if asyncio.iscoroutine(coro):
-                asyncio.create_task(coro)
+                # bug_003 (2026-06-09): use the tracked spawn helper
+                # (RES-H7) instead of raw create_task. A raw task with
+                # no retained ref can be GC-cancelled mid-await, silently
+                # dropping the Redis write and leaving restore_daily_pnl
+                # reading a stale figure after a restart. spawn() keeps
+                # the ref, surfaces exceptions, and joins _drain_bg_tasks.
+                from core.tasks import spawn as _spawn_bg
+                _spawn_bg(coro, name=f"persist_daily_pnl:{self._cache_market}")
         except Exception:
             pass
 

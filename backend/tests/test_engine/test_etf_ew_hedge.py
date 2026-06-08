@@ -228,3 +228,61 @@ class TestEvaluateDispatch:
         result = await base_engine.evaluate(market_state, sector_data=None)
         assert "ew_hedge" in result
         assert any("signals:" in s for s in result["regime"])
+
+
+class TestEWHedgeBuyPath:
+    """bug_001 + bug_009 regression: the BUY pass must pass a
+    PositionSizeResult (not a tuple) and set skip_already_held=True."""
+
+    async def test_bootstrap_buy_uses_position_size_result(self, base_engine):
+        from engine.risk_manager import PositionSizeResult
+
+        base_engine.set_ew_hedge_config(EWHedgeConfig(
+            enabled=True, inverse_etf="114800", regime_proxy="069500",
+        ))
+        base_engine._compute_regime_signals = AsyncMock(
+            return_value=(False, False, False),
+        )
+        # Empty portfolio → bootstrap BUYs fire for all 7 sectors
+        base_engine._market_data.get_positions = AsyncMock(return_value=[])
+        base_engine._market_data.get_balance = AsyncMock(return_value=MagicMock(
+            total=30_000_000, available=30_000_000, locked=0, currency="KRW",
+        ))
+        base_engine._market_data.get_price = AsyncMock(return_value=10_000.0)
+        base_engine._can_buy_etf = MagicMock(return_value=(True, ""))
+
+        await base_engine.evaluate(MagicMock(), sector_data=None)
+
+        # place_buy must have been called, and every call must pass a
+        # PositionSizeResult (bug_001) + skip_already_held=True (bug_009)
+        assert base_engine._order_manager.place_buy.await_count > 0
+        for call in base_engine._order_manager.place_buy.await_args_list:
+            sizing = call.kwargs.get("sizing_override")
+            assert isinstance(sizing, PositionSizeResult), (
+                f"sizing_override must be PositionSizeResult, got {type(sizing)}"
+            )
+            assert sizing.allowed is True
+            assert call.kwargs.get("skip_already_held") is True
+
+    async def test_buy_pass_does_not_raise_on_held_topup(self, base_engine):
+        """A held sector below target must produce a top-up BUY, not
+        an AttributeError-swallowing no-op."""
+        base_engine.set_ew_hedge_config(EWHedgeConfig(
+            enabled=True, inverse_etf="114800", regime_proxy="069500",
+        ))
+        base_engine._compute_regime_signals = AsyncMock(
+            return_value=(False, False, False),
+        )
+        # 091160 held but well below target (1 share @ 10k = 10k vs ~4.3M target)
+        held = MagicMock(symbol="091160", quantity=1, current_price=10_000.0)
+        base_engine._market_data.get_positions = AsyncMock(return_value=[held])
+        base_engine._market_data.get_balance = AsyncMock(return_value=MagicMock(
+            total=30_000_000, available=29_990_000, locked=0, currency="KRW",
+        ))
+        base_engine._market_data.get_price = AsyncMock(return_value=10_000.0)
+        base_engine._can_buy_etf = MagicMock(return_value=(True, ""))
+        base_engine._can_sell_etf = MagicMock(return_value=(True, ""))
+
+        result = await base_engine.evaluate(MagicMock(), sector_data=None)
+        # 091160 top-up should appear as an ew_hedge BUY action
+        assert any("BUY 091160" in a for a in result["ew_hedge"])
