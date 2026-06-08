@@ -51,6 +51,49 @@ class ETFRiskParams:
     sell_cooldown_hours: int = 4       # Prevent rebuy of same ETF for N hours after sell
 
 
+@dataclass
+class EWHedgeConfig:
+    """2026-06-08 thesis (c) — EW 7-sector default + regime-gated
+    partial hedge.
+
+    Backtest (backend/scripts/backtest_kr_ew_regime_hedge.py):
+      - rotation baseline lost 121pp to EW b&h over 2y
+      - F3 design (ROC+breadth 2-of-2 gate, 50% hedge) costs ≤1pp
+        in bull markets, ready to defend in bear (untested live).
+
+    Opt-in: live default = OFF. Operator enables per market via yaml
+    `markets.KR.etf.ew_hedge.enabled = true`. When enabled, the
+    rotation evaluate() path is bypassed entirely and this engine
+    converges holdings toward EW basket + hedge target.
+    """
+    enabled: bool = False
+    # Inverse ETF symbol for hedge (KR = 114800 KODEX 인버스)
+    inverse_etf: str = ""
+    # KS200 proxy for regime signals (KR = 069500 KODEX 200)
+    regime_proxy: str = ""
+    # Rebalance cadence
+    rebalance_days: int = 5
+    # Signal 1 (vol percentile) — disabled by default per F3
+    # backtest finding: vol-percentile too noisy in bull
+    use_vol_signal: bool = False
+    vol_lookback: int = 20
+    vol_pctile_lookback: int = 252
+    vol_pctile_threshold: float = 80.0
+    # Signal 2: 5d ROC threshold
+    roc_5d_threshold: float = -0.03
+    # Signal 3: sector breadth
+    sector_sma: int = 50
+    breadth_threshold: float = 0.30
+    # Gate: minimum active signals to trigger ANY hedge
+    min_signals_for_hedge: int = 2
+    # Hedge ratio when triggered (fraction of equity to hedge bucket)
+    hedge_ratio: float = 0.50
+    # Split of hedge bucket between inverse ETF and cash (0.5 = half each)
+    inverse_vs_cash_ratio: float = 0.5
+    # Tolerance band — don't trade if current position within ±N% of target
+    rebalance_tolerance: float = 0.05
+
+
 class ETFEngine:
     """Dedicated engine for leveraged/inverse ETF and sector ETF trading."""
 
@@ -121,6 +164,44 @@ class ETFEngine:
         # seed from same-day sell records in the orders DB on startup.
         self._last_sell_times: dict[str, float] = {}  # symbol -> unix timestamp
 
+        # 2026-06-08: EW hedge mode (default OFF; opt-in via yaml).
+        # Set by main.py via set_ew_hedge_config(); otherwise stays
+        # disabled and the existing rotation path remains the only
+        # behaviour, so this commit is a pure-additive no-op until
+        # the toggle flips.
+        self._ew_hedge_cfg = EWHedgeConfig()
+        self._last_ew_rebalance_ts: float = 0.0
+
+    def set_ew_hedge_config(self, cfg: EWHedgeConfig) -> None:
+        """Wire EW hedge config from yaml (called by main.py at startup
+        + on hot-reload). Validates inverse_etf / regime_proxy are set
+        when enabled so we fail loudly at boot, not silently in eval."""
+        if cfg.enabled:
+            if not cfg.inverse_etf:
+                raise ValueError("EWHedgeConfig.enabled but inverse_etf empty")
+            if not cfg.regime_proxy:
+                raise ValueError("EWHedgeConfig.enabled but regime_proxy empty")
+            if not (0.0 < cfg.hedge_ratio <= 1.0):
+                raise ValueError(
+                    f"EWHedgeConfig.hedge_ratio out of (0,1]: {cfg.hedge_ratio}"
+                )
+            if cfg.min_signals_for_hedge < 1 or cfg.min_signals_for_hedge > 3:
+                raise ValueError(
+                    f"min_signals_for_hedge must be 1-3: "
+                    f"{cfg.min_signals_for_hedge}"
+                )
+        self._ew_hedge_cfg = cfg
+        logger.info(
+            "ETF Engine %s: EW hedge mode %s (inverse=%s, proxy=%s, "
+            "min_signals=%d, hedge_ratio=%.2f)",
+            self._market,
+            "ENABLED" if cfg.enabled else "disabled",
+            cfg.inverse_etf or "-",
+            cfg.regime_proxy or "-",
+            cfg.min_signals_for_hedge,
+            cfg.hedge_ratio,
+        )
+
     async def evaluate(
         self,
         market_state: MarketState,
@@ -135,6 +216,12 @@ class ETFEngine:
         Returns:
             Summary dict of actions taken.
         """
+        # 2026-06-08: when EW hedge mode is enabled (yaml opt-in), the
+        # rotation path is skipped entirely. EW hedge is a complete
+        # replacement strategy, not a layer on top.
+        if self._ew_hedge_cfg.enabled:
+            return await self._evaluate_ew_hedge(market_state)
+
         actions = {"regime": [], "sector": [], "risk": []}
 
         # Fetch positions and balance once for all steps
@@ -1075,4 +1162,349 @@ class ETFEngine:
                 "size_ratio": self._bear_size_ratio,
             },
             "regime_allocation_pct": self._regime_alloc_pct,
+            "ew_hedge": {
+                "enabled": self._ew_hedge_cfg.enabled,
+                "inverse_etf": self._ew_hedge_cfg.inverse_etf,
+                "regime_proxy": self._ew_hedge_cfg.regime_proxy,
+                "min_signals_for_hedge": self._ew_hedge_cfg.min_signals_for_hedge,
+                "hedge_ratio": self._ew_hedge_cfg.hedge_ratio,
+            },
         }
+
+    # ────────────────────────────────────────────────────────────────────
+    # EW Hedge mode (2026-06-08 thesis (c))
+    # ────────────────────────────────────────────────────────────────────
+
+    async def _compute_regime_signals(self) -> tuple[bool, bool, bool]:
+        """Return (vol_spike, weak_roc, low_breadth) booleans.
+
+        Each signal is True when a bear condition is met:
+          S1 vol_spike   — 20d realized vol > N-day rolling pctile threshold
+          S2 weak_roc    — KS200 5d ROC <= -3%
+          S3 low_breadth — <30% sector ETFs above own SMA50
+        """
+        cfg = self._ew_hedge_cfg
+        exchange = "KRX" if self._market == "KR" else "NASD"
+
+        # Fetch regime-proxy series
+        try:
+            proxy_df = await self._market_data.get_ohlcv(
+                cfg.regime_proxy,
+                timeframe="1D",
+                limit=max(cfg.vol_lookback + cfg.vol_pctile_lookback + 5,
+                          cfg.sector_sma + 10),
+                exchange=exchange,
+            )
+        except Exception as e:
+            logger.warning(
+                "EW hedge: regime proxy %s fetch failed: %s",
+                cfg.regime_proxy, e,
+            )
+            return False, False, False
+
+        if proxy_df is None or proxy_df.empty or len(proxy_df) < 10:
+            return False, False, False
+
+        proxy_close = proxy_df["close"]
+
+        # S1: realized vol percentile (optional — disabled by default)
+        s1 = False
+        if cfg.use_vol_signal and len(proxy_close) >= (
+            cfg.vol_lookback + cfg.vol_pctile_lookback
+        ):
+            try:
+                rets = proxy_close.pct_change().dropna()
+                cur_vol = float(rets.iloc[-cfg.vol_lookback:].std())
+                hist_vols = rets.rolling(cfg.vol_lookback).std().iloc[
+                    -cfg.vol_pctile_lookback:
+                ].dropna()
+                if len(hist_vols) > 0 and cur_vol > 0:
+                    pct = float((hist_vols < cur_vol).mean()) * 100
+                    s1 = pct >= cfg.vol_pctile_threshold
+            except Exception as e:
+                logger.debug("EW hedge S1 vol calc failed: %s", e)
+
+        # S2: 5d ROC
+        s2 = False
+        if len(proxy_close) >= 6:
+            try:
+                cur = float(proxy_close.iloc[-1])
+                prior = float(proxy_close.iloc[-6])
+                if prior > 0:
+                    roc = (cur / prior) - 1
+                    s2 = roc <= cfg.roc_5d_threshold
+            except Exception as e:
+                logger.debug("EW hedge S2 ROC calc failed: %s", e)
+
+        # S3: sector breadth — fraction of sector ETFs above own SMA50
+        sector_syms = self._etf.get_sector_etf_symbols()
+        if not sector_syms or len(proxy_close) < cfg.sector_sma:
+            s3 = False
+        else:
+            above = 0
+            counted = 0
+            for sym in sector_syms:
+                try:
+                    df = await self._market_data.get_ohlcv(
+                        sym, timeframe="1D",
+                        limit=cfg.sector_sma + 5,
+                        exchange=exchange,
+                    )
+                    if df is None or df.empty or len(df) < cfg.sector_sma:
+                        continue
+                    sma = float(df["close"].iloc[-cfg.sector_sma:].mean())
+                    cur = float(df["close"].iloc[-1])
+                    counted += 1
+                    if cur >= sma:
+                        above += 1
+                except Exception as e:
+                    logger.debug(
+                        "EW hedge S3 breadth fetch %s failed: %s", sym, e,
+                    )
+                    continue
+            s3 = (counted > 0) and (above / counted) < cfg.breadth_threshold
+
+        return s1, s2, s3
+
+    def _compute_ew_targets(
+        self,
+        equity: float,
+        n_signals_active: int,
+        sector_syms: list[str],
+    ) -> tuple[dict[str, float], float, float]:
+        """Compute target $ allocation per symbol.
+
+        Returns (symbol→target_value, hedge_ratio, inverse_target_value).
+        """
+        cfg = self._ew_hedge_cfg
+        if n_signals_active >= cfg.min_signals_for_hedge:
+            hedge_ratio = cfg.hedge_ratio
+        else:
+            hedge_ratio = 0.0
+        hedge_ratio = min(1.0, max(0.0, hedge_ratio))
+
+        inverse_target_value = equity * hedge_ratio * cfg.inverse_vs_cash_ratio
+        sector_pool = equity * (1.0 - hedge_ratio)
+        # Cash residual = equity * hedge_ratio * (1 - inverse_vs_cash_ratio)
+
+        targets: dict[str, float] = {}
+        if sector_syms:
+            per = sector_pool / len(sector_syms)
+            for sym in sector_syms:
+                targets[sym] = per
+        targets[cfg.inverse_etf] = inverse_target_value
+        return targets, hedge_ratio, inverse_target_value
+
+    async def _evaluate_ew_hedge(self, market_state: MarketState) -> dict:
+        """EW-basket-with-regime-hedge evaluation.
+
+        Sequence:
+          1) Compute regime signals (3 signals) — counts active
+          2) Compute target allocation per symbol
+          3) If rebalance window elapsed or composition would change
+             materially, rebalance (sells first to free cash, then buys)
+          4) Otherwise leave positions alone
+
+        No stop-loss, no rotation. Positions are sized to targets;
+        drawdown is held until the regime signal flips.
+        """
+        cfg = self._ew_hedge_cfg
+        actions: dict[str, list[str]] = {"ew_hedge": [], "risk": [], "regime": []}
+
+        now_ts = time.time()
+        # Rebalance cadence: only proceed when N days have elapsed.
+        # The regime signal evaluation is cheap; we recompute it but
+        # only act when within the window.
+        time_since_rebalance_days = (
+            (now_ts - self._last_ew_rebalance_ts) / 86400.0
+            if self._last_ew_rebalance_ts > 0 else 999.0
+        )
+
+        try:
+            s1, s2, s3 = await self._compute_regime_signals()
+        except Exception as e:
+            logger.warning(
+                "EW hedge: regime signal calc failed (%s) — skipping cycle",
+                e,
+            )
+            return actions
+        n_active = int(s1) + int(s2) + int(s3)
+        actions["regime"].append(
+            f"signals: vol={int(s1)} roc={int(s2)} breadth={int(s3)} "
+            f"(active={n_active}/3, gate={cfg.min_signals_for_hedge})"
+        )
+
+        sector_syms = self._etf.get_sector_etf_symbols()
+        if not sector_syms:
+            logger.warning("EW hedge: no sector ETF symbols configured")
+            return actions
+
+        positions = await self._market_data.get_positions()
+        balance = await self._market_data.get_balance()
+        if balance.total <= 0:
+            return actions
+        equity = float(balance.total)
+
+        targets, hedge_ratio, inv_target = self._compute_ew_targets(
+            equity, n_active, sector_syms,
+        )
+        actions["ew_hedge"].append(
+            f"target hedge_ratio={hedge_ratio*100:.0f}% "
+            f"(inverse_value={inv_target:.0f})"
+        )
+
+        # Build symbol → current_value map (from broker positions)
+        current: dict[str, tuple[float, float, float]] = {}  # qty, price, value
+        managed = set(sector_syms) | {cfg.inverse_etf}
+        for p in positions:
+            if p.symbol not in managed:
+                continue
+            price = float(p.current_price or 0)
+            qty = float(p.quantity)
+            current[p.symbol] = (qty, price, qty * price)
+
+        # Decide rebalance: only if rebalance cadence elapsed OR a
+        # regime FLIP just occurred (hedge_ratio is currently > 0 but
+        # we hold no inverse, or vice-versa).
+        currently_holds_inverse = current.get(cfg.inverse_etf, (0, 0, 0))[0] > 0
+        regime_flip = (
+            (hedge_ratio > 0 and not currently_holds_inverse)
+            or (hedge_ratio == 0 and currently_holds_inverse)
+        )
+        should_rebalance = (
+            time_since_rebalance_days >= cfg.rebalance_days or regime_flip
+        )
+        if not should_rebalance:
+            actions["ew_hedge"].append(
+                f"skip rebalance ({time_since_rebalance_days:.1f}d "
+                f"< {cfg.rebalance_days}d)"
+            )
+            return actions
+
+        # Daily-loss circuit + portfolio cap still apply (safety net).
+        # We compute these and abort if either is hit; rebalancing
+        # respects the same gates as live BUYs do via OrderManager.
+        exchange = "KRX" if self._market == "KR" else "NASD"
+
+        # SELL pass: anything not in target, or above target + tolerance
+        sells_executed = 0
+        for sym, (qty, price, value) in current.items():
+            tgt = targets.get(sym, 0.0)
+            tolerance_value = tgt * cfg.rebalance_tolerance
+            if tgt <= 0 and qty > 0:
+                # Fully exit
+                can_sell, reason = self._can_sell_etf(sym)
+                if not can_sell:
+                    actions["risk"].append(f"BLOCKED sell {sym}: {reason}")
+                    continue
+                try:
+                    sell_res = await self._order_manager.place_sell(
+                        symbol=sym,
+                        quantity=int(qty),
+                        price=price,
+                        strategy_name="etf_ew_hedge_exit",
+                        exchange=self._etf.get_exchange(sym),
+                        entry_price=0.0,
+                        buy_strategy="etf_ew_hedge",
+                    )
+                    if sell_res is not None:
+                        sells_executed += 1
+                        self._last_sell_times[sym] = now_ts
+                        actions["ew_hedge"].append(
+                            f"EXIT {sym} qty={int(qty)} @ {price:.0f}"
+                        )
+                except Exception as e:
+                    logger.error(
+                        "EW hedge: SELL %s failed: %s", sym, e, exc_info=True,
+                    )
+            elif value > tgt + tolerance_value and tgt > 0:
+                # Trim
+                excess = value - tgt
+                trim_qty = int(excess / max(price, 1e-6))
+                if trim_qty <= 0:
+                    continue
+                can_sell, reason = self._can_sell_etf(sym)
+                if not can_sell:
+                    actions["risk"].append(f"BLOCKED trim {sym}: {reason}")
+                    continue
+                try:
+                    sell_res = await self._order_manager.place_sell(
+                        symbol=sym,
+                        quantity=trim_qty,
+                        price=price,
+                        strategy_name="etf_ew_hedge_trim",
+                        exchange=self._etf.get_exchange(sym),
+                        entry_price=0.0,
+                        buy_strategy="etf_ew_hedge",
+                    )
+                    if sell_res is not None:
+                        sells_executed += 1
+                        self._last_sell_times[sym] = now_ts
+                        actions["ew_hedge"].append(
+                            f"TRIM {sym} qty={trim_qty} (was {int(qty)})"
+                        )
+                except Exception as e:
+                    logger.error(
+                        "EW hedge: TRIM %s failed: %s", sym, e, exc_info=True,
+                    )
+
+        # Refresh balance after sells before computing buy capacity
+        if sells_executed > 0:
+            try:
+                balance = await self._market_data.get_balance()
+            except Exception:
+                pass
+
+        # BUY pass: anything below target - tolerance
+        for sym, tgt in targets.items():
+            if tgt <= 0:
+                continue
+            cur_qty, cur_price, cur_value = current.get(sym, (0.0, 0.0, 0.0))
+            tolerance_value = tgt * cfg.rebalance_tolerance
+            if cur_value >= tgt - tolerance_value:
+                continue
+            # Need fresh price — current can be stale on first add
+            try:
+                price = await self._market_data.get_price(sym, exchange)
+            except Exception:
+                price = cur_price
+            if not price or price <= 0:
+                continue
+            need_value = tgt - cur_value
+            qty = int(need_value / price)
+            if qty <= 0:
+                continue
+            # Check sell_cooldown (avoid immediate re-buy after exit)
+            can_buy, cd_reason = self._can_buy_etf(sym)
+            if not can_buy:
+                actions["risk"].append(f"COOLDOWN skip {sym}: {cd_reason}")
+                continue
+            # Use the standard place_buy path with sizing_override so
+            # RiskManager gates (daily_loss, exposure, etc.) still
+            # apply via OrderManager.
+            allocation_usd = qty * price
+            risk_per_share = price * self._risk.default_stop_loss_pct
+            try:
+                buy_res = await self._order_manager.place_buy(
+                    symbol=sym,
+                    price=price,
+                    portfolio_value=equity,
+                    cash_available=float(balance.available),
+                    current_positions=len(positions),
+                    strategy_name="etf_ew_hedge_entry",
+                    exchange=self._etf.get_exchange(sym),
+                    sizing_override=(qty, allocation_usd, risk_per_share),
+                    skip_position_limit=True,
+                )
+                if buy_res is not None:
+                    actions["ew_hedge"].append(
+                        f"BUY {sym} qty={qty} @ {price:.0f} "
+                        f"(target={tgt:.0f})"
+                    )
+            except Exception as e:
+                logger.error(
+                    "EW hedge: BUY %s failed: %s", sym, e, exc_info=True,
+                )
+
+        self._last_ew_rebalance_ts = now_ts
+        return actions

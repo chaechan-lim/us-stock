@@ -891,6 +891,34 @@ async def lifespan(app: FastAPI):
         market="KR",
         risk_manager=kr_risk_manager,
     )
+    # 2026-06-08: wire EW hedge config (default OFF in yaml).
+    # Reads `ew_hedge:` block from kr_etf_universe.yaml.
+    try:
+        import yaml as _yaml
+        from engine.etf_engine import EWHedgeConfig
+        with open(kr_etf_config_path) as _fh:
+            _kr_etf_yaml = _yaml.safe_load(_fh) or {}
+        _ew = _kr_etf_yaml.get("ew_hedge", {}) or {}
+        if _ew:
+            kr_etf_engine.set_ew_hedge_config(EWHedgeConfig(
+                enabled=bool(_ew.get("enabled", False)),
+                inverse_etf=str(_ew.get("inverse_etf", "")),
+                regime_proxy=str(_ew.get("regime_proxy", "")),
+                rebalance_days=int(_ew.get("rebalance_days", 5)),
+                use_vol_signal=bool(_ew.get("use_vol_signal", False)),
+                vol_lookback=int(_ew.get("vol_lookback", 20)),
+                vol_pctile_lookback=int(_ew.get("vol_pctile_lookback", 252)),
+                vol_pctile_threshold=float(_ew.get("vol_pctile_threshold", 80.0)),
+                roc_5d_threshold=float(_ew.get("roc_5d_threshold", -0.03)),
+                sector_sma=int(_ew.get("sector_sma", 50)),
+                breadth_threshold=float(_ew.get("breadth_threshold", 0.30)),
+                min_signals_for_hedge=int(_ew.get("min_signals_for_hedge", 2)),
+                hedge_ratio=float(_ew.get("hedge_ratio", 0.50)),
+                inverse_vs_cash_ratio=float(_ew.get("inverse_vs_cash_ratio", 0.5)),
+                rebalance_tolerance=float(_ew.get("rebalance_tolerance", 0.05)),
+            ))
+    except Exception as _e:
+        logger.warning("KR ETF ew_hedge config load failed: %s", _e)
     app.state.kr_etf_engine = kr_etf_engine
     kr_market_state_detector = MarketStateDetector()
     app.state.kr_market_state_detector = kr_market_state_detector
