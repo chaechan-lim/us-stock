@@ -267,6 +267,68 @@ class TestEvaluateDispatch:
         assert any("signals:" in s for s in result["regime"])
 
 
+class TestOpeningAvoidance:
+    """2026-06-09: skip rebalancing in the first N min after open so the
+    bulk basket build avoids the opening-auction spread."""
+
+    async def test_skips_rebalance_during_opening_window(self, base_engine, monkeypatch):
+        base_engine.set_ew_hedge_config(EWHedgeConfig(
+            enabled=True, inverse_etf="114800", regime_proxy="069500",
+            opening_avoidance_minutes=30,
+        ))
+        # Force is_opening_minutes True
+        monkeypatch.setattr(
+            "engine.scheduler.is_opening_minutes",
+            lambda market, minutes: True,
+        )
+        # Signals would otherwise be computed; assert we bail before any
+        # order placement.
+        base_engine._compute_regime_signals = AsyncMock(
+            return_value=(True, True, True),
+        )
+        result = await base_engine.evaluate(MagicMock(), sector_data=None)
+        assert any("opening" in a for a in result["ew_hedge"])
+        base_engine._order_manager.place_buy.assert_not_called()
+        base_engine._order_manager.place_sell.assert_not_called()
+
+    async def test_runs_normally_outside_opening_window(self, base_engine, monkeypatch):
+        base_engine.set_ew_hedge_config(EWHedgeConfig(
+            enabled=True, inverse_etf="114800", regime_proxy="069500",
+            opening_avoidance_minutes=30,
+        ))
+        monkeypatch.setattr(
+            "engine.scheduler.is_opening_minutes",
+            lambda market, minutes: False,
+        )
+        base_engine._compute_regime_signals = AsyncMock(
+            return_value=(False, False, False),
+        )
+        result = await base_engine.evaluate(MagicMock(), sector_data=None)
+        # Not blocked by opening guard → regime signals logged
+        assert any("signals:" in s for s in result["regime"])
+
+    async def test_guard_disabled_when_minutes_zero(self, base_engine, monkeypatch):
+        base_engine.set_ew_hedge_config(EWHedgeConfig(
+            enabled=True, inverse_etf="114800", regime_proxy="069500",
+            opening_avoidance_minutes=0,
+        ))
+        # Even if is_opening_minutes would be True, guard is off
+        called = {"n": 0}
+
+        def _spy(market, minutes):
+            called["n"] += 1
+            return True
+
+        monkeypatch.setattr("engine.scheduler.is_opening_minutes", _spy)
+        base_engine._compute_regime_signals = AsyncMock(
+            return_value=(False, False, False),
+        )
+        result = await base_engine.evaluate(MagicMock(), sector_data=None)
+        # is_opening_minutes never consulted when minutes=0
+        assert called["n"] == 0
+        assert any("signals:" in s for s in result["regime"])
+
+
 class TestEWHedgeBuyPath:
     """bug_001 + bug_009 regression: the BUY pass must pass a
     PositionSizeResult (not a tuple) and set skip_already_held=True."""

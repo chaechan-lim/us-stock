@@ -917,6 +917,9 @@ async def lifespan(app: FastAPI):
                 inverse_vs_cash_ratio=float(_ew.get("inverse_vs_cash_ratio", 0.5)),
                 rebalance_tolerance=float(_ew.get("rebalance_tolerance", 0.05)),
                 equity_cap_pct=float(_ew.get("equity_cap_pct", 0.30)),
+                opening_avoidance_minutes=int(
+                    _ew.get("opening_avoidance_minutes", 30)
+                ),
             ))
     except Exception as _e:
         logger.warning("KR ETF ew_hedge config load failed: %s", _e)

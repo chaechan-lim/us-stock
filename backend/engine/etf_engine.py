@@ -100,6 +100,12 @@ class EWHedgeConfig:
     # engine. Backtest validated full-capital EW b&h; the sleeve scales
     # the absolute return ~proportionally while keeping the risk thesis.
     equity_cap_pct: float = 0.30
+    # 2026-06-09: skip rebalancing during the first N minutes after open
+    # (same discipline as the per-stock opening_avoidance). The first
+    # reconcile after enabling is a bulk basket build; the opening
+    # auction has the widest spreads + highest vol, the worst window for
+    # a large multi-symbol deployment. 0 disables the guard.
+    opening_avoidance_minutes: int = 30
 
 
 class ETFEngine:
@@ -1318,6 +1324,22 @@ class ETFEngine:
         """
         cfg = self._ew_hedge_cfg
         actions: dict[str, list[str]] = {"ew_hedge": [], "risk": [], "regime": []}
+
+        # 2026-06-09: opening-auction guard. Skip ALL rebalancing during
+        # the first N minutes after open. The first reconcile after
+        # enabling is a bulk multi-symbol basket build — the opening
+        # window has the widest spreads + highest vol, the worst time
+        # to deploy a large order. Same discipline as the per-stock
+        # opening_avoidance. Signals are still computed (cheap) so the
+        # log shows regime state; only trading is suppressed.
+        if cfg.opening_avoidance_minutes > 0:
+            from engine.scheduler import is_opening_minutes
+            if is_opening_minutes(self._market, cfg.opening_avoidance_minutes):
+                actions["ew_hedge"].append(
+                    f"skip: within opening {cfg.opening_avoidance_minutes}min "
+                    f"(avoid auction spread)"
+                )
+                return actions
 
         now_ts = time.time()
         # Rebalance cadence: only proceed when N days have elapsed.

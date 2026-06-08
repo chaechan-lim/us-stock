@@ -81,3 +81,8 @@ ew_hedge:
   # individual-stock strategies (same account) keep their capital.
   # All target weights computed against this capped sleeve.
   equity_cap_pct: 0.30
+  # 2026-06-09: skip rebalancing in the first 30min after open so the
+  # initial bulk basket build (and any flip reconcile) avoids the
+  # opening-auction spread. Enable the toggle anytime — the engine
+  # waits for liquid hours on its own; no need to time the restart.
+  opening_avoidance_minutes: 30
