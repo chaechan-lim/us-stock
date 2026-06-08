@@ -49,4 +49,4 @@ risk_rules:
   default_stop_loss_pct: 0.08
   min_hold_leveraged_hours: 4          # Min 4h hold for leveraged ETFs before selling
   min_hold_sector_hours: 2             # Min 2h hold for sector ETFs before selling
-  sell_cooldown_hours: 4               # Don't rebuy same ETF for 4h after selling
+  sell_cooldown_hours: 12              # 2026-06-08: 4→12 after 315930 stopped 09:04 → rebought 10:02 same day. Backtest (2y KR sector ETFs): ≥2d neutral, ≥5d destructive; 12h sits in safe zone & blocks live sub-1h re-entries.

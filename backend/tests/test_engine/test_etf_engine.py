@@ -726,6 +726,54 @@ class TestExposureLimits:
         assert any(a.startswith("BLOCKED trim") for a in actions)
         engine._order_manager.place_sell.assert_not_awaited()
 
+    @pytest.mark.asyncio
+    async def test_cap_trim_skipped_when_position_under_minus3pct(
+        self, engine, mock_market_data,
+    ):
+        """2026-06-08 post-mortem: cap_trim must skip positions whose
+        PnL is < -3% so a sector-drop morning doesn't realize losses
+        on the worst-performing position via the greedy 'largest first'
+        rule. SL or rebalance handles those at proper exit points."""
+        from unittest.mock import AsyncMock
+
+        # Both positions now -10% vs avg_price (price 90 / avg 100).
+        # Total ETF value = 200×90 + 200×90 = 36000 (36% > 30% cap).
+        pos1 = MagicMock(symbol="TQQQ", quantity=200, current_price=90.0, avg_price=100.0)
+        pos2 = MagicMock(symbol="XLK", quantity=200, current_price=90.0, avg_price=100.0)
+        positions = [pos1, pos2]
+        balance = MagicMock(total=100000, available=50000)
+
+        engine._order_manager.place_sell = AsyncMock(return_value=MagicMock())
+        engine._can_sell_etf = MagicMock(return_value=(True, ""))
+
+        actions = await engine._check_exposure_limits(positions, balance)
+        # Cap breach detected (exceeds line emitted)
+        assert any("exceeds" in a for a in actions)
+        # But trim skipped on both losers
+        assert all(not a.startswith("TRIM SELL") for a in actions)
+        assert any(a.startswith("SKIP trim") and "-3%" in a for a in actions)
+        engine._order_manager.place_sell.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_cap_trim_still_fires_on_winner(
+        self, engine, mock_market_data,
+    ):
+        """Skip guard is asymmetric: winners (PnL > -3%) still trim."""
+        from unittest.mock import AsyncMock
+
+        # Both positions +5% (price 105 / avg 100). 40% > 30% cap.
+        pos1 = MagicMock(symbol="TQQQ", quantity=200, current_price=105.0, avg_price=100.0)
+        pos2 = MagicMock(symbol="XLK", quantity=200, current_price=100.0, avg_price=100.0)
+        positions = [pos1, pos2]
+        balance = MagicMock(total=100000, available=50000)
+
+        engine._order_manager.place_sell = AsyncMock(return_value=MagicMock())
+        engine._can_sell_etf = MagicMock(return_value=(True, ""))
+
+        actions = await engine._check_exposure_limits(positions, balance)
+        assert any(a.startswith("TRIM SELL") for a in actions)
+        engine._order_manager.place_sell.assert_awaited()
+
 
 class TestEtfPortfolioHeadroom:
     """2026-05-07: hard-cap enforcement before BUY (not just warning)."""

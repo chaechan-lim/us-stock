@@ -771,6 +771,32 @@ class ETFEngine:
             price = float(pos.current_price or 0)
             if price <= 0:
                 continue
+            # 2026-06-08 (post-mortem of 091180 trim incident): skip
+            # cap_trim on a position already at < -3% PnL. The greedy
+            # "trim the largest" rule, on a sector-wide drop morning,
+            # ends up realizing losses on the worst-performing position
+            # because "largest" and "worst-down" coincide. Holding
+            # through the bar lets the SL (or the sector rotation
+            # rebalance) handle it at the right exit point. Backtest:
+            # 2y KR sector ETFs, -3% threshold = +3.99pp Ret / +0.11
+            # Sharpe / +0.71pp MDD; tighter -5% catches nothing.
+            avg = float(pos.avg_price or 0)
+            if avg > 0:
+                pos_pnl_pct = (price - avg) / avg
+                if pos_pnl_pct < -0.03:
+                    logger.warning(
+                        "ETF Engine: SKIP cap_trim %s — position at "
+                        "%.2f%% PnL (< -3%% guard). Cap breach "
+                        "%.1f%% > %.0f%% will be resolved by next "
+                        "rebalance or SL.",
+                        pos.symbol, pos_pnl_pct * 100,
+                        exposure_pct * 100, cap_pct * 100,
+                    )
+                    actions.append(
+                        f"SKIP trim {pos.symbol}: PnL "
+                        f"{pos_pnl_pct*100:.1f}% < -3% guard"
+                    )
+                    continue
             can_sell, reason = self._can_sell_etf(pos.symbol)
             if not can_sell:
                 logger.error(
