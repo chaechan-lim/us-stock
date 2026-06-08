@@ -57,7 +57,7 @@ risk_rules:
 # Rotation baseline lost 121pp vs EW b&h over 2y; F3 design (ROC+
 # breadth 2-of-2 gate, 50% hedge) costs ≤1pp in bull, ready in bear.
 ew_hedge:
-  enabled: false                        # flip to true to enable for KR
+  enabled: true                         # 2026-06-09: enabled for KR live (30% sleeve, opening-guarded)
   inverse_etf: "114800"                 # KODEX 인버스 (1x short KS200)
   regime_proxy: "069500"                # KODEX 200
   rebalance_days: 5                     # weekly rebalance cadence
