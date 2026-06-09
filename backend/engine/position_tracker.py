@@ -88,6 +88,15 @@ class PositionTracker:
         # "operator/loop signalled removal" from "tracker happens to be
         # empty because restore hasn't finished".
         self._pending_removals: set[str] = set()
+        # review #10 (2026-06-09): symbols managed by the ETF engine
+        # (EW hedge basket, leveraged/inverse pairs, sector rotation).
+        # These are restored from the exchange into _tracked with a
+        # generic "unknown"/"etf_*" strategy, so the strategy-string
+        # guard in check_all can't reliably skip them. Wired from
+        # main.py via set_etf_managed_symbols(); check_all skips SL/TP/
+        # trailing on these so the stock engine never fights the ETF
+        # engine over the same position.
+        self._etf_managed_symbols: set[str] = set()
         # Commission rate per order (one-way). Exits with gain < 2× this
         # (round-trip cost) are suppressed — selling at +0.3% with 0.25%
         # commission each way = net loss. Added 2026-04-13 after the system
@@ -166,6 +175,12 @@ class PositionTracker:
         if entry_unix is not None:
             pos.entry_unix = float(entry_unix)
         self._tracked[symbol] = pos
+        # review #9 (2026-06-09): a symbol queued for DB removal by a
+        # prior check_all sweep that is now being (re-)tracked must be
+        # pulled out of the pending-removal set — otherwise the next
+        # sync_to_db deletes the DB row of a position that is live in
+        # _tracked with a valid entry, orphaning it.
+        self._pending_removals.discard(symbol)
         logger.info(
             "Tracking position: %s %d @ $%.2f (SL=%.1f%% TP=%.1f%% trail=%.1f%%/%.1f%%)",
             symbol,
@@ -177,6 +192,16 @@ class PositionTracker:
             trail_pct * 100,
         )
         self._schedule_db_upsert(symbol)
+
+    def set_etf_managed_symbols(self, symbols: "set[str]") -> None:
+        """review #10 (2026-06-09): register ETF-engine-managed symbols so
+        the stock tracker skips SL/TP/trailing on them. Called once at
+        startup from main.py with the ETF universe's symbol set."""
+        self._etf_managed_symbols = set(symbols or set())
+        logger.info(
+            "Position tracker %s: %d ETF-managed symbols excluded from SL/TP",
+            self._market, len(self._etf_managed_symbols),
+        )
 
     def add_on(
         self,
@@ -595,7 +620,16 @@ class PositionTracker:
 
             # Skip SL/TP for system-managed positions (cash_parking, ETF leverage).
             # These are not strategy trades and should not be auto-exited.
-            if tracked.strategy in ("cash_parking", "etf_leverage", "etf_inverse"):
+            # review #10 (2026-06-09): also skip any ETF-engine-managed
+            # symbol (EW hedge basket, rotation pairs). They restore with
+            # strategy="unknown"/"etf_*", so match on the symbol set too,
+            # else the stock tracker SL/TP-sells an ETF the ETF engine
+            # holds. strategy.startswith("etf_") covers etf_ew_hedge_*.
+            if (
+                tracked.strategy in ("cash_parking", "etf_leverage", "etf_inverse")
+                or tracked.strategy.startswith("etf_")
+                or symbol in self._etf_managed_symbols
+            ):
                 continue
 
             current_price = pos.current_price
@@ -1039,13 +1073,17 @@ class PositionTracker:
 
                 async with sf() as session:
                     for pos in positions:
-                        # 2026-06-05: capture the earliest BUY time
-                        # for this symbol so the min_hold gate counts
-                        # from the true entry rather than restart time.
-                        # Lenient mode — paper/SELL fallback beats a
-                        # time.time() reset.
+                        # 2026-06-05: capture the BUY time for this
+                        # symbol so the min_hold gate counts from the
+                        # true entry rather than restart time. Lenient
+                        # mode — paper/SELL fallback beats a time.time()
+                        # reset. review #6 (2026-06-09): prefer_recent so
+                        # a round-tripped symbol anchors to the CURRENT
+                        # entry, not an ancient earliest BUY that would
+                        # trip the stale-time cleanup exit.
                         first_buy = await self._lookup_first_buy_time(
                             session, pos.symbol, allow_fallback=True,
+                            prefer_recent=True,
                         )
                         info: dict = {}
                         if first_buy:
@@ -1774,16 +1812,20 @@ class PositionTracker:
           entry_unix path so a recovery never re-arms the 72h min_hold
           clock with `time.time()`.
 
-        prefer_recent (2026-06-09): anchor to the MOST-RECENT BUY of the
-        current holding, not the earliest-ever. Critical for the
-        entry_unix / min_hold clock: a symbol round-tripped weeks ago
-        whose earliest BUY is ancient would otherwise re-track with a
-        14-day-old entry_unix, instantly satisfying min_hold AND
-        tripping the stale-time cleanup exit — dumping a position that
-        was actually bought minutes ago. Most-recent BUY anchors min_hold
-        to the genuine current entry. (Old positions with no recent BUY
-        still resolve to their real old timestamp, so recovery of
-        genuinely-aged positions keeps working.)
+        prefer_recent (2026-06-09): anchor to the CURRENT HOLDING's entry
+        — the earliest BUY that comes AFTER the most-recent SELL (or the
+        earliest BUY overall when there's no SELL). NOT the most-recent
+        BUY, which would wrongly pick a later add-on of a continuously-
+        held position. Critical for the entry_unix / min_hold clock: a
+        symbol round-tripped weeks ago whose earliest-ever BUY is ancient
+        would otherwise re-track with a 14-day-old entry_unix, instantly
+        satisfying min_hold AND tripping the stale-time cleanup exit —
+        dumping a position that was actually bought minutes ago. Anchoring
+        to the first BUY after the last SELL gives:
+          - add-on (no SELL between buys): earliest BUY (true holding start)
+          - round-trip (SELL then re-buy): the re-buy (current entry)
+        Genuinely-old positions with no recent activity still resolve to
+        their real old timestamp, so aged-position recovery keeps working.
 
         Returns None when nothing is found.
         """
@@ -1793,10 +1835,30 @@ class PositionTracker:
 
         from core.models import Order
 
-        _order = desc if prefer_recent else asc
+        # prefer_recent: bound Tier 1/2 to BUYs after the most-recent SELL
+        # so we resolve the CURRENT holding's first BUY, not an ancient one.
+        sell_floor: datetime | None = None
+        if prefer_recent:
+            sell_stmt = (
+                select(Order.created_at)
+                .where(
+                    Order.account_id == self._account_id,
+                    Order.symbol == symbol,
+                    Order.side == "SELL",
+                    Order.status.in_(["filled", "submitted"]),
+                )
+                .order_by(desc(Order.created_at))
+                .limit(1)
+            )
+            sell_floor = (await session.execute(sell_stmt)).scalar_one_or_none()
 
-        # Tier 1: most-recent (or earliest) live BUY
-        stmt = (
+        def _buy_after_floor(base_stmt):
+            if sell_floor is not None:
+                base_stmt = base_stmt.where(Order.created_at > sell_floor)
+            return base_stmt
+
+        # Tier 1: earliest live BUY (of the current holding when prefer_recent)
+        stmt = _buy_after_floor(
             select(Order.created_at)
             .where(
                 Order.account_id == self._account_id,
@@ -1805,9 +1867,7 @@ class PositionTracker:
                 Order.status.in_(["filled", "submitted"]),
                 Order.is_paper == False,  # noqa: E712
             )
-            .order_by(_order(Order.created_at))
-            .limit(1)
-        )
+        ).order_by(asc(Order.created_at)).limit(1)
         ts = (await session.execute(stmt)).scalar_one_or_none()
         if ts is not None:
             return ts
@@ -1815,8 +1875,9 @@ class PositionTracker:
         if not allow_fallback:
             return None
 
-        # Tier 2: any BUY (paper included)
-        stmt = (
+        # Tier 2: any BUY (paper included), still bounded to the current
+        # holding when prefer_recent.
+        stmt = _buy_after_floor(
             select(Order.created_at)
             .where(
                 Order.account_id == self._account_id,
@@ -1824,9 +1885,7 @@ class PositionTracker:
                 Order.side == "BUY",
                 Order.status.in_(["filled", "submitted"]),
             )
-            .order_by(_order(Order.created_at))
-            .limit(1)
-        )
+        ).order_by(asc(Order.created_at)).limit(1)
         ts = (await session.execute(stmt)).scalar_one_or_none()
         if ts is not None:
             logger.debug(
@@ -1909,8 +1968,19 @@ class PositionTracker:
                 record.unrealized_pnl = unrealized_pnl
             record.updated_at = now_utc_naive()
         else:
-            # Look up actual first buy time from orders table
-            first_buy_time = await self._lookup_first_buy_time(session, symbol)
+            # Look up the current holding's entry time from orders.
+            # review #16 (2026-06-09): prefer_recent anchors opened_at to
+            # the current holding's first BUY (earliest BUY after the
+            # most-recent SELL), not an ancient earliest-ever BUY.
+            # Otherwise a re-entry after a round-trip stamps a stale
+            # opened_at, which restore_from_db later loads as entry_unix
+            # → the fresh position is dumped by the stale-time cleanup
+            # exit (the 06-09 churn bug via the cold-restart path).
+            # Strict (no fallback): a SELL/paper order must never set
+            # opened_at; missing live BUY falls through to now().
+            first_buy_time = await self._lookup_first_buy_time(
+                session, symbol, prefer_recent=True,
+            )
             opened_at = first_buy_time if first_buy_time else now_utc_naive()
 
             record = PositionRecord(

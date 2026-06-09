@@ -811,6 +811,13 @@ async def lifespan(app: FastAPI):
         for sym in sector_etf.top_holdings:
             _sector_cache[sym] = sector_name
     evaluation_loop.set_sector_cache(_sector_cache)
+    # review #17 + #10 (2026-06-09): exclude US ETF symbols from the
+    # stock eval universe AND from the position tracker's SL/TP sweep.
+    # The KR side already did this; US never called either, so sector
+    # ETFs leaking into the watchlist could be traded by stock
+    # strategies and SL/TP-sold out from under the ETF engine.
+    evaluation_loop.set_etf_exclusions(set(etf_universe.all_etf_symbols))
+    position_tracker.set_etf_managed_symbols(set(etf_universe.all_etf_symbols))
 
     app.state.stock_scanner = stock_scanner
     app.state.sector_analyzer = sector_analyzer
@@ -2288,6 +2295,10 @@ async def lifespan(app: FastAPI):
     # DB watchlist would be traded by individual-stock strategies (e.g.
     # dual_momentum bought KODEX 은행 091170 as if it were a bank stock).
     kr_evaluation_loop.set_etf_exclusions(set(kr_etf_universe.all_etf_symbols))
+    # review #10 (2026-06-09): also tell the KR position tracker which
+    # symbols the ETF engine manages, so its SL/TP sweep never auto-sells
+    # an EW-hedge/rotation ETF the ETF engine holds.
+    kr_position_tracker.set_etf_managed_symbols(set(kr_etf_universe.all_etf_symbols))
 
     # STOCK-65: Apply KR market-specific overrides (eval loop + disabled strategies)
     # from strategies.yaml. Also stored on app.state so hot-reload can re-apply.

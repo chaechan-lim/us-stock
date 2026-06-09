@@ -1879,46 +1879,85 @@ class TestRestoreFromDb:
         assert abs((ts - live_time).total_seconds()) < 1.0
 
     @pytest.mark.asyncio
-    async def test_lookup_prefer_recent_anchors_to_latest_buy(
+    async def test_lookup_prefer_recent_anchors_to_current_holding(
         self, adapter, risk, order_mgr, db_factory
     ):
-        """2026-06-09: a symbol round-tripped weeks ago has an ancient
-        earliest BUY. prefer_recent must anchor entry_unix to the MOST
-        RECENT BUY (today's re-entry), not the old one — otherwise
-        min_hold is instantly satisfied and the stale-time cleanup exit
-        dumps a position bought minutes ago."""
+        """2026-06-09: a symbol round-tripped weeks ago (BUY → SELL →
+        re-BUY today). prefer_recent must anchor to the CURRENT holding's
+        first BUY (the re-buy after the last SELL), not the ancient
+        earliest-ever BUY — otherwise min_hold is instantly satisfied and
+        the stale-time cleanup exit dumps a position bought minutes ago.
+        A continuously-held add-on (no SELL) still anchors to earliest."""
         from datetime import datetime, timedelta
 
         from core.models import Order
 
         old_buy = datetime.utcnow() - timedelta(days=20)
+        old_sell = datetime.utcnow() - timedelta(days=18)
         recent_buy = datetime.utcnow() - timedelta(minutes=9)
         async with db_factory() as session:
-            for created in (old_buy, recent_buy):
-                session.add(
-                    Order(
-                        account_id="ACC001",
-                        symbol="CHURN", side="BUY",
-                        order_type="market", quantity=10, price=100.0,
-                        status="filled", strategy_name="supertrend",
-                        is_paper=False,
-                        created_at=created,
-                    )
-                )
+            session.add(Order(
+                account_id="ACC001", symbol="CHURN", side="BUY",
+                order_type="market", quantity=10, price=100.0,
+                status="filled", strategy_name="supertrend",
+                is_paper=False, created_at=old_buy,
+            ))
+            session.add(Order(
+                account_id="ACC001", symbol="CHURN", side="SELL",
+                order_type="market", quantity=10, price=110.0,
+                status="filled", strategy_name="supertrend",
+                is_paper=False, created_at=old_sell,
+            ))
+            session.add(Order(
+                account_id="ACC001", symbol="CHURN", side="BUY",
+                order_type="market", quantity=10, price=100.0,
+                status="filled", strategy_name="supertrend",
+                is_paper=False, created_at=recent_buy,
+            ))
             await session.commit()
 
         tracker = _make_tracker(adapter, risk, order_mgr)
         async with db_factory() as session:
-            # Default (earliest) → old buy
+            # Default (earliest-ever) → old buy
             ts_old = await tracker._lookup_first_buy_time(
                 session, "CHURN", allow_fallback=True,
             )
-            # prefer_recent → recent buy
+            # prefer_recent → the re-buy after the last SELL (current holding)
             ts_recent = await tracker._lookup_first_buy_time(
                 session, "CHURN", allow_fallback=True, prefer_recent=True,
             )
         assert abs((ts_old - old_buy).total_seconds()) < 1.0
         assert abs((ts_recent - recent_buy).total_seconds()) < 1.0
+
+    @pytest.mark.asyncio
+    async def test_lookup_prefer_recent_addon_anchors_to_earliest(
+        self, adapter, risk, order_mgr, db_factory
+    ):
+        """Continuously-held add-on (two BUYs, no SELL between) must
+        anchor to the EARLIEST BUY even with prefer_recent — the holding
+        genuinely started at the first buy."""
+        from datetime import datetime, timedelta
+
+        from core.models import Order
+
+        first_buy = datetime.utcnow() - timedelta(days=10)
+        addon_buy = datetime.utcnow() - timedelta(days=2)
+        async with db_factory() as session:
+            for created in (first_buy, addon_buy):
+                session.add(Order(
+                    account_id="ACC001", symbol="ADDON", side="BUY",
+                    order_type="market", quantity=10, price=100.0,
+                    status="filled", strategy_name="supertrend",
+                    is_paper=False, created_at=created,
+                ))
+            await session.commit()
+
+        tracker = _make_tracker(adapter, risk, order_mgr)
+        async with db_factory() as session:
+            ts = await tracker._lookup_first_buy_time(
+                session, "ADDON", allow_fallback=True, prefer_recent=True,
+            )
+        assert abs((ts - first_buy).total_seconds()) < 1.0
 
     @pytest.mark.asyncio
     async def test_add_on_blends_cost_basis(
