@@ -1093,6 +1093,7 @@ class RiskManager:
         current_positions: int,
         order_value: float = 0.0,
         skip_position_limit: bool = False,
+        cash_available: float | None = None,
     ) -> tuple[bool, str]:
         """RISK-B4 (2026-06-06): gate-only check usable by callers that
         already computed sizing themselves (ETFEngine, cash_parking).
@@ -1137,6 +1138,19 @@ class RiskManager:
                     f"single order exceeds max_total_exposure_pct "
                     f"({proj_exposure_pct:.2%} > "
                     f"{self._params.max_total_exposure_pct:.2%})"
+                )
+
+        # review #4 (2026-06-09): sizing_override callers (ETF EW hedge,
+        # cash_parking) previously had NO cash validation — only the
+        # broker stopped an insufficient-funds order, after the fact,
+        # silently. When cash_available is supplied, reject an order that
+        # exceeds it (with a small buffer for fees/rounding) so a stale
+        # balance across a multi-symbol rebalance can't over-ask.
+        if cash_available is not None and order_value > 0:
+            if order_value > cash_available * 1.0:
+                return False, (
+                    f"order_value {order_value:.0f} exceeds cash_available "
+                    f"{cash_available:.0f}"
                 )
 
         return True, ""

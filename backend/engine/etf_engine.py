@@ -1571,8 +1571,14 @@ class ETFEngine:
             try:
                 buy_res = await self._order_manager.place_buy(
                     symbol=sym,
+                    # review #1 (2026-06-09): pass the FULL account equity
+                    # (total_equity) as portfolio_value so the daily-loss
+                    # circuit + exposure gate in check_safety_gates measure
+                    # against the real account, not the 30% sleeve. Sizing
+                    # was already computed against the sleeve in
+                    # _compute_ew_targets, so this only affects the gate.
                     price=price,
-                    portfolio_value=equity,
+                    portfolio_value=total_equity,
                     cash_available=float(balance.available),
                     current_positions=len(positions),
                     strategy_name="etf_ew_hedge_entry",

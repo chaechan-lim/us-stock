@@ -214,6 +214,10 @@ class OrderManager:
                 current_positions=current_positions,
                 order_value=order_value,
                 skip_position_limit=skip_position_limit,
+                # review #4 (2026-06-09): validate against real cash so a
+                # stale balance across a multi-symbol rebalance can't
+                # over-ask (previously only the broker caught it).
+                cash_available=cash_available,
             )
             if not allowed:
                 logger.warning(
