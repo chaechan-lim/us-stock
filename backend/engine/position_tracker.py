@@ -97,6 +97,13 @@ class PositionTracker:
         # trailing on these so the stock engine never fights the ETF
         # engine over the same position.
         self._etf_managed_symbols: set[str] = set()
+        # review #7 (2026-06-09): serialize all DB position writes. The
+        # fire-and-forget per-symbol _upsert_position_db raced the bulk
+        # sync_to_db at startup — both did SELECT-then-INSERT on the same
+        # (account, market, symbol) → IntegrityError on commit (observed
+        # live 06-09). A single lock makes the two paths mutually
+        # exclusive so the duplicate-key window can't open.
+        self._db_write_lock = asyncio.Lock()
         # Commission rate per order (one-way). Exits with gain < 2× this
         # (round-trip cost) are suppressed — selling at +0.3% with 0.25%
         # commission each way = net loss. Added 2026-04-13 after the system
@@ -1508,6 +1515,10 @@ class PositionTracker:
         if unknown_symbols:
             await self._resolve_unknown_strategies(sf, unknown_symbols)
 
+        # review #7 (2026-06-09): serialize against fire-and-forget
+        # _upsert_position_db so the two can't both SELECT-then-INSERT
+        # the same key concurrently (the live 06-09 duplicate-key error).
+        await self._db_write_lock.acquire()
         try:
             from sqlalchemy import select
 
@@ -1622,8 +1633,21 @@ class PositionTracker:
             return synced
 
         except Exception as e:
-            logger.error("Failed to sync positions to DB: %s", e)
+            # review #8 (2026-06-09): a duplicate-key from a residual race
+            # (or any commit error) rolls back the whole cycle. The lock
+            # above closes the race window; if one still slips through,
+            # log distinctly so it's not confused with a real failure.
+            from sqlalchemy.exc import IntegrityError as _IntegrityError
+            if isinstance(e, _IntegrityError):
+                logger.error(
+                    "sync_to_db %s IntegrityError (position write race — "
+                    "next cycle re-syncs): %s", self._market, e,
+                )
+            else:
+                logger.error("Failed to sync positions to DB: %s", e)
             return 0
+        finally:
+            self._db_write_lock.release()
 
     def get_buy_strategy(self, symbol: str) -> str:
         """Get the original buy strategy for a tracked position."""
@@ -1768,9 +1792,12 @@ class PositionTracker:
         if not self._session_factory:
             return
         try:
-            async with self._session_factory() as session:
-                await self._upsert_position_record(session, symbol, tracked)
-                await session.commit()
+            # review #7: hold the write lock so this fire-and-forget
+            # upsert can't interleave with the bulk sync_to_db.
+            async with self._db_write_lock:
+                async with self._session_factory() as session:
+                    await self._upsert_position_record(session, symbol, tracked)
+                    await session.commit()
         except Exception as e:
             logger.debug("DB upsert failed for %s: %s", symbol, e)
 
