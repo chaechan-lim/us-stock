@@ -1210,14 +1210,21 @@ class ETFEngine:
                 exchange=exchange,
             )
         except Exception as e:
-            logger.warning(
-                "EW hedge: regime proxy %s fetch failed: %s",
-                cfg.regime_proxy, e,
-            )
-            return False, False, False
+            # review #14 (2026-06-09): a regime-proxy fetch failure must
+            # NOT be treated as "no bear signal" — that would set
+            # hedge_ratio=0 and, if an inverse hedge is currently held,
+            # trip regime_flip and SELL the hedge on transient data loss.
+            # Raise so the caller skips the whole rebalance this cycle and
+            # the existing posture is preserved.
+            raise RuntimeError(
+                f"regime proxy {cfg.regime_proxy} fetch failed: {e}"
+            ) from e
 
         if proxy_df is None or proxy_df.empty or len(proxy_df) < 10:
-            return False, False, False
+            raise RuntimeError(
+                f"regime proxy {cfg.regime_proxy} returned insufficient data "
+                f"({0 if proxy_df is None else len(proxy_df)} rows)"
+            )
 
         proxy_close = proxy_df["close"]
 
@@ -1504,9 +1511,35 @@ class ETFEngine:
             # Need fresh price — current can be stale on first add
             try:
                 price = await self._market_data.get_price(sym, exchange)
-            except Exception:
+            except Exception as e:
                 price = cur_price
+                logger.warning(
+                    "EW hedge: price fetch failed for %s (%s), "
+                    "falling back to cached %.2f", sym, e, cur_price,
+                )
             if not price or price <= 0:
+                # review #2/#3 (2026-06-09): a silent skip here used to
+                # leave the hedge undeployed with zero visibility — the
+                # worst posture at the worst time on a bear flip. Log it,
+                # and treat the INVERSE ETF as fail-closed: surface a
+                # CRITICAL action so the operator sees the hedge didn't
+                # arm, rather than discovering it after a drawdown.
+                if sym == cfg.inverse_etf:
+                    logger.error(
+                        "EW hedge: CRITICAL — inverse hedge %s has no "
+                        "price (got %s); hedge NOT deployed this cycle. "
+                        "regime_flip stays armed for retry next cycle.",
+                        sym, price,
+                    )
+                    actions["risk"].append(
+                        f"HEDGE FAILED: inverse {sym} no price — unhedged"
+                    )
+                else:
+                    logger.warning(
+                        "EW hedge: skip BUY %s — no price (got %s); "
+                        "basket under-allocated this cycle.", sym, price,
+                    )
+                    actions["ew_hedge"].append(f"SKIP {sym}: no price")
                 continue
             need_value = tgt - cur_value
             qty = int(need_value / price)

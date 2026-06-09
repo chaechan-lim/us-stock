@@ -179,15 +179,34 @@ class TestSleeveCapping:
 
 
 class TestRegimeSignals:
-    async def test_zero_when_no_data(self, base_engine):
+    async def test_raises_when_no_data(self, base_engine):
+        # review #14 (2026-06-09): a regime-proxy data failure must RAISE
+        # (so the caller skips the rebalance and preserves posture), not
+        # return (False,False,False) which would trip regime_flip and sell
+        # a held hedge on transient data loss.
+        import pytest as _pytest
         base_engine.set_ew_hedge_config(EWHedgeConfig(
             enabled=True, inverse_etf="114800", regime_proxy="069500",
         ))
         base_engine._market_data.get_ohlcv = AsyncMock(
             return_value=pd.DataFrame({"close": []}),
         )
-        s1, s2, s3 = await base_engine._compute_regime_signals()
-        assert s1 is False and s2 is False and s3 is False
+        with _pytest.raises(RuntimeError):
+            await base_engine._compute_regime_signals()
+
+    async def test_enabled_eval_skips_cycle_on_proxy_data_failure(self, base_engine):
+        """The data-failure RuntimeError must be caught by _evaluate_ew_hedge
+        so no SELL/BUY happens (posture preserved)."""
+        base_engine.set_ew_hedge_config(EWHedgeConfig(
+            enabled=True, inverse_etf="114800", regime_proxy="069500",
+            opening_avoidance_minutes=0,
+        ))
+        base_engine._market_data.get_ohlcv = AsyncMock(
+            return_value=pd.DataFrame({"close": []}),
+        )
+        result = await base_engine.evaluate(MagicMock(), sector_data=None)
+        base_engine._order_manager.place_buy.assert_not_called()
+        base_engine._order_manager.place_sell.assert_not_called()
 
     async def test_roc_signal_fires_on_5pct_drop(self, base_engine):
         base_engine.set_ew_hedge_config(EWHedgeConfig(

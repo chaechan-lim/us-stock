@@ -929,7 +929,25 @@ async def lifespan(app: FastAPI):
                 ),
             ))
     except Exception as _e:
-        logger.warning("KR ETF ew_hedge config load failed: %s", _e)
+        # review #5 (2026-06-09): fail LOUD. If yaml says enabled:true but
+        # the config is invalid, set_ew_hedge_config raises and the engine
+        # silently keeps enabled=False — the operator thinks the hedge is
+        # on when it isn't. Log ERROR with explicit NOT-ACTIVATED text and
+        # record the intent/actual mismatch on app.state for a health probe.
+        _intended = bool((_kr_etf_yaml.get("ew_hedge", {}) or {}).get("enabled", False)) \
+            if "_kr_etf_yaml" in dir() else False
+        if _intended:
+            logger.error(
+                "KR ETF ew_hedge config INVALID — hedge NOT ACTIVATED "
+                "despite enabled:true in yaml. Fix the config and restart. "
+                "Error: %s", _e,
+            )
+        else:
+            logger.warning("KR ETF ew_hedge config load failed: %s", _e)
+        app.state.ew_hedge_config_error = str(_e)
+        app.state.ew_hedge_intended_enabled = _intended
+    else:
+        app.state.ew_hedge_config_error = None
     app.state.kr_etf_engine = kr_etf_engine
     kr_market_state_detector = MarketStateDetector()
     app.state.kr_market_state_detector = kr_market_state_detector
