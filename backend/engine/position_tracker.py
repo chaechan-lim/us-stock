@@ -550,13 +550,24 @@ class PositionTracker:
             pos = position_map.get(symbol)
             if not pos:
                 # Grace period: don't remove recently tracked positions
-                # (buy order may still be pending/unfilled)
+                # (buy order may still be pending/unfilled).
+                # 2026-06-09: 5min was too short for KR — a limit BUY can
+                # sit open for minutes, then the KIS balance query lags
+                # the fill by several more (settlement display). Live
+                # 06-09 saw fresh 09:31 KR buys removed at 09:36 (just
+                # past 300s from track time), re-tracked at 09:40 with a
+                # stale entry_unix, then dumped by the stale-time exit.
+                # 15min for KR covers the fill-delay + display-lag window;
+                # US settlement display is faster so 5min stays.
+                grace = 900 if self._market == "KR" else 300
                 age = time.monotonic() - tracked.tracked_at
-                if age < 300:  # 5 minutes
+                if age < grace:
                     logger.debug(
-                        "Position %s not in exchange yet (%.0fs since tracked), keeping",
+                        "Position %s not in exchange yet (%.0fs since tracked, "
+                        "grace=%ds), keeping",
                         symbol,
                         age,
+                        grace,
                     )
                     continue
                 logger.info("Position %s no longer held, removing tracker", symbol)
@@ -1353,8 +1364,14 @@ class PositionTracker:
                 async with self._session_factory() as session:
                     # Lenient — paper/SELL fallback is preferable to
                     # resetting the 72h min_hold clock to "now".
+                    # prefer_recent (2026-06-09): anchor to the CURRENT
+                    # holding's most-recent BUY, not an ancient earliest
+                    # one — otherwise a re-tracked symbol that traded
+                    # weeks ago gets a stale entry_unix and is instantly
+                    # dumped by min_hold + stale-time exit.
                     first_buy = await self._lookup_first_buy_time(
                         session, pos.symbol, allow_fallback=True,
+                        prefer_recent=True,
                     )
                 if first_buy:
                     if first_buy.tzinfo is None:
@@ -1744,29 +1761,41 @@ class PositionTracker:
         session: "AsyncSession",
         symbol: str,
         allow_fallback: bool = False,
+        prefer_recent: bool = False,
     ) -> datetime | None:
-        """Look up the earliest live BUY order time for a symbol.
+        """Look up a BUY order time for a symbol.
 
         Two modes:
         - strict (allow_fallback=False, default): only earliest live
           (is_paper=False) BUY. Used by `_upsert_position_record` where
-          PositionRecord.opened_at must reflect a real live entry.
+          PositionRecord.opened_at must reflect the position's original
+          open date.
         - lenient (allow_fallback=True): three-tier search used by the
           entry_unix path so a recovery never re-arms the 72h min_hold
-          clock with `time.time()`. Tiers:
-            1. earliest live BUY (same as strict)
-            2. earliest BUY of any kind (paper included)
-            3. earliest SELL.created_at − 1d as a proxy
+          clock with `time.time()`.
+
+        prefer_recent (2026-06-09): anchor to the MOST-RECENT BUY of the
+        current holding, not the earliest-ever. Critical for the
+        entry_unix / min_hold clock: a symbol round-tripped weeks ago
+        whose earliest BUY is ancient would otherwise re-track with a
+        14-day-old entry_unix, instantly satisfying min_hold AND
+        tripping the stale-time cleanup exit — dumping a position that
+        was actually bought minutes ago. Most-recent BUY anchors min_hold
+        to the genuine current entry. (Old positions with no recent BUY
+        still resolve to their real old timestamp, so recovery of
+        genuinely-aged positions keeps working.)
 
         Returns None when nothing is found.
         """
         from datetime import timedelta as _td
 
-        from sqlalchemy import asc, select
+        from sqlalchemy import asc, desc, select
 
         from core.models import Order
 
-        # Tier 1: earliest live BUY
+        _order = desc if prefer_recent else asc
+
+        # Tier 1: most-recent (or earliest) live BUY
         stmt = (
             select(Order.created_at)
             .where(
@@ -1776,7 +1805,7 @@ class PositionTracker:
                 Order.status.in_(["filled", "submitted"]),
                 Order.is_paper == False,  # noqa: E712
             )
-            .order_by(asc(Order.created_at))
+            .order_by(_order(Order.created_at))
             .limit(1)
         )
         ts = (await session.execute(stmt)).scalar_one_or_none()
@@ -1795,7 +1824,7 @@ class PositionTracker:
                 Order.side == "BUY",
                 Order.status.in_(["filled", "submitted"]),
             )
-            .order_by(asc(Order.created_at))
+            .order_by(_order(Order.created_at))
             .limit(1)
         )
         ts = (await session.execute(stmt)).scalar_one_or_none()
