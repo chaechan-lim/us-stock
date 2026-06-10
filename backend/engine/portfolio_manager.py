@@ -20,6 +20,13 @@ logger = logging.getLogger(__name__)
 # Anomaly detection: skip snapshot if total_value drops more than this
 # fraction vs the previous snapshot (e.g. 0.5 = 50% drop).
 ANOMALY_DROP_THRESHOLD = 0.5
+# 2026-06-10: self-healing. If the anomaly guard rejects this many
+# CONSECUTIVE snapshots, the "previous" baseline is almost certainly the
+# corrupt one (live case: a paper-default ₩500M row wedged the KR guard
+# for 5 days — every real ~₩31M snapshot read as a 93.8% "drop" and the
+# stale baseline never got replaced). After N consecutive rejections,
+# accept the new value and let the next snapshot re-baseline.
+ANOMALY_MAX_CONSECUTIVE_SKIPS = 5
 
 # STOCK-46 / P1-F (2026-05-15): Cash flow detection thresholds.
 # Old single-threshold (5% for US, 10% for KR) generated noise records —
@@ -110,6 +117,8 @@ class PortfolioManager:
         self._market_data = market_data
         self._session_factory = session_factory
         self._market = market
+        # 2026-06-10: consecutive anomaly-skip counter for self-healing
+        self._anomaly_skip_count = 0
 
     async def get_summary(self) -> dict:
         """Get current portfolio state: balance, positions, total equity, unrealized PnL."""
@@ -189,15 +198,39 @@ class PortfolioManager:
         if prev is not None and prev.total_value_usd > 0:
             drop_ratio = 1.0 - total_equity / prev.total_value_usd
             if drop_ratio > ANOMALY_DROP_THRESHOLD:
-                logger.warning(
-                    "[%s] Snapshot anomaly: total_equity=%.2f vs "
-                    "previous=%.2f (%.1f%% drop). Skipping snapshot.",
+                # 2026-06-10: self-heal. A persistent "drop" means the
+                # BASELINE is corrupt, not the new value (live: a
+                # paper-default ₩500M row blocked all KR snapshots for
+                # 5 days; net equity froze at the stale figure). Count
+                # consecutive rejections; past the limit, accept the
+                # new snapshot and re-baseline.
+                self._anomaly_skip_count += 1
+                if self._anomaly_skip_count <= ANOMALY_MAX_CONSECUTIVE_SKIPS:
+                    logger.warning(
+                        "[%s] Snapshot anomaly: total_equity=%.2f vs "
+                        "previous=%.2f (%.1f%% drop). Skipping snapshot "
+                        "(%d/%d consecutive).",
+                        self._market,
+                        total_equity,
+                        prev.total_value_usd,
+                        drop_ratio * 100,
+                        self._anomaly_skip_count,
+                        ANOMALY_MAX_CONSECUTIVE_SKIPS,
+                    )
+                    return
+                logger.error(
+                    "[%s] Snapshot anomaly persisted %d consecutive "
+                    "checks — previous baseline %.2f is likely corrupt. "
+                    "Accepting new total_equity=%.2f and re-baselining.",
                     self._market,
-                    total_equity,
+                    self._anomaly_skip_count,
                     prev.total_value_usd,
-                    drop_ratio * 100,
+                    total_equity,
                 )
-                return
+                # fall through to write the snapshot
+            self._anomaly_skip_count = 0
+        else:
+            self._anomaly_skip_count = 0
 
         daily_pnl = await self._calculate_daily_pnl(total_equity)
 
