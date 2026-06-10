@@ -244,7 +244,7 @@ class TestDailyBuyLimit:
         eval_loop._daily_buy_count = 1  # already at limit
         from datetime import date as _date
 
-        eval_loop._daily_buy_date = _date.today().isoformat()
+        eval_loop._daily_buy_date = (__import__("datetime").datetime.now(__import__("zoneinfo").ZoneInfo("America/New_York" if eval_loop._market == "US" else "Asia/Seoul")).date().isoformat())
 
         # confidence=0.8 signal (below 0.90 override threshold)
         await eval_loop.evaluate_symbol("AAPL")
@@ -258,7 +258,7 @@ class TestDailyBuyLimit:
         eval_loop._daily_buy_count = 1
         from datetime import date as _date
 
-        eval_loop._daily_buy_date = _date.today().isoformat()
+        eval_loop._daily_buy_date = (__import__("datetime").datetime.now(__import__("zoneinfo").ZoneInfo("America/New_York" if eval_loop._market == "US" else "Asia/Seoul")).date().isoformat())
 
         # Set strategy to return 0.95 confidence
         strategy = mock_registry.get_enabled.return_value[0]
@@ -279,7 +279,7 @@ class TestDailyBuyLimit:
         eval_loop._daily_buy_count = 4  # 80% used
         from datetime import date as _date
 
-        eval_loop._daily_buy_date = _date.today().isoformat()
+        eval_loop._daily_buy_date = (__import__("datetime").datetime.now(__import__("zoneinfo").ZoneInfo("America/New_York" if eval_loop._market == "US" else "Asia/Seoul")).date().isoformat())
 
         # Signal with 0.60 confidence — should be blocked (need 0.75)
         strategy = mock_registry.get_enabled.return_value[0]
@@ -2959,12 +2959,13 @@ class TestHeldPositionSellBias:
         position_tracker = MagicMock()
         position_tracker.tracked_symbols = ["AAPL"]
         position_tracker.get_buy_strategy.return_value = "trend_following"
-        # Explicit empty _tracked so _check_min_hold returns True immediately.
-        # Without this, MagicMock auto-creates _tracked which returns
-        # float(MagicMock()) = 1.0 for tracked_at, causing hold_secs =
-        # time.monotonic() - 1.0 which fails on fresh CI runners where
-        # monotonic() < 14400 (4h min hold).
-        position_tracker._tracked = {}
+        # 2026-06-04: _check_min_hold is now fail-closed when symbol is
+        # missing. Populate _tracked with an entry old enough to clear
+        # the gate so position_cleanup is exercised.
+        _tracked = MagicMock(spec=["tracked_at", "entry_unix"])
+        _tracked.entry_unix = time.time() - 5 * 3600  # 5h ago wall-clock
+        _tracked.tracked_at = time.monotonic() - 5 * 3600
+        position_tracker._tracked = {"AAPL": _tracked}
 
         # AAPL held at loss (-5.3%)
         mock_market_data.get_positions = AsyncMock(
@@ -4018,17 +4019,26 @@ class TestAntiWhipsawDefaults:
         assert eval_loop._check_min_hold("AAPL") is True
 
     def test_check_min_hold_no_tracked_dict(self, eval_loop):
-        """_check_min_hold returns True when _tracked is missing from tracker."""
+        """_check_min_hold returns False (fail-closed) when _tracked is missing.
+
+        2026-06-04 regression fix: previously returned True (allow sell)
+        which silently bypassed the anti-churn gate. Now blocks.
+        """
         tracker = MagicMock(spec=[])  # No attributes
         eval_loop._position_tracker = tracker
-        assert eval_loop._check_min_hold("AAPL") is True
+        assert eval_loop._check_min_hold("AAPL") is False
 
     def test_check_min_hold_symbol_not_tracked(self, eval_loop):
-        """_check_min_hold returns True when symbol not in _tracked."""
+        """_check_min_hold returns False (fail-closed) when symbol not in _tracked.
+
+        2026-06-04 regression fix: live KR session had 9 same-day round-trips
+        despite yaml min_hold_days=3 because positions were missing from the
+        tracker at SELL evaluation time.
+        """
         tracker = MagicMock()
         tracker._tracked = {}
         eval_loop._position_tracker = tracker
-        assert eval_loop._check_min_hold("AAPL") is True
+        assert eval_loop._check_min_hold("AAPL") is False
 
     def test_check_min_hold_disabled_when_zero(self, eval_loop):
         """_check_min_hold returns True when _min_hold_secs=0 (disabled)."""
@@ -4042,9 +4052,10 @@ class TestAntiWhipsawDefaults:
         assert eval_loop._check_min_hold("AAPL") is True
 
     def test_check_min_hold_held_long_enough(self, eval_loop):
-        """_check_min_hold returns True when position held > 4 hours."""
+        """_check_min_hold returns True when position held > min_hold (monotonic fallback)."""
 
-        tracked = MagicMock()
+        tracked = MagicMock(spec=["tracked_at", "entry_unix"])
+        tracked.entry_unix = None  # Force monotonic fallback
         tracked.tracked_at = time.monotonic() - 5 * 3600  # 5h ago
         tracker = MagicMock()
         tracker._tracked = {"AAPL": tracked}
@@ -4052,9 +4063,10 @@ class TestAntiWhipsawDefaults:
         assert eval_loop._check_min_hold("AAPL") is True
 
     def test_check_min_hold_too_short(self, eval_loop):
-        """_check_min_hold returns False when position held < 4 hours."""
+        """_check_min_hold returns False when position held < min_hold (monotonic fallback)."""
 
-        tracked = MagicMock()
+        tracked = MagicMock(spec=["tracked_at", "entry_unix"])
+        tracked.entry_unix = None
         tracked.tracked_at = time.monotonic() - 2 * 3600  # 2h ago
         tracker = MagicMock()
         tracker._tracked = {"AAPL": tracked}
@@ -4062,14 +4074,96 @@ class TestAntiWhipsawDefaults:
         assert eval_loop._check_min_hold("AAPL") is False
 
     def test_check_min_hold_invalid_tracked_at(self, eval_loop):
-        """_check_min_hold returns True when tracked_at cannot be converted."""
-        tracked = MagicMock()
+        """_check_min_hold returns False (fail-closed) when timestamps are unusable.
+
+        2026-06-04 regression fix: bad timestamps no longer silently allow
+        the sell.
+        """
+        tracked = MagicMock(spec=["tracked_at", "entry_unix"])
+        tracked.entry_unix = None
         tracked.tracked_at = "not-a-number"
         tracker = MagicMock()
         tracker._tracked = {"AAPL": tracked}
         eval_loop._position_tracker = tracker
-        # Should not raise — returns True (allow sell) on bad data
+        assert eval_loop._check_min_hold("AAPL") is False
+
+    def test_check_min_hold_entry_unix_survives_restart(self, eval_loop):
+        """Wall-clock entry_unix is the source of truth — survives process restart.
+
+        2026-06-04: live KR positions kept churning post-restart because
+        the monotonic tracked_at reset and the fail-open path silently
+        allowed sells. With entry_unix populated from PositionRecord.opened_at
+        the gate sees the true elapsed time.
+        """
+        import time as _t
+
+        tracked = MagicMock(spec=["tracked_at", "entry_unix"])
+        # entry_unix from DB says position was opened 5 days ago, even
+        # though monotonic tracked_at was just set this process.
+        tracked.entry_unix = _t.time() - 5 * 86400
+        tracked.tracked_at = _t.monotonic()  # fresh on restart
+        tracker = MagicMock()
+        tracker._tracked = {"AAPL": tracked}
+        eval_loop._position_tracker = tracker
+        # min_hold_secs default 4h → 5d easily exceeds it.
         assert eval_loop._check_min_hold("AAPL") is True
+
+    def test_check_min_hold_entry_unix_blocks_recent(self, eval_loop):
+        """Recent entry_unix correctly blocks SELL even with stale monotonic."""
+        import time as _t
+
+        tracked = MagicMock(spec=["tracked_at", "entry_unix"])
+        tracked.entry_unix = _t.time() - 30 * 60  # 30 min ago
+        tracked.tracked_at = _t.monotonic() - 999_999  # bogus stale monotonic
+        tracker = MagicMock()
+        tracker._tracked = {"AAPL": tracked}
+        eval_loop._position_tracker = tracker
+        # min_hold default 4h, position only 30 min old → block.
+        assert eval_loop._check_min_hold("AAPL") is False
+
+    def test_check_min_hold_zero_entry_unix_falls_back_to_monotonic(self, eval_loop):
+        """entry_unix=0 (e.g. bad ORM coercion of NULL opened_at) must
+        NOT be treated as "55 years ago and passes". Fall back to the
+        monotonic check, which here is freshly set → block."""
+        import time as _t
+
+        tracked = MagicMock(spec=["tracked_at", "entry_unix"])
+        tracked.entry_unix = 0.0
+        tracked.tracked_at = _t.monotonic()  # just registered
+        tracker = MagicMock()
+        tracker._tracked = {"AAPL": tracked}
+        eval_loop._position_tracker = tracker
+        # 4h min_hold, monotonic delta ≈ 0 → block.
+        assert eval_loop._check_min_hold("AAPL") is False
+
+    def test_check_min_hold_negative_entry_unix_falls_back_to_monotonic(self, eval_loop):
+        """entry_unix < 0 is nonsense and must also fall back."""
+        import time as _t
+
+        tracked = MagicMock(spec=["tracked_at", "entry_unix"])
+        tracked.entry_unix = -1.0
+        tracked.tracked_at = _t.monotonic()
+        tracker = MagicMock()
+        tracker._tracked = {"AAPL": tracked}
+        eval_loop._position_tracker = tracker
+        assert eval_loop._check_min_hold("AAPL") is False
+
+    def test_check_min_hold_clock_jumped_backward(self, eval_loop):
+        """If wall-clock steps backward between BUY-record and the gate
+        check (NTP correction on a Pi), hold_secs goes negative. The
+        clamp must convert that to 0 (block) rather than letting it
+        underflow into a 'large negative < min_hold = pass' bypass."""
+        import time as _t
+
+        tracked = MagicMock(spec=["tracked_at", "entry_unix"])
+        # Position recorded 1 second in the future relative to now.
+        tracked.entry_unix = _t.time() + 1.0
+        tracked.tracked_at = _t.monotonic()
+        tracker = MagicMock()
+        tracker._tracked = {"AAPL": tracked}
+        eval_loop._position_tracker = tracker
+        # hold_secs would be ~-1 without the clamp; clamped to 0 → block.
+        assert eval_loop._check_min_hold("AAPL") is False
 
 
 class TestStopLossCounter:

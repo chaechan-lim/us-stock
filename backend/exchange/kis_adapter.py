@@ -104,6 +104,7 @@ class KISAdapter(ExchangeAdapter):
         config: Union[KISConfig, AccountConfig],
         auth: KISAuth,
         account_id: str = "ACC001",
+        rate_limiter=None,  # RES-B1 (2026-06-05): injected from main.py
     ):
         self._config = config
         self._auth = auth
@@ -112,14 +113,31 @@ class KISAdapter(ExchangeAdapter):
         self._is_paper = "vts" in config.base_url
         self._tr = TR_ID_PAPER if self._is_paper else TR_ID_LIVE
         self._last_exchange_rate: float = USD_KRW_FALLBACK
+        # M10 (2026-06-06): true when the last FX fetch failed and
+        # callers are using either the cached or USD_KRW_FALLBACK
+        # value. Surfaced via /health so the operator sees stale FX.
+        self._fx_stale: bool = False
         self._usd_deposit_krw: float = 0.0  # 달러예수금 (KRW equivalent)
         self._tot_asst_krw: float = 0.0  # CTRP6504R tot_asst_amt (해외자산+예수금)
         self._tot_dncl_krw: float = 0.0  # CTRP6504R tot_dncl_amt (예수금, 통합증거금 공유)
         self._us_position_value_krw: float = 0.0  # CTRP6504R evlu_amt_smtl (미주 보유 평가금액)
         self._withdrawable_total_krw: float = 0.0  # CTRP6504R wdrw_psbl_tot_amt (통합 주문가능예수금)
+        # RES-B1: KIS REST 20/s real, 5/s paper. Direct `_get`/`_post`
+        # calls (orders, balance, holiday API, ranking APIs) used to
+        # bypass this limiter — only MarketDataService and
+        # UniverseExpander were rate-limited. Today's EGW00133 / 1-min
+        # token storm was the predictable consequence.
+        self._rate_limiter = rate_limiter
 
     async def initialize(self) -> None:
-        self._session = aiohttp.ClientSession()
+        # ERR-B2 (2026-06-06): default to a 10s total / 5s connect
+        # timeout. Without this every _get/_post can block forever on
+        # a hung KIS socket — evaluation_loop holds its lock,
+        # position_check stalls, SL never fires. Per-call retries in
+        # the EGW00201 path convert TimeoutError into a normal retry.
+        self._session = aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=10, connect=5),
+        )
         await self._auth.initialize()
         logger.info(
             "KIS adapter initialized (account=%s, mode=%s)",
@@ -418,7 +436,14 @@ class KISAdapter(ExchangeAdapter):
         return 0.0
 
     async def _fetch_exchange_rate(self) -> float:
-        """Fetch USD/KRW exchange rate from KIS API."""
+        """Fetch USD/KRW exchange rate from KIS API.
+
+        M10 (2026-06-06): used to log fetch failures at DEBUG and
+        silently return 0 — caller fell through to USD_KRW_FALLBACK,
+        sizing US trades from KRW cash against a stale rate without
+        the operator ever knowing. Now: WARN with traceback and set
+        a stale-flag the dashboard can surface.
+        """
         try:
             params = {
                 "AUTH": "",
@@ -435,9 +460,18 @@ class KISAdapter(ExchangeAdapter):
             rate = _safe_float(output.get("t_rate", 0))
             if rate > 0:
                 logger.debug("Exchange rate from KIS: %.2f", rate)
+                self._fx_stale = False
                 return rate
+            logger.warning(
+                "KIS FX rate fetch returned no t_rate field — flagging stale "
+                "(operator should expect cross-currency math to drift)",
+            )
         except Exception as e:
-            logger.debug("Exchange rate fetch failed: %s", e)
+            logger.warning(
+                "KIS FX rate fetch failed (%s) — flagging stale.",
+                e, exc_info=True,
+            )
+        self._fx_stale = True
         return 0.0
 
     async def fetch_positions(self) -> list[Position]:
@@ -923,6 +957,11 @@ class KISAdapter(ExchangeAdapter):
         url = f"{self._config.base_url}{path}"
         data = {}
         for attempt in range(max_retries):
+            # RES-B1: throttle every request through the same limiter as
+            # MarketDataService so concurrent order/balance/scanner
+            # calls share the 20-req-per-second budget.
+            if self._rate_limiter:
+                await self._rate_limiter.acquire()
             headers = self._auth.get_auth_headers(tr_id)
             async with self._session.get(url, headers=headers, params=params) as resp:
                 if resp.status >= 400:
@@ -975,6 +1014,8 @@ class KISAdapter(ExchangeAdapter):
         url = f"{self._config.base_url}{path}"
         data = {}
         for attempt in range(max_retries):
+            if self._rate_limiter:
+                await self._rate_limiter.acquire()
             headers = self._auth.get_auth_headers(tr_id, hashkey)
             async with self._session.post(url, headers=headers, json=body) as resp:
                 if resp.status >= 400:

@@ -1860,3 +1860,48 @@ class TestVolatilityScaling:
             sizing, atr_pct=0.03, price=150.0, target_risk_pct=0.02,
         )
         assert result.allocation_usd == result.quantity * 150.0
+
+
+class TestCheckSafetyGatesCash:
+    """review #4 (2026-06-09): sizing_override callers must be cash-gated."""
+
+    def test_rejects_order_over_cash_available(self):
+        rm = RiskManager(params=RiskParams())
+        allowed, reason = rm.check_safety_gates(
+            symbol="091160",
+            portfolio_value=100_000_000,
+            current_positions=0,
+            order_value=5_000_000,
+            skip_position_limit=True,
+            cash_available=4_000_000,  # less than order
+        )
+        assert allowed is False
+        assert "cash_available" in reason
+
+    def test_allows_order_within_cash(self):
+        rm = RiskManager(params=RiskParams())
+        allowed, reason = rm.check_safety_gates(
+            symbol="091160",
+            portfolio_value=100_000_000,
+            current_positions=0,
+            order_value=3_000_000,
+            skip_position_limit=True,
+            cash_available=4_000_000,
+        )
+        assert allowed is True
+
+    def test_cash_check_skipped_when_none(self):
+        """Back-compat: callers not passing cash_available are unaffected
+        by the cash gate (other gates still apply)."""
+        rm = RiskManager(params=RiskParams())
+        # order_value tiny vs portfolio so exposure gate passes; cash=None
+        # → cash gate is skipped → allowed.
+        allowed, _ = rm.check_safety_gates(
+            symbol="091160",
+            portfolio_value=100_000_000,
+            current_positions=0,
+            order_value=1_000_000,
+            skip_position_limit=True,
+            cash_available=None,
+        )
+        assert allowed is True

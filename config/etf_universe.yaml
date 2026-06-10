@@ -104,8 +104,14 @@ exchanges:
 # evidence — there's no backtest harness for the ETF engine.
 risk_rules:
   max_hold_days: 20                    # No holding leveraged >20 days (backtest: 10d too short)
-  max_portfolio_pct: 0.10              # 2026-05-07: 0.20 → 0.10 (conservative re-enable)
-  max_single_etf_pct: 0.05             # 2026-05-07: 0.10 → 0.05 (conservative re-enable)
+  # 2026-06-01 (#52): 0.10/0.05 → 0.20/0.10. compare_etf_caps.py US 2y:
+  #   V0 (10/5):  Ret +0.24% Sharpe +0.16 MDD -1.66% (current production)
+  #   V1 (15/8):  Ret +0.65% Sharpe +0.25 MDD -2.95%   ΔRet +0.41pp ✓
+  #   V2 (20/10): Ret +1.14% Sharpe +0.35 MDD -3.17%   ΔRet +0.90pp ✓ ← adopt
+  #   V3 (30/15): Ret +3.90% Sharpe +0.70 MDD -5.64%   (best Ret but MDD -4pp worse)
+  # V2 is best risk-adjusted. V3 has higher Ret/Sharpe but MDD breach.
+  max_portfolio_pct: 0.20
+  max_single_etf_pct: 0.10
   require_stop_loss: true              # Always use stop-loss
   default_stop_loss_pct: 0.08
   min_hold_leveraged_hours: 4          # Min 4h hold for leveraged ETFs before selling

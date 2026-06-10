@@ -49,4 +49,40 @@ risk_rules:
   default_stop_loss_pct: 0.08
   min_hold_leveraged_hours: 4          # Min 4h hold for leveraged ETFs before selling
   min_hold_sector_hours: 2             # Min 2h hold for sector ETFs before selling
-  sell_cooldown_hours: 4               # Don't rebuy same ETF for 4h after selling
+  sell_cooldown_hours: 12              # 2026-06-08: 4→12 after 315930 stopped 09:04 → rebought 10:02 same day. Backtest (2y KR sector ETFs): ≥2d neutral, ≥5d destructive; 12h sits in safe zone & blocks live sub-1h re-entries.
+
+# 2026-06-08 thesis (c): EW basket + regime-gated partial hedge.
+# OPT-IN ONLY — default OFF preserves current rotation behavior.
+# Backtest: backend/scripts/backtest_kr_ew_regime_hedge.py
+# Rotation baseline lost 121pp vs EW b&h over 2y; F3 design (ROC+
+# breadth 2-of-2 gate, 50% hedge) costs ≤1pp in bull, ready in bear.
+ew_hedge:
+  enabled: true                         # 2026-06-09: enabled for KR live (30% sleeve, opening-guarded)
+  inverse_etf: "114800"                 # KODEX 인버스 (1x short KS200)
+  regime_proxy: "069500"                # KODEX 200
+  rebalance_days: 5                     # weekly rebalance cadence
+  # Signal 1: realized vol percentile — DISABLED (too noisy in bull)
+  use_vol_signal: false
+  vol_lookback: 20
+  vol_pctile_lookback: 252
+  vol_pctile_threshold: 80.0
+  # Signal 2: 5d ROC threshold (bear if <= this)
+  roc_5d_threshold: -0.03
+  # Signal 3: sector breadth
+  sector_sma: 50
+  breadth_threshold: 0.30
+  # Gate: 2-of-2 signals required (vol disabled → both S2+S3 must fire)
+  min_signals_for_hedge: 2
+  # When triggered, hedge 50% of the SLEEVE (25% inverse + 25% cash)
+  hedge_ratio: 0.50
+  inverse_vs_cash_ratio: 0.5
+  rebalance_tolerance: 0.05
+  # 2026-06-09: bound the EW hedge sleeve to 30% of KR equity so the
+  # individual-stock strategies (same account) keep their capital.
+  # All target weights computed against this capped sleeve.
+  equity_cap_pct: 0.30
+  # 2026-06-09: skip rebalancing in the first 30min after open so the
+  # initial bulk basket build (and any flip reconcile) avoids the
+  # opening-auction spread. Enable the toggle anytime — the engine
+  # waits for liquid hours on its own; no need to time the restart.
+  opening_avoidance_minutes: 30

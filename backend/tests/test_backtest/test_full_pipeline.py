@@ -980,3 +980,165 @@ class TestSymmetricSlippage:
         )
         engine = FullPipelineBacktest(config)
         assert engine._effective_slippage(0, 100) == 0.05
+
+
+class TestHoldingAddon:
+    """Sizing-up path: when enable_holding_addon=True, a BUY signal on an
+    already-held position routes to _execute_addon_buy with weighted-avg
+    cost basis. Mirrors live engine's sizing_up path."""
+
+    def _make_engine(self, **cfg_overrides):
+        config = PipelineConfig(
+            universe=["AAPL"],
+            initial_equity=1_000_000,
+            min_position_pct=0.05,        # 5% min = 50,000 floor
+            max_position_pct=0.20,
+            dynamic_sl_tp=False,
+            default_stop_loss_pct=0.08,
+            default_take_profit_pct=0.20,
+            slippage_pct=0.0,             # exact-price math
+            volume_adjusted_slippage=False,
+            **cfg_overrides,
+        )
+        engine = FullPipelineBacktest(config)
+        engine._cash = 950_000
+        engine._day_count = 5
+        return engine
+
+    def _seed_position(self, engine, qty: int, avg: float):
+        engine._positions["AAPL"] = _Position(
+            symbol="AAPL", quantity=qty, avg_price=avg,
+            entry_date="2023-06-01", strategy_name="test",
+            highest_price=avg * 1.10,     # prior trail peak (must not change)
+            stop_loss_pct=0.08, take_profit_pct=0.20,
+            entry_day_count=0,
+        )
+
+    def _stock_data(self, close_price: float = 100.0):
+        df = _make_ohlcv(15, start_price=close_price)
+        # Pin close-of-bar so math is predictable
+        for i in range(len(df)):
+            df.iloc[i, df.columns.get_loc("close")] = close_price
+        from data.indicator_service import IndicatorService
+        df = IndicatorService.add_all_indicators(df)
+        return {"AAPL": BacktestData("AAPL", df, "2023-01-01", "2023-06-01")}, df
+
+    def test_addon_disabled_by_default(self):
+        """enable_holding_addon=False (default): held BUY is no-op."""
+        engine = self._make_engine()  # default off
+        self._seed_position(engine, qty=10, avg=100.0)
+        stock_data, df = self._stock_data(100.0)
+
+        signal = MagicMock()
+        signal.strategy_name = "test"
+        signal.confidence = 0.80
+        signal.signal_type = SignalType.BUY
+
+        engine._execute_buy("AAPL", stock_data, 5, df.index[5], signal, "uptrend")
+        # Position unchanged
+        pos = engine._positions["AAPL"]
+        assert pos.quantity == 10
+        assert pos.avg_price == 100.0
+
+    def test_addon_fires_when_undersized(self):
+        """Position value 1,000 << floor (0.5 × 5% × 1M = 25,000) →
+        add-on quantity > 0, weighted avg price updates."""
+        engine = self._make_engine(
+            enable_holding_addon=True,
+            holding_addon_threshold=0.5,
+            holding_addon_min_confidence=0.50,
+        )
+        self._seed_position(engine, qty=10, avg=100.0)  # value=1000 at price=100
+        cash_before = engine._cash
+        stock_data, df = self._stock_data(100.0)
+
+        signal = MagicMock()
+        signal.strategy_name = "test"
+        signal.confidence = 0.80
+        signal.signal_type = SignalType.BUY
+
+        engine._execute_buy("AAPL", stock_data, 5, df.index[5], signal, "uptrend")
+        pos = engine._positions["AAPL"]
+        assert pos.quantity > 10, "Add-on should grow quantity"
+        # Weighted avg: original 10×100 + add_qty×100 / new_qty = 100 (same price)
+        assert pos.avg_price == pytest.approx(100.0)
+        # Cash decreased
+        assert engine._cash < cash_before
+        # highest_price preserved (trail tracker untouched)
+        assert pos.highest_price == pytest.approx(110.0)  # seeded as avg×1.10
+
+    def test_addon_skipped_above_threshold(self):
+        """Position already at ≥ floor → no add-on."""
+        engine = self._make_engine(
+            enable_holding_addon=True,
+            holding_addon_threshold=0.5,
+        )
+        # value at price=100 = 30,000 > floor 25,000
+        self._seed_position(engine, qty=300, avg=100.0)
+        cash_before = engine._cash
+        stock_data, df = self._stock_data(100.0)
+
+        signal = MagicMock()
+        signal.strategy_name = "test"
+        signal.confidence = 0.80
+        signal.signal_type = SignalType.BUY
+
+        engine._execute_buy("AAPL", stock_data, 5, df.index[5], signal, "uptrend")
+        pos = engine._positions["AAPL"]
+        assert pos.quantity == 300, "Above floor — no add-on"
+        assert engine._cash == cash_before
+
+    def test_addon_skipped_below_min_confidence(self):
+        """Low-confidence signal filtered before reaching _execute_buy.
+
+        The buy_candidates gate in _process_signals enforces the
+        confidence floor. But _execute_buy itself should not crash if
+        called directly with low conf — undersized position still
+        triggers Kelly which decides allocation. This test verifies the
+        explicit-call path: low-conf signal still produces an add-on
+        attempt (gate is upstream, in _process_signals). Documents the
+        contract.
+        """
+        engine = self._make_engine(
+            enable_holding_addon=True,
+            holding_addon_threshold=0.5,
+            holding_addon_min_confidence=0.70,
+        )
+        self._seed_position(engine, qty=10, avg=100.0)
+        stock_data, df = self._stock_data(100.0)
+
+        signal = MagicMock()
+        signal.strategy_name = "test"
+        signal.confidence = 0.50   # below 0.70, but gate is upstream
+        signal.signal_type = SignalType.BUY
+
+        # Direct call to _execute_buy bypasses the upstream gate.
+        # Confidence still affects Kelly sizing — quantity may grow but
+        # the upstream gate is what guarantees confidence floor in
+        # production. Just assert no crash.
+        engine._execute_buy("AAPL", stock_data, 5, df.index[5], signal, "uptrend")
+        # Either grew or stayed flat — both acceptable; test = no error.
+        assert engine._positions["AAPL"].quantity >= 10
+
+    def test_addon_weighted_avg_at_different_price(self):
+        """Add-on at higher price → weighted avg moves up proportionally."""
+        engine = self._make_engine(
+            enable_holding_addon=True,
+            holding_addon_threshold=0.5,
+        )
+        self._seed_position(engine, qty=10, avg=100.0)  # value=1000
+
+        # New bar at price=200 — close at 200, value=2000 still << floor 25k
+        stock_data, df = self._stock_data(200.0)
+
+        signal = MagicMock()
+        signal.strategy_name = "test"
+        signal.confidence = 0.80
+        signal.signal_type = SignalType.BUY
+
+        engine._execute_buy("AAPL", stock_data, 5, df.index[5], signal, "uptrend")
+        pos = engine._positions["AAPL"]
+        assert pos.quantity > 10
+        # weighted avg: (10*100 + add_qty*200) / (10+add_qty)
+        # → strictly between 100 and 200
+        assert 100.0 < pos.avg_price < 200.0

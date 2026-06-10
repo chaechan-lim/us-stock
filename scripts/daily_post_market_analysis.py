@@ -291,7 +291,40 @@ def _save_artifact(target: date, daily: dict, spy_pct: float | None,
 async def main() -> None:
     # Target = previous trading day (US close was ~5 hours ago at 06:00 KST)
     now_kst = datetime.now(KST)
-    target = (now_kst - timedelta(days=1)).date()
+    raw_target = (now_kst - timedelta(days=1)).date()
+
+    # M16 (2026-06-07): skip non-trading days. Sunday-KST 06:00 was
+    # firing against Saturday-ET (no session) and still posting a
+    # neutral verdict + spawning generate_recommendations.py — wasted
+    # LLM quota and seeded the dashboard with empty "latest" rows.
+    # Walk back to the last real US trading day; if that doesn't move
+    # (yesterday WAS a trading day) proceed normally.
+    from services.holiday_calendar import (
+        is_us_trading_day,
+        previous_us_trading_day,
+    )
+
+    if not is_us_trading_day(raw_target):
+        target = previous_us_trading_day(raw_target)
+        print(
+            f"Non-trading day skip: raw={raw_target} → target={target} "
+            f"(US session inactive on raw target)"
+        )
+        # If we're more than 3 days behind the last session (weekend +
+        # long holiday), still produce the report for the last actual
+        # session so the operator gets a Monday-morning snapshot. But
+        # don't post twice on consecutive non-trading days — only fire
+        # when raw_target is exactly the day AFTER the last trading
+        # day (i.e. we're on Saturday-KST = Friday-ET+1).
+        gap_days = (raw_target - target).days
+        if gap_days > 1:
+            print(
+                f"Already-reported gap (gap_days={gap_days}); "
+                f"skipping duplicate run"
+            )
+            return
+    else:
+        target = raw_target
 
     daily = await _daily_aggregates(target)
     spy_pct = _spy_same_day(target)

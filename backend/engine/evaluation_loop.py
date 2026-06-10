@@ -19,6 +19,7 @@ from typing import Any, TYPE_CHECKING
 import pandas as pd
 
 from core.constants import USD_KRW_FALLBACK
+from core.tasks import spawn as _spawn_bg
 from analytics.factor_model import FactorScores, MultiFactorModel
 from analytics.signal_quality import SignalQualityTracker
 from core.enums import SignalType
@@ -218,6 +219,13 @@ class EvaluationLoop:
         # Per-cycle position cache — set at start of _evaluate_all, cleared after.
         # Downstream methods use _get_positions() which returns this cache when fresh.
         self._cycle_positions: list | None = None
+        # CON-B1 (2026-06-05): serialise concurrent _evaluate_all calls.
+        # The scheduler awaits one tick at a time, but POST /engine/run-
+        # evaluation lets MCP / operator re-enter the same coroutine,
+        # which races on _cycle_positions, _last_signal, _daily_buy_count,
+        # _recent_signals etc. Same-symbol double BUYs are possible
+        # without this guard.
+        self._evaluate_lock = asyncio.Lock()
 
     async def _get_positions(self) -> list:
         """Return cached positions from current eval cycle, or fetch fresh."""
@@ -232,9 +240,15 @@ class EvaluationLoop:
         # call site automatically gets symbol/strategy/price context.
         sym = getattr(self, "_current_symbol", None)
         if sym:
-            asyncio.create_task(self._persist_funnel_event(
-                sym, decision="rejected", reason=reason,
-            ))
+            # RES-H7: tracked spawn — without retention the GC can
+            # cancel this row write mid-await, dropping funnel data
+            # silently. Exceptions are now logged.
+            _spawn_bg(
+                self._persist_funnel_event(
+                    sym, decision="rejected", reason=reason,
+                ),
+                name=f"funnel_reject:{sym}:{reason}",
+            )
 
     async def _persist_funnel_event(
         self, symbol: str, decision: str, reason: str | None = None,
@@ -266,10 +280,18 @@ class EvaluationLoop:
         """Roll over _daily_buy_count, _reject_counters, _buy_flow_counters
         when the date changes. Must run before any per-signal counter touch
         so the first BUY of a new day is attributed to the new day.
-        """
-        from datetime import date as _date
 
-        today = _date.today().isoformat()
+        DT-H8 (2026-06-06): server is Asia/Seoul. `date.today()` rolls
+        at 00:00 KST = 10:00 ET, so US daily_buy_count + reject_counters
+        used to zero ~30 min after US open — effectively doubling the
+        daily_buy_limit and re-arming reject gates mid-session.
+        Now we anchor on the market's local timezone via zoneinfo.
+        """
+        from datetime import datetime as _dt
+        from zoneinfo import ZoneInfo
+
+        tz = ZoneInfo("America/New_York") if self._market == "US" else ZoneInfo("Asia/Seoul")
+        today = _dt.now(tz).date().isoformat()
         if self._daily_buy_date != today:
             self._daily_buy_count = 0
             self._daily_buy_date = today
@@ -382,6 +404,42 @@ class EvaluationLoop:
         self._min_hold_secs = value
         logger.info(
             "Market %s: min_hold_secs=%d (%.2fh)", self._market, value, value / 3600
+        )
+
+    def set_held_overrides(
+        self,
+        held_sell_bias: float | None = None,
+        held_min_confidence: float | None = None,
+        stale_pnl_threshold: float | None = None,
+        profit_protection_pct: float | None = None,
+    ) -> None:
+        """Apply held-position knobs from global.* yaml.
+
+        CFG-H5 (2026-06-06): the engine reads these four params via
+        `getattr(self, '_held_sell_bias', <default>)` etc. with no
+        corresponding setter. Operator yaml edits + LLM-accepted
+        recommendations through `services.yaml_mutator` updated the
+        yaml file but the live behavior used the hard-coded fallback
+        forever. Comments in strategies.yaml cite backtest deltas
+        (`V2_relax_-10 +8.8pp`) so the operator assumed they were
+        live. They were not. Now main calls this on startup AND
+        hot-reload so the values actually bind.
+        """
+        if held_sell_bias is not None:
+            self._held_sell_bias = float(held_sell_bias)
+        if held_min_confidence is not None:
+            self._held_min_confidence = float(held_min_confidence)
+        if stale_pnl_threshold is not None:
+            self._stale_pnl_threshold = float(stale_pnl_threshold)
+        if profit_protection_pct is not None:
+            self._profit_protection_pct = float(profit_protection_pct)
+        logger.info(
+            "Market %s: held overrides hsb=%s hmc=%s spt=%s ppp=%s",
+            self._market,
+            getattr(self, "_held_sell_bias", None),
+            getattr(self, "_held_min_confidence", None),
+            getattr(self, "_stale_pnl_threshold", None),
+            getattr(self, "_profit_protection_pct", None),
         )
 
     def set_stale_time_exit(
@@ -893,7 +951,14 @@ class EvaluationLoop:
                     signal = await strategy.analyze(df, symbol)
                     signals.append(signal)
                 except Exception as e:
-                    logger.warning("Strategy %s failed on %s: %s", strategy.name, symbol, e)
+                    from core.log_dedup import warn_once_per
+                    warn_once_per(
+                        logger,
+                        f"strat_fail:{strategy.name}:{symbol}",
+                        300.0,  # 5min — long enough to skip a few cycles
+                        "Strategy %s failed on %s: %s",
+                        strategy.name, symbol, e,
+                    )
 
             # Get per-stock blended weights
             market_weights = self._registry.get_profile_weights(self._market_state)
@@ -1055,7 +1120,25 @@ class EvaluationLoop:
 
         SELLs execute immediately. BUYs are ranked by confidence so
         the highest-conviction signals get filled first when cash is limited.
+
+        CON-B1 (2026-06-05): wrapped in `_evaluate_lock` so a manual
+        /engine/run-evaluation cannot race the scheduler tick — two
+        concurrent passes shared `_last_signal`, `_daily_buy_count`,
+        `_cycle_positions`, and could double-fire a BUY for the same
+        symbol if `has_pending_order` hadn't yet recorded the first.
         """
+        if self._evaluate_lock.locked():
+            logger.warning(
+                "Skipping concurrent _evaluate_all on %s — another caller "
+                "is mid-cycle (CON-B1 guard)", self._market,
+            )
+            return
+        async with self._evaluate_lock:
+            await self._evaluate_all_locked()
+
+    async def _evaluate_all_locked(self) -> None:
+        """Locked body — same code as before. Split out so callers that
+        already hold the lock (none today) can bypass."""
         # Update factor scores periodically
         now = time.time()
         if now - self._last_factor_update > self._factor_update_interval:
@@ -1084,6 +1167,34 @@ class EvaluationLoop:
             exchange_held = {p.symbol for p in exchange_positions if p.quantity > 0}
             held = held | exchange_held
             position_map = {p.symbol: p for p in exchange_positions if p.quantity > 0}
+            # M11 (2026-06-07): push intraday unrealized PnL into
+            # RiskManager so the daily-loss circuit reflects real-time
+            # drawdown from open positions, not just realized SELLs.
+            try:
+                unrealized_sum = float(sum(
+                    getattr(p, "unrealized_pnl", 0.0) or 0.0
+                    for p in exchange_positions
+                    if p.quantity > 0
+                ))
+                self._risk_manager.set_unrealized_pnl(unrealized_sum)
+            except Exception as e:
+                logger.debug("set_unrealized_pnl skipped: %s", e)
+            # 2026-06-05: gap-fill tracker for any held symbols that
+            # dropped out. Without this, `_check_min_hold` returns
+            # fail-closed for the missing symbol and stuck SELLs (incl.
+            # position_cleanup at -3% to -15% PnL) silently block,
+            # leaving the position to mature unchecked.
+            if self._position_tracker:
+                try:
+                    held_positions = [
+                        p for p in exchange_positions if p.quantity > 0
+                    ]
+                    await self._position_tracker.ensure_tracked(held_positions)
+                except Exception as e:
+                    logger.warning(
+                        "ensure_tracked failed: %s — min_hold may fail-closed "
+                        "on untracked symbols this cycle", e,
+                    )
         except Exception as e:
             self._cycle_positions = None
             logger.warning(
@@ -1149,9 +1260,23 @@ class EvaluationLoop:
                         )
                         signals.append(signal)
                     except asyncio.TimeoutError:
-                        logger.warning("Strategy %s timed out on %s", strategy.name, symbol)
+                        from core.log_dedup import warn_once_per
+                        warn_once_per(
+                            logger,
+                            f"strat_timeout:{strategy.name}:{symbol}",
+                            300.0,
+                            "Strategy %s timed out on %s",
+                            strategy.name, symbol,
+                        )
                     except Exception as e:
-                        logger.warning("Strategy %s failed on %s: %s", strategy.name, symbol, e)
+                        from core.log_dedup import warn_once_per
+                        warn_once_per(
+                            logger,
+                            f"strat_fail:{strategy.name}:{symbol}",
+                            300.0,
+                            "Strategy %s failed on %s: %s",
+                            strategy.name, symbol, e,
+                        )
 
                 market_weights = self._registry.get_profile_weights(self._market_state)
                 weights = self._adaptive.get_weights(symbol, market_weights)
@@ -1256,7 +1381,12 @@ class EvaluationLoop:
                             and pnl_pct < st_thr
                         ):
                             tracked = self._position_tracker._tracked[symbol]
-                            hold_secs = time.monotonic() - tracked.tracked_at
+                            # Wall-clock preferred — survives process restart.
+                            _eu = getattr(tracked, "entry_unix", None)
+                            if isinstance(_eu, (int, float)) and _eu > 0:
+                                hold_secs = time.time() - float(_eu)
+                            else:
+                                hold_secs = time.monotonic() - tracked.tracked_at
                             time_trigger = hold_secs >= st_days * 86400
 
                         if loss_trigger or time_trigger:
@@ -1613,21 +1743,52 @@ class EvaluationLoop:
 
         STOCK-47: Prevents whipsaw by enforcing a minimum holding period
         before non-emergency sells. Hard stop-loss bypasses this check.
+
+        2026-06-04: Fail-closed on missing tracker entry. Previously
+        returned True (allow sell) for untracked symbols, which silently
+        bypassed the anti-churn gate whenever a position lived in KIS
+        balance but not in `_tracked` (race, restart edge case, etc.).
+        Live KR session showed 9 round-trips that day in <55 minutes
+        despite yaml min_hold_days=3.
+
+        Source of truth is wall-clock `entry_unix` so the gate survives
+        process restarts (restored from PositionRecord.opened_at by
+        restore_from_db). Falls back to monotonic tracked_at when
+        entry_unix is missing (e.g. mocked test fixtures).
         """
         if self._min_hold_secs <= 0:
             return True
         if not self._position_tracker:
             return True
         tracked_dict = getattr(self._position_tracker, "_tracked", None)
-        if not tracked_dict:
-            return True
-        tracked = tracked_dict.get(symbol)
-        if not tracked:
-            return True
-        try:
-            hold_secs = time.monotonic() - float(tracked.tracked_at)
-        except (TypeError, ValueError):
-            return True  # Can't determine hold time — allow sell
+        if not tracked_dict or symbol not in tracked_dict:
+            logger.warning(
+                "Min hold check: %s not in %s tracker — blocking SELL "
+                "(fail-closed; investigate why position is untracked).",
+                symbol, self._market,
+            )
+            return False
+        tracked = tracked_dict[symbol]
+
+        # Prefer wall-clock — survives process restart via DB opened_at.
+        entry_unix = getattr(tracked, "entry_unix", None)
+        if isinstance(entry_unix, (int, float)) and entry_unix > 0:
+            # max(0, ...) guards against NTP stepping the clock backwards
+            # (or a tiny scheduling skew); without it the gate could see
+            # a negative hold and treat it as zero-then-pass on the next
+            # comparison.
+            hold_secs = max(0.0, time.time() - float(entry_unix))
+        else:
+            # Legacy / mocked: fall back to monotonic tracked_at.
+            try:
+                hold_secs = max(0.0, time.monotonic() - float(tracked.tracked_at))
+            except (TypeError, ValueError):
+                logger.warning(
+                    "Min hold check: %s has no usable timestamp — blocking SELL.",
+                    symbol,
+                )
+                return False
+
         if hold_secs < self._min_hold_secs:
             logger.info(
                 "Min hold not met for %s: held %.1fh < %.1fh required",
@@ -1850,7 +2011,14 @@ class EvaluationLoop:
             exchange = "KRX" if self._market == "KR" else self._exchange_resolver.resolve(symbol)
             price = await self._market_data.get_price(symbol, exchange)
         except Exception as e:
-            logger.warning("Real-time price fetch failed for %s, using OHLCV close: %s", symbol, e)
+            from core.log_dedup import warn_once_per
+            warn_once_per(
+                logger,
+                f"price_fetch_fail:{symbol}",
+                300.0,
+                "Real-time price fetch failed for %s, using OHLCV close: %s",
+                symbol, e,
+            )
             price = float(df.iloc[-1]["close"])
 
         # Hermes Phase 3: stash context for _bump_reject / _persist_funnel_event
@@ -2030,7 +2198,13 @@ class EvaluationLoop:
                 logger.debug("Skipping BUY for %s: same signal within 24h", symbol)
                 self._bump_reject("same_signal_24h")
                 return
-            self._last_signal[symbol] = ("BUY", time.time())
+            # CON-H2 (2026-06-05): _last_signal used to be set HERE,
+            # before place_buy ran. If the order then failed (network,
+            # KIS reject, sizing return None), the 24h dedup gate was
+            # still armed and blocked every subsequent attempt for the
+            # rest of the day. Now we set it only after the order
+            # actually returns from place_buy (search for the matching
+            # comment below).
 
             # Event calendar checks (earnings proximity, FOMC day)
             if self._event_calendar:
@@ -2297,12 +2471,25 @@ class EvaluationLoop:
             if order:
                 self._daily_buy_count += 1
                 self._buy_flow_counters["buys_placed"] += 1
+                # CON-H2 (2026-06-05): arm 24h dedup ONLY on successful
+                # order placement. Pre-fix the gate was armed at the
+                # signal stage so a network error / KIS reject silently
+                # blocked the next 24h of attempts.
+                self._last_signal[symbol] = ("BUY", time.time())
+                # STATE-H3 (2026-06-05): invalidate the per-cycle
+                # position cache so downstream sector-cap, sizing-up
+                # and max-positions checks within this same cycle
+                # see the BUY that just executed. Without this, two
+                # rapid BUYs in the same cycle could both pass the
+                # sector-cap check against the pre-BUY snapshot.
+                self._cycle_positions = None
                 # Hermes Phase 3: record placed buy for counterfactual
-                # baseline (so replay knows which signals already passed
-                # all gates, not just which were rejected).
-                asyncio.create_task(self._persist_funnel_event(
-                    symbol, decision="placed",
-                ))
+                # baseline. RES-H7: tracked spawn so a GC-cancelled task
+                # doesn't drop the placement row.
+                _spawn_bg(
+                    self._persist_funnel_event(symbol, decision="placed"),
+                    name=f"funnel_placed:{symbol}",
+                )
 
             # Register position for SL/TP/trailing stop monitoring
             if order and self._position_tracker:
@@ -2331,16 +2518,37 @@ class EvaluationLoop:
                     trail_act = trail_cfg.get("activation_pct")
                     trail_pct = trail_cfg.get("trail_pct")
 
-                self._position_tracker.track(
-                    symbol=symbol,
-                    entry_price=price,
-                    quantity=order.quantity,
-                    strategy=strategy_name,
-                    stop_loss_pct=sl_pct,
-                    take_profit_pct=tp_pct,
-                    trailing_activation_pct=trail_act,
-                    trailing_stop_pct=trail_pct,
-                )
+                # 2026-06-05 (FIN-B1): sizing-up add-on BUYs must blend
+                # the cost basis with the existing lot. Calling track()
+                # for an already-tracked symbol used to overwrite
+                # entry_price / quantity / highest_price — every KR
+                # sizing-up event from 2026-05-22 onward corrupted PnL
+                # math and made SL fire on the wrong anchor. Now we
+                # route to add_on(), which preserves the original
+                # entry_unix (min_hold clock) and partial_profit_taken
+                # while blending entry_price.
+                if symbol in self._position_tracker.tracked_symbols:
+                    self._position_tracker.add_on(
+                        symbol=symbol,
+                        add_price=price,
+                        add_quantity=order.quantity,
+                        strategy=strategy_name,
+                        stop_loss_pct=sl_pct,
+                        take_profit_pct=tp_pct,
+                        trailing_activation_pct=trail_act,
+                        trailing_stop_pct=trail_pct,
+                    )
+                else:
+                    self._position_tracker.track(
+                        symbol=symbol,
+                        entry_price=price,
+                        quantity=order.quantity,
+                        strategy=strategy_name,
+                        stop_loss_pct=sl_pct,
+                        take_profit_pct=tp_pct,
+                        trailing_activation_pct=trail_act,
+                        trailing_stop_pct=trail_pct,
+                    )
 
         elif signal.signal_type == SignalType.SELL:
             # 2026-04-18: Smart sell escalation. If a pending limit SELL
@@ -2419,7 +2627,12 @@ class EvaluationLoop:
                 if tracked.entry_price > 0
                 else 0.0
             )
-            hold_secs = time.monotonic() - tracked.tracked_at
+            # Wall-clock preferred — survives process restart.
+            _eu = getattr(tracked, "entry_unix", None)
+            if isinstance(_eu, (int, float)) and _eu > 0:
+                hold_secs = time.time() - float(_eu)
+            else:
+                hold_secs = time.monotonic() - tracked.tracked_at
             return PositionContext(
                 symbol=symbol,
                 entry_price=tracked.entry_price,

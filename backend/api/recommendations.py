@@ -5,10 +5,12 @@ proposed config changes from agents (trade_review for now).
 """
 
 from datetime import datetime
+
+from core.timeutil import now_utc_naive
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import desc, select
 
 from core.models import AgentRecommendation
@@ -35,11 +37,13 @@ class RecommendationDTO(BaseModel):
 
 
 class RejectBody(BaseModel):
-    reason: str | None = None
+    # M23 (2026-06-07): bound free-form text to prevent abuse / DB bloat.
+    # 500 chars covers any realistic operator rejection note.
+    reason: str | None = Field(default=None, max_length=500)
 
 
 class AcceptBody(BaseModel):
-    notes: str | None = None
+    notes: str | None = Field(default=None, max_length=500)
 
 
 def _to_dto(r: AgentRecommendation) -> RecommendationDTO:
@@ -128,6 +132,17 @@ async def accept_recommendation(
             raise HTTPException(422, f"yaml apply failed: {e}") from e
 
         # Step 2: trigger hot-reload so the engines pick up the change.
+        #
+        # API-H11 (2026-06-06): used to swallow reload errors with a
+        # log.error and proceed to mark accepted. Yaml and running
+        # config diverged silently — dashboard claimed the new value
+        # was live but RiskParams was still the old. On
+        # risk.max_positions / SL/TP this is a real-money mental-model
+        # bug. Now: roll back the yaml when reload fails so the file
+        # matches what's running, surface a 500 with details, and
+        # leave the rec pending so the operator can investigate.
+        reload_ok = True
+        reload_error: str | None = None
         try:
             registry = getattr(request.app.state, "strategy_registry", None) \
                 or getattr(request.app.state, "registry", None)
@@ -141,16 +156,40 @@ async def accept_recommendation(
                 apply_us()
             logger.info("Recommendation #%d reload triggered", rec.id)
         except Exception as e:
-            # Yaml is already written. Log + continue — operator can
-            # restart manually if reload glitches.
+            reload_ok = False
+            reload_error = str(e)
             logger.error(
-                "Recommendation #%d hot-reload failed (yaml already applied): %s",
-                rec.id, e,
+                "Recommendation #%d hot-reload failed: %s — rolling back yaml",
+                rec.id, e, exc_info=True,
+            )
+            # Roll yaml back to the prior value so the file matches the
+            # running config. Don't mark rec accepted.
+            try:
+                apply_yaml_change(yaml_path, rec.param_path, old_value)
+                # Re-trigger reload to undo any partial application.
+                if registry and hasattr(registry, "reload_config"):
+                    registry.reload_config()
+                if apply_kr:
+                    apply_kr()
+                if apply_us:
+                    apply_us()
+            except Exception as rb_err:
+                logger.critical(
+                    "Recommendation #%d rollback FAILED — yaml may be "
+                    "inconsistent with running config: %s",
+                    rec.id, rb_err, exc_info=True,
+                )
+            raise HTTPException(
+                status_code=500,
+                detail=(
+                    f"hot-reload failed: {reload_error}. Yaml rolled back; "
+                    f"recommendation left pending."
+                ),
             )
 
-        # Step 3: mark accepted.
+        # Step 3: mark accepted (only when reload succeeded).
         rec.status = "accepted"
-        rec.applied_at = datetime.utcnow()
+        rec.applied_at = now_utc_naive()
         if body and body.notes:
             rec.notes = body.notes
         await session.commit()

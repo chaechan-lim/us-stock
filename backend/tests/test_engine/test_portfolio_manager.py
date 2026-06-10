@@ -408,6 +408,92 @@ class TestSnapshotAnomalyDetection:
             result = await session.execute(stmt)
             assert result.scalar() == 1
 
+    async def test_paper_mode_never_writes_snapshot(self, db_setup):
+        """2026-06-10: paper boots share the live snapshots table — a
+        paper-default balance written there wedged the anomaly guard for
+        5 days (the ₩500M incident). is_paper=True must skip the DB
+        write entirely, before even fetching the balance."""
+        svc = AsyncMock()
+        svc.get_balance = AsyncMock(
+            return_value=Balance(
+                currency="KRW",
+                total=500_000_000,  # the poisonous paper default
+                available=500_000_000,
+            )
+        )
+        svc.get_positions = AsyncMock(return_value=[])
+        mgr = PortfolioManager(
+            market_data=svc, session_factory=db_setup,
+            market="KR", is_paper=True,
+        )
+
+        await mgr.save_snapshot()
+
+        async with db_setup() as session:
+            result = await session.execute(
+                select(func.count()).select_from(PortfolioSnapshot)
+            )
+            assert result.scalar() == 0  # nothing written
+        # Short-circuits before touching the adapter at all
+        svc.get_balance.assert_not_awaited()
+
+    async def test_self_heals_after_persistent_anomaly(self, db_setup):
+        """2026-06-10: a corrupt baseline (live case: paper-default ₩500M
+        row) must not wedge the guard forever. After
+        ANOMALY_MAX_CONSECUTIVE_SKIPS consecutive rejections, accept the
+        new value and re-baseline."""
+        from engine.portfolio_manager import ANOMALY_MAX_CONSECUTIVE_SKIPS
+
+        svc = AsyncMock()
+        svc.get_balance = AsyncMock(
+            return_value=Balance(
+                currency="KRW",
+                total=31_000_000,   # real equity ~3100만
+                available=18_000_000,
+            )
+        )
+        svc.get_positions = AsyncMock(return_value=[])
+        mgr = PortfolioManager(market_data=svc, session_factory=db_setup, market="KR")
+
+        # Seed the corrupt 500M baseline (paper default written into live DB)
+        async with db_setup() as session:
+            session.add(
+                PortfolioSnapshot(
+                    market="KR",
+                    total_value_usd=500_000_000,
+                    cash_usd=500_000_000,
+                    invested_usd=0,
+                    unrealized_pnl=0,
+                    recorded_at=datetime.utcnow() - timedelta(hours=1),
+                )
+            )
+            await session.commit()
+
+        # First N attempts: anomaly guard skips (93.8% "drop")
+        for _ in range(ANOMALY_MAX_CONSECUTIVE_SKIPS):
+            await mgr.save_snapshot()
+        async with db_setup() as session:
+            result = await session.execute(
+                select(func.count()).select_from(PortfolioSnapshot)
+            )
+            assert result.scalar() == 1  # still only the corrupt seed
+
+        # N+1-th attempt: self-heal — accept the real value
+        await mgr.save_snapshot()
+        async with db_setup() as session:
+            result = await session.execute(
+                select(func.count()).select_from(PortfolioSnapshot)
+            )
+            assert result.scalar() == 2  # new snapshot written
+
+        # And the counter resets — next normal save works immediately
+        await mgr.save_snapshot()
+        async with db_setup() as session:
+            result = await session.execute(
+                select(func.count()).select_from(PortfolioSnapshot)
+            )
+            assert result.scalar() == 3
+
     async def test_saves_when_drop_below_threshold(self, db_setup):
         """A moderate drop (<50%) should still save."""
         svc = AsyncMock()

@@ -833,6 +833,40 @@ class TestExchangePositionDuplicateBlock:
         assert order is None
         mock_adapter.create_buy_order.assert_not_called()
 
+    async def test_buy_skip_already_held_bypasses_guard(
+        self, mock_adapter, risk_manager, mock_market_data
+    ):
+        """bug_009: skip_already_held=True lets a continuous-rebalance
+        caller (EW hedge) top up a held position instead of being
+        rejected by the defense-in-depth guard."""
+        from engine.risk_manager import PositionSizeResult
+
+        mock_market_data.get_positions.return_value = [
+            Position(symbol="AAPL", exchange="NASD", quantity=10, avg_price=140.0),
+        ]
+        om = OrderManager(
+            adapter=mock_adapter,
+            risk_manager=risk_manager,
+            market_data=mock_market_data,
+        )
+        sizing = PositionSizeResult(
+            quantity=5, allocation_usd=750.0, risk_per_share=12.0,
+            reason="ew_hedge", allowed=True,
+        )
+        order = await om.place_buy(
+            symbol="AAPL",
+            price=150.0,
+            portfolio_value=100_000,
+            cash_available=50_000,
+            current_positions=0,
+            strategy_name="ew_hedge",
+            sizing_override=sizing,
+            skip_position_limit=True,
+            skip_already_held=True,
+        )
+        assert order is not None
+        mock_adapter.create_buy_order.assert_called_once()
+
     async def test_buy_allowed_when_not_held(self, mock_adapter, risk_manager, mock_market_data):
         """place_buy should proceed when exchange has no matching position."""
         mock_market_data.get_positions.return_value = []

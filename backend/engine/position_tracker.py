@@ -15,7 +15,9 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
+
+from core.timeutil import now_utc_naive
 from typing import TYPE_CHECKING, Callable
 
 from data.market_data_service import MarketDataService
@@ -41,7 +43,13 @@ class TrackedPosition:
     take_profit_pct: float | None = None
     trailing_activation_pct: float = 0.0
     trailing_stop_pct: float = 0.0
+    # tracked_at: monotonic clock for within-process age comparisons
+    # (check_all, sentiment min-hold). Resets on process restart.
     tracked_at: float = field(default_factory=time.monotonic)
+    # entry_unix: wall-clock UNIX epoch of first BUY for this position.
+    # Survives process restart via PositionRecord.opened_at and is the
+    # source of truth for the anti-churn min_hold gate.
+    entry_unix: float = field(default_factory=time.time)
     partial_profit_taken: bool = False  # True after partial profit sell executed
 
 
@@ -75,6 +83,27 @@ class PositionTracker:
         self._exchange_resolver = exchange_resolver
         self._account_id = account_id
         self._tracked: dict[str, TrackedPosition] = {}
+        # STATE-B3 (2026-06-05): symbols explicitly removed via untrack().
+        # sync_to_db consumes this set so the prune step distinguishes
+        # "operator/loop signalled removal" from "tracker happens to be
+        # empty because restore hasn't finished".
+        self._pending_removals: set[str] = set()
+        # review #10 (2026-06-09): symbols managed by the ETF engine
+        # (EW hedge basket, leveraged/inverse pairs, sector rotation).
+        # These are restored from the exchange into _tracked with a
+        # generic "unknown"/"etf_*" strategy, so the strategy-string
+        # guard in check_all can't reliably skip them. Wired from
+        # main.py via set_etf_managed_symbols(); check_all skips SL/TP/
+        # trailing on these so the stock engine never fights the ETF
+        # engine over the same position.
+        self._etf_managed_symbols: set[str] = set()
+        # review #7 (2026-06-09): serialize all DB position writes. The
+        # fire-and-forget per-symbol _upsert_position_db raced the bulk
+        # sync_to_db at startup — both did SELECT-then-INSERT on the same
+        # (account, market, symbol) → IntegrityError on commit (observed
+        # live 06-09). A single lock makes the two paths mutually
+        # exclusive so the duplicate-key window can't open.
+        self._db_write_lock = asyncio.Lock()
         # Commission rate per order (one-way). Exits with gain < 2× this
         # (round-trip cost) are suppressed — selling at +0.3% with 0.25%
         # commission each way = net loss. Added 2026-04-13 after the system
@@ -114,6 +143,7 @@ class PositionTracker:
         trailing_stop_pct: float | None = None,
         highest_price: float | None = None,  # STOCK-58: Restore from DB
         partial_profit_taken: bool = False,  # STOCK-58: Restore from DB
+        entry_unix: float | None = None,  # Wall-clock entry; restore_from_db passes opened_at
     ) -> None:
         """Start tracking a position.
 
@@ -125,6 +155,9 @@ class PositionTracker:
             highest_price: Restore from DB — highest price reached (for trailing stop).
                 Defaults to entry_price if not provided.
             partial_profit_taken: Restore from DB — whether partial profit was taken.
+            entry_unix: Wall-clock UNIX timestamp of original BUY. When restoring
+                from DB this should be PositionRecord.opened_at so the min_hold
+                gate sees the true elapsed time, not the process restart time.
         """
         # Apply trailing stop defaults from risk params when not specified
         trail_act = trailing_activation_pct
@@ -134,7 +167,7 @@ class PositionTracker:
         if trail_pct is None:
             trail_pct = self._risk.params.default_trailing_stop_pct
 
-        self._tracked[symbol] = TrackedPosition(
+        pos = TrackedPosition(
             symbol=symbol,
             entry_price=entry_price,
             quantity=quantity,
@@ -146,6 +179,15 @@ class PositionTracker:
             trailing_stop_pct=trail_pct,
             partial_profit_taken=partial_profit_taken,
         )
+        if entry_unix is not None:
+            pos.entry_unix = float(entry_unix)
+        self._tracked[symbol] = pos
+        # review #9 (2026-06-09): a symbol queued for DB removal by a
+        # prior check_all sweep that is now being (re-)tracked must be
+        # pulled out of the pending-removal set — otherwise the next
+        # sync_to_db deletes the DB row of a position that is live in
+        # _tracked with a valid entry, orphaning it.
+        self._pending_removals.discard(symbol)
         logger.info(
             "Tracking position: %s %d @ $%.2f (SL=%.1f%% TP=%.1f%% trail=%.1f%%/%.1f%%)",
             symbol,
@@ -158,9 +200,116 @@ class PositionTracker:
         )
         self._schedule_db_upsert(symbol)
 
+    def set_etf_managed_symbols(self, symbols: "set[str]") -> None:
+        """review #10 (2026-06-09): register ETF-engine-managed symbols so
+        the stock tracker skips SL/TP/trailing on them. Called once at
+        startup from main.py with the ETF universe's symbol set."""
+        self._etf_managed_symbols = set(symbols or set())
+        logger.info(
+            "Position tracker %s: %d ETF-managed symbols excluded from SL/TP",
+            self._market, len(self._etf_managed_symbols),
+        )
+
+    def add_on(
+        self,
+        symbol: str,
+        add_price: float,
+        add_quantity: int,
+        strategy: str = "",
+        stop_loss_pct: float | None = None,
+        take_profit_pct: float | None = None,
+        trailing_activation_pct: float | None = None,
+        trailing_stop_pct: float | None = None,
+    ) -> None:
+        """Record an add-on BUY for an existing position with blended cost basis.
+
+        2026-06-05 (FIN-B1 fix): live KR sizing-up was calling track()
+        on add-on BUYs, which overwrote entry_price / quantity /
+        highest_price with the add-on lot's values only. Every add-on
+        therefore destroyed the original cost basis:
+          - PnL on the next exit was wrong by (old_entry - add_price)
+          - SL anchored to the higher (add-on) entry fired prematurely
+          - quantity was just the add-on, so the next full SELL only
+            sold the add-on lot, leaving the original position behind
+
+        Blended math:
+          new_entry = (old_qty * old_entry + add_qty * add_price) / new_qty
+          new_qty   = old_qty + add_qty
+          highest   = max(old_highest, add_price)
+
+        Preserved across the add-on (sizing-up is averaging into the
+        SAME position, not opening a new one):
+          - entry_unix (the original min_hold clock)
+          - partial_profit_taken (the original lot's profit history)
+          - tracked_at (monotonic age within this process)
+        """
+        existing = self._tracked.get(symbol)
+        if existing is None:
+            # Safest fallback: promote to fresh track but log a warning
+            # because the caller almost certainly meant to add to an
+            # existing entry.
+            logger.warning(
+                "add_on called for untracked %s — promoting to fresh track()",
+                symbol,
+            )
+            self.track(
+                symbol=symbol,
+                entry_price=add_price,
+                quantity=add_quantity,
+                strategy=strategy,
+                stop_loss_pct=stop_loss_pct,
+                take_profit_pct=take_profit_pct,
+                trailing_activation_pct=trailing_activation_pct,
+                trailing_stop_pct=trailing_stop_pct,
+            )
+            return
+
+        new_qty = existing.quantity + add_quantity
+        if new_qty <= 0 or add_quantity <= 0:
+            logger.warning(
+                "add_on %s: invalid quantity (existing=%d add=%d) — ignoring",
+                symbol, existing.quantity, add_quantity,
+            )
+            return
+
+        blended_entry = (
+            (existing.entry_price * existing.quantity)
+            + (add_price * add_quantity)
+        ) / new_qty
+        existing.entry_price = blended_entry
+        existing.quantity = new_qty
+        existing.highest_price = max(existing.highest_price, add_price)
+
+        # Optional overrides — only apply when the caller passed an explicit
+        # value (a new strategy might be driving the add-on with different
+        # SL/TP than the original entry). Default None means "keep existing".
+        if strategy:
+            existing.strategy = strategy
+        if stop_loss_pct is not None:
+            existing.stop_loss_pct = stop_loss_pct
+        if take_profit_pct is not None:
+            existing.take_profit_pct = take_profit_pct
+        if trailing_activation_pct is not None:
+            existing.trailing_activation_pct = trailing_activation_pct
+        if trailing_stop_pct is not None:
+            existing.trailing_stop_pct = trailing_stop_pct
+
+        logger.info(
+            "Add-on %s: +%d @ $%.2f → qty=%d blended_entry=$%.4f highest=$%.2f",
+            symbol, add_quantity, add_price, new_qty, blended_entry,
+            existing.highest_price,
+        )
+        self._schedule_db_upsert(symbol)
+
     def untrack(self, symbol: str) -> None:
-        """Stop tracking a position."""
+        """Stop tracking a position.
+
+        STATE-B3 (2026-06-05): records the symbol in `_pending_removals`
+        so the next `sync_to_db` knows this was an explicit removal vs
+        the "tracker is empty because restore hasn't finished" pattern.
+        """
         self._tracked.pop(symbol, None)
+        self._pending_removals.add(symbol)
         self._schedule_db_remove(symbol)
 
     async def _finalize_sell(
@@ -183,7 +332,15 @@ class PositionTracker:
         # Defensive exits (SL, trailing stop) always count as loss sells
         # even if fill_price > entry (e.g. trailing stop after partial gain).
         # Planned exits (TP, breakeven) never count as loss sells.
-        is_loss = reason in ("stop_loss", "trailing_stop", "tiered_trailing_stop")
+        # STATE-H2 (2026-06-05): protective sells (regime_protect /
+        # negative_sentiment) are by definition risk-driven losses;
+        # count them against the whipsaw budget the same way SL exits do.
+        # position_cleanup is also a forced exit on a stale/losing
+        # position — same accounting.
+        is_loss = reason in (
+            "stop_loss", "trailing_stop", "tiered_trailing_stop",
+            "regime_protect", "negative_sentiment", "position_cleanup",
+        )
 
         self.untrack(symbol)
 
@@ -295,7 +452,15 @@ class PositionTracker:
                 "handle_sell_fill: %s already untracked — firing callbacks for sell cooldown",
                 symbol,
             )
-            is_loss = reason in ("stop_loss", "trailing_stop", "tiered_trailing_stop")
+            # STATE-H2 (2026-06-05): protective sells (regime_protect /
+            # negative_sentiment) are by definition risk-driven losses;
+            # count them against the whipsaw budget the same way SL exits do.
+            # position_cleanup is also a forced exit on a stale/losing
+            # position — same accounting.
+            is_loss = reason in (
+                "stop_loss", "trailing_stop", "tiered_trailing_stop",
+                "regime_protect", "negative_sentiment", "position_cleanup",
+            )
             sell_ts = time.time()
             for cb in self._on_sell_callbacks:
                 try:
@@ -417,13 +582,24 @@ class PositionTracker:
             pos = position_map.get(symbol)
             if not pos:
                 # Grace period: don't remove recently tracked positions
-                # (buy order may still be pending/unfilled)
+                # (buy order may still be pending/unfilled).
+                # 2026-06-09: 5min was too short for KR — a limit BUY can
+                # sit open for minutes, then the KIS balance query lags
+                # the fill by several more (settlement display). Live
+                # 06-09 saw fresh 09:31 KR buys removed at 09:36 (just
+                # past 300s from track time), re-tracked at 09:40 with a
+                # stale entry_unix, then dumped by the stale-time exit.
+                # 15min for KR covers the fill-delay + display-lag window;
+                # US settlement display is faster so 5min stays.
+                grace = 900 if self._market == "KR" else 300
                 age = time.monotonic() - tracked.tracked_at
-                if age < 300:  # 5 minutes
+                if age < grace:
                     logger.debug(
-                        "Position %s not in exchange yet (%.0fs since tracked), keeping",
+                        "Position %s not in exchange yet (%.0fs since tracked, "
+                        "grace=%ds), keeping",
                         symbol,
                         age,
+                        grace,
                     )
                     continue
                 logger.info("Position %s no longer held, removing tracker", symbol)
@@ -451,7 +627,16 @@ class PositionTracker:
 
             # Skip SL/TP for system-managed positions (cash_parking, ETF leverage).
             # These are not strategy trades and should not be auto-exited.
-            if tracked.strategy in ("cash_parking", "etf_leverage", "etf_inverse"):
+            # review #10 (2026-06-09): also skip any ETF-engine-managed
+            # symbol (EW hedge basket, rotation pairs). They restore with
+            # strategy="unknown"/"etf_*", so match on the symbol set too,
+            # else the stock tracker SL/TP-sells an ETF the ETF engine
+            # holds. strategy.startswith("etf_") covers etf_ew_hedge_*.
+            if (
+                tracked.strategy in ("cash_parking", "etf_leverage", "etf_inverse")
+                or tracked.strategy.startswith("etf_")
+                or symbol in self._etf_managed_symbols
+            ):
                 continue
 
             current_price = pos.current_price
@@ -895,7 +1080,23 @@ class PositionTracker:
 
                 async with sf() as session:
                     for pos in positions:
-                        # 1) Latest live BUY order
+                        # 2026-06-05: capture the BUY time for this
+                        # symbol so the min_hold gate counts from the
+                        # true entry rather than restart time. Lenient
+                        # mode — paper/SELL fallback beats a time.time()
+                        # reset. review #6 (2026-06-09): prefer_recent so
+                        # a round-tripped symbol anchors to the CURRENT
+                        # entry, not an ancient earliest BUY that would
+                        # trip the stale-time cleanup exit.
+                        first_buy = await self._lookup_first_buy_time(
+                            session, pos.symbol, allow_fallback=True,
+                            prefer_recent=True,
+                        )
+                        info: dict = {}
+                        if first_buy:
+                            info["first_buy_time"] = first_buy
+
+                        # 1) Latest live BUY order — primary strategy source
                         stmt = (
                             select(Order)
                             .where(
@@ -911,9 +1112,8 @@ class PositionTracker:
                         result = await session.execute(stmt)
                         order = result.scalar_one_or_none()
                         if order and order.strategy_name:
-                            entry_info[pos.symbol] = {
-                                "strategy": order.strategy_name,
-                            }
+                            info["strategy"] = order.strategy_name
+                            entry_info[pos.symbol] = info
                             continue
 
                         # 2) Any BUY order (including paper) as fallback
@@ -931,9 +1131,8 @@ class PositionTracker:
                         result = await session.execute(stmt)
                         order = result.scalar_one_or_none()
                         if order and order.strategy_name:
-                            entry_info[pos.symbol] = {
-                                "strategy": order.strategy_name,
-                            }
+                            info["strategy"] = order.strategy_name
+                            entry_info[pos.symbol] = info
                             continue
 
                         # 3) SELL order's buy_strategy as last resort
@@ -952,9 +1151,15 @@ class PositionTracker:
                         result = await session.execute(stmt)
                         order = result.scalar_one_or_none()
                         if order and order.buy_strategy:
-                            entry_info[pos.symbol] = {
-                                "strategy": order.buy_strategy,
-                            }
+                            info["strategy"] = order.buy_strategy
+                            entry_info[pos.symbol] = info
+                            continue
+
+                        # No strategy resolution but maybe we have a
+                        # first_buy_time — record it so the min_hold
+                        # gate still sees the real entry.
+                        if info:
+                            entry_info[pos.symbol] = info
             except Exception as e:
                 logger.warning("Failed to look up entry info from DB: %s", e)
 
@@ -995,6 +1200,21 @@ class PositionTracker:
                 except Exception as e:
                     logger.debug("ATR fetch failed for %s, using defaults: %s", pos.symbol, e)
 
+            # 2026-06-05: pull true first-BUY time from orders so the
+            # min_hold gate counts from the real entry, not from this
+            # restart. Without this, restart on day 1 effectively
+            # re-arms the 72h clock on every position.
+            # Guard on `sf` (the resolved factory used to populate entry_info)
+            # rather than the raw `session_factory` argument so callers
+            # omitting it still benefit from the tracker's stored factory.
+            opened_unix: float | None = None
+            if sf and "first_buy_time" in entry_info.get(pos.symbol, {}):
+                first_buy = entry_info[pos.symbol]["first_buy_time"]
+                if first_buy:
+                    if first_buy.tzinfo is None:
+                        first_buy = first_buy.replace(tzinfo=timezone.utc)
+                    opened_unix = first_buy.timestamp()
+
             self.track(
                 symbol=pos.symbol,
                 entry_price=entry_price,
@@ -1002,6 +1222,7 @@ class PositionTracker:
                 strategy=strategy,
                 stop_loss_pct=stop_loss_pct,
                 take_profit_pct=take_profit_pct,
+                entry_unix=opened_unix,
             )
 
             pnl_pct = ((pos.current_price / entry_price) - 1) * 100 if entry_price > 0 else 0
@@ -1060,6 +1281,16 @@ class PositionTracker:
             if record.symbol in self._tracked:
                 continue
 
+            # opened_at is stored naive in UTC (datetime.utcnow). Convert to
+            # epoch by attaching UTC so the min_hold gate sees the original
+            # BUY time even after process restart.
+            opened_unix: float | None = None
+            if record.opened_at is not None:
+                opened_at = record.opened_at
+                if opened_at.tzinfo is None:
+                    opened_at = opened_at.replace(tzinfo=timezone.utc)
+                opened_unix = opened_at.timestamp()
+
             self.track(
                 symbol=record.symbol,
                 entry_price=record.avg_price,
@@ -1069,6 +1300,7 @@ class PositionTracker:
                 take_profit_pct=record.take_profit,
                 highest_price=record.highest_price,  # STOCK-58: Restore highest price
                 partial_profit_taken=record.partial_profit_taken or False,  # STOCK-58: Restore partial profit flag
+                entry_unix=opened_unix,
             )
 
             pnl_pct = 0.0
@@ -1154,27 +1386,82 @@ class PositionTracker:
             logger.debug("Auto-recovery: no exchange positions found")
             return
 
-        # Track any exchange positions not already tracked
-        recovered = 0
-        for pos in positions:
-            if pos.quantity <= 0 or pos.symbol in self._tracked:
-                continue
-            self.track(
-                symbol=pos.symbol,
-                entry_price=pos.avg_price,
-                quantity=int(pos.quantity),
-                strategy="unknown",
-                stop_loss_pct=self._risk.params.default_stop_loss_pct,
-                take_profit_pct=self._risk.params.default_take_profit_pct,
-            )
-            recovered += 1
-
+        # Delegate per-symbol gap-fill to ensure_tracked so the inline
+        # loop and the per-cycle gap-fill share one implementation.
+        recovered = await self.ensure_tracked(positions)
         if recovered:
             logger.warning(
                 "Auto-recovered %d untracked %s positions for SL/TP monitoring",
                 recovered,
                 self._market,
             )
+
+    async def _track_from_exchange_pos(self, pos: "Position") -> None:
+        """Track a single exchange position, pulling entry_unix from orders.
+
+        Shared between `_auto_recover_untracked` (full tracker rebuild
+        when tracker is empty) and `ensure_tracked` (per-cycle gap-fill
+        when individual symbols are missing).
+        """
+        opened_unix: float | None = None
+        if self._session_factory:
+            try:
+                async with self._session_factory() as session:
+                    # Lenient — paper/SELL fallback is preferable to
+                    # resetting the 72h min_hold clock to "now".
+                    # prefer_recent (2026-06-09): anchor to the CURRENT
+                    # holding's most-recent BUY, not an ancient earliest
+                    # one — otherwise a re-tracked symbol that traded
+                    # weeks ago gets a stale entry_unix and is instantly
+                    # dumped by min_hold + stale-time exit.
+                    first_buy = await self._lookup_first_buy_time(
+                        session, pos.symbol, allow_fallback=True,
+                        prefer_recent=True,
+                    )
+                if first_buy:
+                    if first_buy.tzinfo is None:
+                        first_buy = first_buy.replace(tzinfo=timezone.utc)
+                    opened_unix = first_buy.timestamp()
+            except Exception as e:
+                logger.warning(
+                    "entry_unix lookup failed for %s: %s", pos.symbol, e,
+                )
+        self.track(
+            symbol=pos.symbol,
+            entry_price=pos.avg_price,
+            quantity=int(pos.quantity),
+            strategy="unknown",
+            stop_loss_pct=self._risk.params.default_stop_loss_pct,
+            take_profit_pct=self._risk.params.default_take_profit_pct,
+            entry_unix=opened_unix,
+        )
+
+    async def ensure_tracked(self, exchange_positions: "list[Position]") -> int:
+        """Track held positions missing from _tracked. Returns gap-fill count.
+
+        2026-06-05: per-cycle complement to `_auto_recover_untracked`,
+        which only fires when `_tracked` is entirely empty. Without this,
+        a single position dropping out of the tracker (race, partial
+        reconciliation failure, etc.) silently disables the min_hold
+        gate for that symbol — fail-closed `_check_min_hold` blocks
+        legitimate cleanup SELLs forever.
+
+        Called from EvaluationLoop after computing `held` so every
+        symbol downstream has a valid `entry_unix` source. Idempotent
+        on already-tracked symbols.
+        """
+        recovered = 0
+        for pos in exchange_positions:
+            if pos.quantity <= 0 or pos.symbol in self._tracked:
+                continue
+            await self._track_from_exchange_pos(pos)
+            recovered += 1
+        if recovered:
+            logger.info(
+                "ensure_tracked: filled %d %s tracker gaps",
+                recovered, self._market,
+            )
+        return recovered
 
     async def sync_to_db(self, session_factory=None) -> int:
         """Synchronize all in-memory tracked positions to the positions DB table.
@@ -1189,31 +1476,86 @@ class PositionTracker:
             return 0
 
         # Fetch current prices from exchange to populate current_price/unrealized_pnl
+        # Also build a separate `exchange_held` set keyed on quantity>0
+        # — see STATE-B3 prune block below.
         price_map: dict[str, float] = {}
+        exchange_held: set[str] = set()
+        broker_fetch_ok = False
         if self._tracked:
             try:
                 if self._market_data:
                     positions = await self._market_data.get_positions()
                 else:
                     positions = await self._adapter.fetch_positions()
+                # Two separate signals from one broker call:
+                #   - price_map: symbols with a non-zero current price
+                #     (only those can populate PnL on the DB row)
+                #   - exchange_held: symbols the broker says we own
+                #     (regardless of whether a price was returned —
+                #     halted stocks, post-market unpriced ETFs and
+                #     throttled responses can all have current_price=0
+                #     while quantity>0)
                 price_map = {p.symbol: p.current_price for p in positions if p.current_price > 0}
+                exchange_held = {p.symbol for p in positions if p.quantity > 0}
+                broker_fetch_ok = True
             except Exception as e:
-                logger.debug("Failed to fetch prices for DB sync: %s", e)
+                # Bug-merged-007: do NOT proceed with the prune branch
+                # below on broker failure. A transient EGW00133 / pool
+                # timeout used to fall through to "KIS confirms gone"
+                # and delete every legitimately-held DB row when the
+                # tracker was partially restored.
+                logger.warning(
+                    "Broker fetch failed for DB sync — skipping the "
+                    "exchange-confirmed-gone prune branch this cycle: %s",
+                    e,
+                )
 
         # Re-resolve "unknown" strategies from order history
         unknown_symbols = [sym for sym, t in self._tracked.items() if t.strategy in ("unknown", "")]
         if unknown_symbols:
             await self._resolve_unknown_strategies(sf, unknown_symbols)
 
+        # review #7 (2026-06-09): serialize against fire-and-forget
+        # _upsert_position_db so the two can't both SELECT-then-INSERT
+        # the same key concurrently (the live 06-09 duplicate-key error).
+        await self._db_write_lock.acquire()
         try:
             from sqlalchemy import select
 
             from core.models import PositionRecord
 
+            # STATE-B3 (2026-06-05): take an atomic snapshot of pending
+            # removals at the start of the sync, then clear. Any
+            # untrack() called during this awaited block gets
+            # registered against the NEXT sync, not lost.
+            pending_remove = set(self._pending_removals)
+            self._pending_removals.clear()
+
             async with sf() as session:
                 tracked_symbols = set(self._tracked.keys())
 
-                # Remove DB rows for positions no longer tracked in this account+market
+                # Remove DB rows for positions no longer tracked.
+                #
+                # Deletion paths, from most-trusted to most-cautious:
+                #   1. The symbol is in `pending_remove` — untrack() was
+                #      called explicitly. Safe to delete.
+                #   2. The tracker has SOME entries but is missing this
+                #      symbol AND the broker confirms we don't hold it.
+                #      Reconciles the case where an external SELL
+                #      happened without our untrack() flow firing.
+                #   3. Otherwise — tracker is wholly empty (restart
+                #      race), broker fetch failed, or KIS still reports
+                #      the symbol as held — preserve the DB row.
+                #
+                # Bug-merged-007 (2026-06-05): path-2 used to consult
+                # `set(price_map.keys())` which excludes any held
+                # position whose current_price is 0 (halted /
+                # throttled response / unpriced ETF), wiping
+                # legitimately-held DB rows. Now consults the
+                # quantity-based `exchange_held` set built above; and
+                # the entire prune branch is gated on
+                # `broker_fetch_ok` so a transient broker failure
+                # doesn't trigger mass-delete either.
                 stmt = select(PositionRecord).where(
                     PositionRecord.account_id == self._account_id,
                     PositionRecord.market == self._market,
@@ -1221,11 +1563,55 @@ class PositionTracker:
                 result = await session.execute(stmt)
                 db_positions = result.scalars().all()
 
-                for db_pos in db_positions:
-                    if db_pos.symbol not in tracked_symbols:
-                        await session.delete(db_pos)
+                tracker_wholly_empty = (
+                    not tracked_symbols and bool(db_positions)
+                )
+                if tracker_wholly_empty and not pending_remove:
+                    logger.warning(
+                        "sync_to_db: %s tracker empty + no explicit "
+                        "removals + DB has %d rows — skipping prune "
+                        "(restart-race protection)",
+                        self._market, len(db_positions),
+                    )
 
-                # Upsert all currently tracked positions with current prices
+                for db_pos in db_positions:
+                    if db_pos.symbol in tracked_symbols:
+                        continue
+                    # Path 1: explicit untrack() — always delete.
+                    if db_pos.symbol in pending_remove:
+                        await session.delete(db_pos)
+                        continue
+                    # Path 3a: wholly-empty tracker without explicit
+                    # signal = restart race; preserve.
+                    if tracker_wholly_empty:
+                        continue
+                    # Path 3b: broker fetch failed — we don't know
+                    # whether KIS still holds this symbol. Preserve.
+                    if not broker_fetch_ok:
+                        continue
+                    # Path 3c: KIS still reports it held; preserve and
+                    # trust the broker. Now uses the quantity-based
+                    # `exchange_held` set (not price_map.keys()) so
+                    # zero-priced held positions are kept.
+                    if db_pos.symbol in exchange_held:
+                        logger.warning(
+                            "sync_to_db: %s held on exchange but missing "
+                            "from tracker — preserving DB row %s",
+                            self._market, db_pos.symbol,
+                        )
+                        continue
+                    # Path 2: tracker has other entries, missing this
+                    # one AND broker confirms gone → safe to delete.
+                    await session.delete(db_pos)
+
+                # PERF-H11 (2026-06-07): bulk-fetch existing rows once,
+                # then route through the per-symbol upsert with the
+                # prefetched record so each iteration avoids its own
+                # SELECT. Was a 20-30 round-trip serial pause every
+                # sync; now one round-trip + Python loop.
+                existing_map: dict[str, "PositionRecord"] = {
+                    db_pos.symbol: db_pos for db_pos in db_positions
+                }
                 for symbol, tracked in self._tracked.items():
                     current_price = price_map.get(symbol)
                     await self._upsert_position_record(
@@ -1233,6 +1619,7 @@ class PositionTracker:
                         symbol,
                         tracked,
                         current_price=current_price,
+                        existing_record=existing_map.get(symbol),
                     )
 
                 await session.commit()
@@ -1246,8 +1633,21 @@ class PositionTracker:
             return synced
 
         except Exception as e:
-            logger.error("Failed to sync positions to DB: %s", e)
+            # review #8 (2026-06-09): a duplicate-key from a residual race
+            # (or any commit error) rolls back the whole cycle. The lock
+            # above closes the race window; if one still slips through,
+            # log distinctly so it's not confused with a real failure.
+            from sqlalchemy.exc import IntegrityError as _IntegrityError
+            if isinstance(e, _IntegrityError):
+                logger.error(
+                    "sync_to_db %s IntegrityError (position write race — "
+                    "next cycle re-syncs): %s", self._market, e,
+                )
+            else:
+                logger.error("Failed to sync positions to DB: %s", e)
             return 0
+        finally:
+            self._db_write_lock.release()
 
     def get_buy_strategy(self, symbol: str) -> str:
         """Get the original buy strategy for a tracked position."""
@@ -1392,9 +1792,12 @@ class PositionTracker:
         if not self._session_factory:
             return
         try:
-            async with self._session_factory() as session:
-                await self._upsert_position_record(session, symbol, tracked)
-                await session.commit()
+            # review #7: hold the write lock so this fire-and-forget
+            # upsert can't interleave with the bulk sync_to_db.
+            async with self._db_write_lock:
+                async with self._session_factory() as session:
+                    await self._upsert_position_record(session, symbol, tracked)
+                    await session.commit()
         except Exception as e:
             logger.debug("DB upsert failed for %s: %s", symbol, e)
 
@@ -1422,18 +1825,67 @@ class PositionTracker:
         self,
         session: "AsyncSession",
         symbol: str,
+        allow_fallback: bool = False,
+        prefer_recent: bool = False,
     ) -> datetime | None:
-        """Look up the earliest live BUY order time for a symbol.
+        """Look up a BUY order time for a symbol.
 
-        Queries the orders table for the earliest filled/submitted live
-        (is_paper=False) BUY order's created_at. Returns None if no
-        matching order is found.
+        Two modes:
+        - strict (allow_fallback=False, default): only earliest live
+          (is_paper=False) BUY. Used by `_upsert_position_record` where
+          PositionRecord.opened_at must reflect the position's original
+          open date.
+        - lenient (allow_fallback=True): three-tier search used by the
+          entry_unix path so a recovery never re-arms the 72h min_hold
+          clock with `time.time()`.
+
+        prefer_recent (2026-06-09): anchor to the CURRENT HOLDING's entry
+        — the earliest BUY that comes AFTER the most-recent SELL (or the
+        earliest BUY overall when there's no SELL). NOT the most-recent
+        BUY, which would wrongly pick a later add-on of a continuously-
+        held position. Critical for the entry_unix / min_hold clock: a
+        symbol round-tripped weeks ago whose earliest-ever BUY is ancient
+        would otherwise re-track with a 14-day-old entry_unix, instantly
+        satisfying min_hold AND tripping the stale-time cleanup exit —
+        dumping a position that was actually bought minutes ago. Anchoring
+        to the first BUY after the last SELL gives:
+          - add-on (no SELL between buys): earliest BUY (true holding start)
+          - round-trip (SELL then re-buy): the re-buy (current entry)
+        Genuinely-old positions with no recent activity still resolve to
+        their real old timestamp, so aged-position recovery keeps working.
+
+        Returns None when nothing is found.
         """
-        from sqlalchemy import asc, select
+        from datetime import timedelta as _td
+
+        from sqlalchemy import asc, desc, select
 
         from core.models import Order
 
-        stmt = (
+        # prefer_recent: bound Tier 1/2 to BUYs after the most-recent SELL
+        # so we resolve the CURRENT holding's first BUY, not an ancient one.
+        sell_floor: datetime | None = None
+        if prefer_recent:
+            sell_stmt = (
+                select(Order.created_at)
+                .where(
+                    Order.account_id == self._account_id,
+                    Order.symbol == symbol,
+                    Order.side == "SELL",
+                    Order.status.in_(["filled", "submitted"]),
+                )
+                .order_by(desc(Order.created_at))
+                .limit(1)
+            )
+            sell_floor = (await session.execute(sell_stmt)).scalar_one_or_none()
+
+        def _buy_after_floor(base_stmt):
+            if sell_floor is not None:
+                base_stmt = base_stmt.where(Order.created_at > sell_floor)
+            return base_stmt
+
+        # Tier 1: earliest live BUY (of the current holding when prefer_recent)
+        stmt = _buy_after_floor(
             select(Order.created_at)
             .where(
                 Order.account_id == self._account_id,
@@ -1442,12 +1894,54 @@ class PositionTracker:
                 Order.status.in_(["filled", "submitted"]),
                 Order.is_paper == False,  # noqa: E712
             )
+        ).order_by(asc(Order.created_at)).limit(1)
+        ts = (await session.execute(stmt)).scalar_one_or_none()
+        if ts is not None:
+            return ts
+
+        if not allow_fallback:
+            return None
+
+        # Tier 2: any BUY (paper included), still bounded to the current
+        # holding when prefer_recent.
+        stmt = _buy_after_floor(
+            select(Order.created_at)
+            .where(
+                Order.account_id == self._account_id,
+                Order.symbol == symbol,
+                Order.side == "BUY",
+                Order.status.in_(["filled", "submitted"]),
+            )
+        ).order_by(asc(Order.created_at)).limit(1)
+        ts = (await session.execute(stmt)).scalar_one_or_none()
+        if ts is not None:
+            logger.debug(
+                "first_buy_time for %s fell back to paper BUY", symbol,
+            )
+            return ts
+
+        # Tier 3: derive a proxy from the earliest SELL. The original BUY
+        # came before, so any timestamp from before that SELL is safer than
+        # using time.time(). One day before is a conservative estimate.
+        stmt = (
+            select(Order.created_at)
+            .where(
+                Order.account_id == self._account_id,
+                Order.symbol == symbol,
+                Order.side == "SELL",
+            )
             .order_by(asc(Order.created_at))
             .limit(1)
         )
-        result = await session.execute(stmt)
-        row = result.scalar_one_or_none()
-        return row
+        ts = (await session.execute(stmt)).scalar_one_or_none()
+        if ts is not None:
+            logger.warning(
+                "first_buy_time for %s falling back to SELL.created_at − 1d "
+                "(no BUY order found — likely legacy data)", symbol,
+            )
+            return ts - _td(days=1)
+
+        return None
 
     async def _upsert_position_record(
         self,
@@ -1455,24 +1949,31 @@ class PositionTracker:
         symbol: str,
         tracked: TrackedPosition,
         current_price: float | None = None,
+        existing_record: "PositionRecord | None" = None,
     ) -> None:
         """Upsert a PositionRecord within an existing session (no commit).
 
         Args:
             current_price: Current market price. When provided, also computes
                 and stores unrealized_pnl.
+            existing_record: PERF-H11 (2026-06-07): when caller already
+                has the row from a bulk SELECT, pass it here to skip
+                the per-symbol round-trip. None = look up.
         """
         from sqlalchemy import select
 
         from core.models import PositionRecord
 
-        stmt = select(PositionRecord).where(
-            PositionRecord.account_id == self._account_id,
-            PositionRecord.market == self._market,
-            PositionRecord.symbol == symbol,
-        )
-        result = await session.execute(stmt)
-        record = result.scalar_one_or_none()
+        if existing_record is not None:
+            record = existing_record
+        else:
+            stmt = select(PositionRecord).where(
+                PositionRecord.account_id == self._account_id,
+                PositionRecord.market == self._market,
+                PositionRecord.symbol == symbol,
+            )
+            result = await session.execute(stmt)
+            record = result.scalar_one_or_none()
 
         # Calculate unrealized PnL when current price is available
         unrealized_pnl: float | None = None
@@ -1492,11 +1993,22 @@ class PositionTracker:
                 record.current_price = current_price
             if unrealized_pnl is not None:
                 record.unrealized_pnl = unrealized_pnl
-            record.updated_at = datetime.utcnow()
+            record.updated_at = now_utc_naive()
         else:
-            # Look up actual first buy time from orders table
-            first_buy_time = await self._lookup_first_buy_time(session, symbol)
-            opened_at = first_buy_time if first_buy_time else datetime.utcnow()
+            # Look up the current holding's entry time from orders.
+            # review #16 (2026-06-09): prefer_recent anchors opened_at to
+            # the current holding's first BUY (earliest BUY after the
+            # most-recent SELL), not an ancient earliest-ever BUY.
+            # Otherwise a re-entry after a round-trip stamps a stale
+            # opened_at, which restore_from_db later loads as entry_unix
+            # → the fresh position is dumped by the stale-time cleanup
+            # exit (the 06-09 churn bug via the cold-restart path).
+            # Strict (no fallback): a SELL/paper order must never set
+            # opened_at; missing live BUY falls through to now().
+            first_buy_time = await self._lookup_first_buy_time(
+                session, symbol, prefer_recent=True,
+            )
+            opened_at = first_buy_time if first_buy_time else now_utc_naive()
 
             record = PositionRecord(
                 account_id=self._account_id,
@@ -1514,7 +2026,7 @@ class PositionTracker:
                 highest_price=tracked.highest_price,  # STOCK-58: Persist highest price
                 partial_profit_taken=tracked.partial_profit_taken,  # STOCK-58: Persist partial profit flag
                 opened_at=opened_at,
-                updated_at=datetime.utcnow(),
+                updated_at=now_utc_naive(),
             )
             session.add(record)
 

@@ -7,6 +7,7 @@ from sqlalchemy import and_, desc, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.models import Order, Watchlist
+from core.timeutil import now_utc_naive
 
 logger = logging.getLogger(__name__)
 
@@ -54,14 +55,14 @@ class TradeRepository:
                 if status == "filled":
                     existing.status = status
                     if not existing.filled_at:
-                        existing.filled_at = datetime.utcnow()
+                        existing.filled_at = now_utc_naive()
                 elif status and existing.status != "filled":
                     # STOCK-37: Don't set "not_found" when PnL exists —
                     # the order was actually filled, KIS API just can't find it.
                     if status == "not_found" and existing.pnl is not None:
                         existing.status = "filled"
                         if not existing.filled_at:
-                            existing.filled_at = existing.created_at or datetime.utcnow()
+                            existing.filled_at = existing.created_at or now_utc_naive()
                     else:
                         existing.status = status
                 if pnl is not None:
@@ -123,7 +124,7 @@ class TradeRepository:
         if pnl is not None:
             result.pnl = pnl
         if status == "filled":
-            result.filled_at = datetime.utcnow()
+            result.filled_at = now_utc_naive()
         await self._session.commit()
         return result
 
@@ -182,7 +183,7 @@ class TradeRepository:
         were actually filled but KIS API couldn't locate them during
         reconciliation (date boundary / API delay).
         """
-        cutoff = datetime.utcnow() - timedelta(hours=hours)
+        cutoff = now_utc_naive() - timedelta(hours=hours)
         stmt = (
             select(Order)
             .where(
@@ -327,7 +328,7 @@ class TradeRepository:
 
         if existing:
             existing.is_active = True
-            existing.updated_at = datetime.utcnow()
+            existing.updated_at = now_utc_naive()
             await self._session.commit()
             return existing
 

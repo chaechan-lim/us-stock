@@ -2,14 +2,17 @@
 
 import asyncio
 import logging
+import os
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from config import AppConfig
 from core.models import Base
+from core.tasks import drain as _drain_bg_tasks, spawn as _spawn_bg
+from core.timeutil import now_utc_naive
 from db.session import get_engine
 from api.router import api_router
 from api.ws import install_log_handler
@@ -100,6 +103,17 @@ def _apply_kr_eval_overrides(
     """
     # get_market_evaluation_loop_config always returns a dict (possibly empty).
     kr_eval_cfg = config_loader.get_market_evaluation_loop_config("KR")
+
+    # CFG-H5 (2026-06-06): bind global.held_* / stale_pnl /
+    # profit_protection from yaml so operator edits + LLM
+    # recommendations don't sit inert behind a getattr fallback.
+    global_cfg = config_loader.global_config or {}
+    kr_loop.set_held_overrides(
+        held_sell_bias=global_cfg.get("held_sell_bias"),
+        held_min_confidence=global_cfg.get("held_min_confidence"),
+        stale_pnl_threshold=global_cfg.get("stale_pnl_threshold"),
+        profit_protection_pct=global_cfg.get("profit_protection_pct"),
+    )
 
     v = kr_eval_cfg.get("sell_cooldown_days")
     kr_loop.set_sell_cooldown_secs(int(v * 86400) if v is not None else default_cooldown_secs)
@@ -201,6 +215,16 @@ def _apply_us_eval_overrides(
     _warn_if_disabled_empty("US", us_disabled)
     us_loop.set_disabled_strategies(us_disabled)
 
+    # CFG-H5 (2026-06-06): bind global.held_* / stale_pnl /
+    # profit_protection (US mirror of the KR call above).
+    global_cfg = config_loader.global_config or {}
+    us_loop.set_held_overrides(
+        held_sell_bias=global_cfg.get("held_sell_bias"),
+        held_min_confidence=global_cfg.get("held_min_confidence"),
+        stale_pnl_threshold=global_cfg.get("stale_pnl_threshold"),
+        profit_protection_pct=global_cfg.get("profit_protection_pct"),
+    )
+
     us_park = config_loader.get_market_cash_parking_config("US")
     us_loop.set_cash_parking_config(
         enabled=bool(us_park.get("enabled", False)),
@@ -278,6 +302,11 @@ async def lifespan(app: FastAPI):
     if created_idxs:
         logger.info("Auto-migration created indexes: %s", ", ".join(created_idxs))
 
+    # RES-B1 (2026-06-05): create RateLimiter before any adapter so
+    # the live KIS adapters can share the same 20/s budget on their
+    # direct _get/_post calls. Paper adapters ignore the limiter.
+    rate_limiter = RateLimiter(max_per_second=5 if config.is_paper else 20)
+
     # Initialize exchange adapter
     if config.is_paper:
         from exchange.paper_adapter import PaperAdapter
@@ -294,7 +323,7 @@ async def lifespan(app: FastAPI):
             base_url=config.kis.base_url,
             redis_client=cache if cache.available else None,
         )
-        adapter = KISAdapter(config.kis, auth)
+        adapter = KISAdapter(config.kis, auth, rate_limiter=rate_limiter)
         await adapter.initialize()
 
     app.state.adapter = adapter
@@ -312,7 +341,10 @@ async def lifespan(app: FastAPI):
     else:
         from exchange.kis_kr_adapter import KISKRAdapter
 
-        kr_adapter = KISKRAdapter(config.kis, auth)
+        # Share the same throttle so KR + US calls compete for the same
+        # 20-req-per-second budget (KIS limit is per app_key, not per
+        # market). `rate_limiter` was created above in the live branch.
+        kr_adapter = KISKRAdapter(config.kis, auth, rate_limiter=rate_limiter)
         await kr_adapter.initialize()
     app.state.kr_adapter = kr_adapter
     logger.info("KR adapter initialized (mode=%s)", config.trading.mode)
@@ -335,8 +367,8 @@ async def lifespan(app: FastAPI):
         kis_ws = KISWebSocket(auth=auth, ws_url=config.kis.ws_url)
     app.state.kis_ws = kis_ws
 
-    # Initialize services
-    rate_limiter = RateLimiter(max_per_second=5 if config.is_paper else 20)
+    # Initialize services (rate_limiter was created above and is shared
+    # with both adapters and MarketDataService)
     market_data = MarketDataService(adapter=adapter, rate_limiter=rate_limiter)
     app.state.market_data = market_data
     app.state.indicator_svc = IndicatorService()
@@ -498,6 +530,30 @@ async def lifespan(app: FastAPI):
         ).get("max_scale", 1.5),
     )
     kr_risk_manager = RiskManager(params=kr_risk_params)
+
+    # RISK-H6 (2026-06-06): attach Redis-backed persistence to both
+    # RiskManagers so `_daily_pnl` survives systemd restart. Without
+    # this a restart after a -2.9% session re-arms a fresh -3% loss
+    # budget. Cache may be unavailable in paper/dev — attach
+    # unconditionally and let RiskManager fall back to memory-only.
+    if cache and cache.available:
+        risk_manager.attach_cache(cache, "US")
+        kr_risk_manager.attach_cache(cache, "KR")
+        try:
+            us_restored = await risk_manager.restore_daily_pnl()
+            kr_restored = await kr_risk_manager.restore_daily_pnl()
+            if us_restored:
+                logger.info(
+                    "US daily_pnl restored from cache: %.2f",
+                    risk_manager.daily_pnl,
+                )
+            if kr_restored:
+                logger.info(
+                    "KR daily_pnl restored from cache: %.2f",
+                    kr_risk_manager.daily_pnl,
+                )
+        except Exception as e:
+            logger.warning("Daily PnL restore failed: %s", e)
     order_manager = OrderManager(
         adapter=adapter,
         risk_manager=risk_manager,
@@ -563,6 +619,9 @@ async def lifespan(app: FastAPI):
     portfolio_manager = PortfolioManager(
         market_data=market_data,
         session_factory=session_factory,
+        # 2026-06-10: paper boots must never write the shared snapshots
+        # table (06-05 ₩500M poisoning incident).
+        is_paper=config.is_paper,
     )
     app.state.portfolio_manager = portfolio_manager
 
@@ -650,11 +709,18 @@ async def lifespan(app: FastAPI):
     from data.macro_calendar import MacroCalendarService
     from data.insider_service import InsiderTradingService
     from data.event_calendar import EventCalendarService
+    from data.dart_service import DARTInsiderService
 
     earnings_svc = EarningsCalendarService(api_key=config.external.finnhub_api_key)
     macro_svc = MacroCalendarService()
     insider_svc = InsiderTradingService(api_key=config.external.finnhub_api_key)
-    event_calendar = EventCalendarService(earnings_svc, macro_svc, insider_svc)
+    kr_insider_svc = DARTInsiderService(
+        api_key=os.getenv("DART_API_KEY"),
+        enabled=os.getenv("DART_ENABLED", "false").lower() == "true",
+    )
+    event_calendar = EventCalendarService(
+        earnings_svc, macro_svc, insider_svc, kr_insider=kr_insider_svc,
+    )
     app.state.event_calendar = event_calendar
     position_tracker._event_calendar = event_calendar
 
@@ -748,6 +814,13 @@ async def lifespan(app: FastAPI):
         for sym in sector_etf.top_holdings:
             _sector_cache[sym] = sector_name
     evaluation_loop.set_sector_cache(_sector_cache)
+    # review #17 + #10 (2026-06-09): exclude US ETF symbols from the
+    # stock eval universe AND from the position tracker's SL/TP sweep.
+    # The KR side already did this; US never called either, so sector
+    # ETFs leaking into the watchlist could be traded by stock
+    # strategies and SL/TP-sold out from under the ETF engine.
+    evaluation_loop.set_etf_exclusions(set(etf_universe.all_etf_symbols))
+    position_tracker.set_etf_managed_symbols(set(etf_universe.all_etf_symbols))
 
     app.state.stock_scanner = stock_scanner
     app.state.sector_analyzer = sector_analyzer
@@ -811,6 +884,9 @@ async def lifespan(app: FastAPI):
         market_data=kr_market_data,
         session_factory=session_factory,
         market="KR",
+        # 2026-06-10: the 06-05 incident was exactly this manager in a
+        # paper boot writing ₩500M into live history.
+        is_paper=config.is_paper,
     )
     app.state.kr_portfolio_manager = kr_portfolio_manager
 
@@ -828,6 +904,56 @@ async def lifespan(app: FastAPI):
         market="KR",
         risk_manager=kr_risk_manager,
     )
+    # 2026-06-08: wire EW hedge config (default OFF in yaml).
+    # Reads `ew_hedge:` block from kr_etf_universe.yaml.
+    try:
+        import yaml as _yaml
+        from engine.etf_engine import EWHedgeConfig
+        with open(kr_etf_config_path) as _fh:
+            _kr_etf_yaml = _yaml.safe_load(_fh) or {}
+        _ew = _kr_etf_yaml.get("ew_hedge", {}) or {}
+        if _ew:
+            kr_etf_engine.set_ew_hedge_config(EWHedgeConfig(
+                enabled=bool(_ew.get("enabled", False)),
+                inverse_etf=str(_ew.get("inverse_etf", "")),
+                regime_proxy=str(_ew.get("regime_proxy", "")),
+                rebalance_days=int(_ew.get("rebalance_days", 5)),
+                use_vol_signal=bool(_ew.get("use_vol_signal", False)),
+                vol_lookback=int(_ew.get("vol_lookback", 20)),
+                vol_pctile_lookback=int(_ew.get("vol_pctile_lookback", 252)),
+                vol_pctile_threshold=float(_ew.get("vol_pctile_threshold", 80.0)),
+                roc_5d_threshold=float(_ew.get("roc_5d_threshold", -0.03)),
+                sector_sma=int(_ew.get("sector_sma", 50)),
+                breadth_threshold=float(_ew.get("breadth_threshold", 0.30)),
+                min_signals_for_hedge=int(_ew.get("min_signals_for_hedge", 2)),
+                hedge_ratio=float(_ew.get("hedge_ratio", 0.50)),
+                inverse_vs_cash_ratio=float(_ew.get("inverse_vs_cash_ratio", 0.5)),
+                rebalance_tolerance=float(_ew.get("rebalance_tolerance", 0.05)),
+                equity_cap_pct=float(_ew.get("equity_cap_pct", 0.30)),
+                opening_avoidance_minutes=int(
+                    _ew.get("opening_avoidance_minutes", 30)
+                ),
+            ))
+    except Exception as _e:
+        # review #5 (2026-06-09): fail LOUD. If yaml says enabled:true but
+        # the config is invalid, set_ew_hedge_config raises and the engine
+        # silently keeps enabled=False — the operator thinks the hedge is
+        # on when it isn't. Log ERROR with explicit NOT-ACTIVATED text and
+        # record the intent/actual mismatch on app.state for a health probe.
+        _intended = bool((_kr_etf_yaml.get("ew_hedge", {}) or {}).get("enabled", False)) \
+            if "_kr_etf_yaml" in dir() else False
+        if _intended:
+            logger.error(
+                "KR ETF ew_hedge config INVALID — hedge NOT ACTIVATED "
+                "despite enabled:true in yaml. Fix the config and restart. "
+                "Error: %s", _e,
+            )
+        else:
+            logger.warning("KR ETF ew_hedge config load failed: %s", _e)
+        app.state.ew_hedge_config_error = str(_e)
+        app.state.ew_hedge_intended_enabled = _intended
+    else:
+        app.state.ew_hedge_config_error = None
     app.state.kr_etf_engine = kr_etf_engine
     kr_market_state_detector = MarketStateDetector()
     app.state.kr_market_state_detector = kr_market_state_detector
@@ -1032,7 +1158,7 @@ async def lifespan(app: FastAPI):
                             "strategy": change.get("strategy", ""),
                             "status": "filled",
                             "market": "US",
-                            "created_at": datetime.utcnow().isoformat(),
+                            "created_at": now_utc_naive().isoformat(),
                         }
                     )
                     # STOCK-52: When a pending SELL order is confirmed filled,
@@ -1043,7 +1169,22 @@ async def lifespan(app: FastAPI):
                     # "trend_following:stop_loss" → "stop_loss") for notifications.
                     if change["side"] == "SELL":
                         strategy = change.get("strategy", "")
-                        reason = strategy.split(":")[-1] if ":" in strategy else ""
+                        # STATE-H2 (2026-06-05): protective_sells emit
+                        # strategy names like "negative_sentiment(-0.42)"
+                        # or "regime_protect(pnl=-2.1%)" — no colon →
+                        # reason="" → is_loss=False → whipsaw counter
+                        # silently bypassed. Map these explicitly so
+                        # the counter sees them as losses.
+                        if ":" in strategy:
+                            reason = strategy.split(":")[-1]
+                        elif strategy.startswith("regime_protect"):
+                            reason = "regime_protect"
+                        elif strategy.startswith("negative_sentiment"):
+                            reason = "negative_sentiment"
+                        elif strategy in ("position_cleanup", "profit_protection"):
+                            reason = strategy
+                        else:
+                            reason = ""
                         await position_tracker.handle_sell_fill(
                             symbol=change["symbol"],
                             filled_price=change.get("filled_price"),
@@ -1060,6 +1201,32 @@ async def lifespan(app: FastAPI):
                     kis_order_id=s["order_id"],
                     status="cancelled",
                 )
+                # STATE-B2 (2026-06-05): stale-cancelled BUYs leave
+                # phantom rows in position_tracker._tracked + positions
+                # DB because evaluation_loop.track() fires at order
+                # placement, not at fill. The next BUY signal sees
+                # "already held" and skips. Clean them up here — but
+                # only if the exchange confirms we don't actually hold
+                # the symbol (otherwise we'd untrack a real position
+                # whose initial BUY merely sat in pending status).
+                if s["side"] == "BUY":
+                    sym = s["symbol"]
+                    try:
+                        live_positions = await market_data.get_positions()
+                        live_symbols = {
+                            p.symbol for p in live_positions if p.quantity > 0
+                        }
+                        if sym not in live_symbols:
+                            position_tracker.untrack(sym)
+                            logger.info(
+                                "Stale BUY %s untracked (no live position)", sym,
+                            )
+                    except Exception as e:
+                        logger.warning(
+                            "Stale BUY cleanup failed for %s: %s — leaving "
+                            "tracker entry in place to avoid wrongful untrack",
+                            sym, e,
+                        )
             if notification:
                 symbols = ", ".join(f"{s['side']} {s['symbol']}" for s in stale)
                 await notification.notify_system_event(
@@ -1177,7 +1344,7 @@ async def lifespan(app: FastAPI):
         from db.trade_repository import TradeRepository
         from datetime import timedelta
 
-        now = datetime.utcnow()
+        now = now_utc_naive()
         max_watchlist = 100
         min_age_days = 7  # Don't remove recently added
 
@@ -1560,6 +1727,107 @@ async def lifespan(app: FastAPI):
         phases=[MarketPhase.PRE_MARKET],
     )
 
+    async def _revalidate_one_rec(rid: int, status: str) -> None:
+        """Validate a single rec and promote/reject pending_validation rows.
+
+        Runs as a detached asyncio task so the heavy 2y backtest doesn't
+        block the trading scheduler coroutine. The validator's own
+        process-wide lock keeps multiple in-flight backtests serial.
+        """
+        from core.models import AgentRecommendation
+        from services.recommendation_validator import validate_recommendation
+        try:
+            await validate_recommendation(rid, session_factory)
+        except Exception as e:
+            logger.warning("revalidate #%d failed: %s", rid, e)
+            return
+        if status != "pending_validation":
+            return
+        async with session_factory() as session:
+            rec = await session.get(AgentRecommendation, rid)
+            if not rec or rec.status != "pending_validation":
+                return
+            result = rec.backtest_result or {}
+            passes = result.get("passes_floor")
+            if passes is False:
+                delta = result.get("delta") or {}
+                rec.status = "rejected_by_backtest"
+                rec.rejected_reason = (
+                    f"auto-reject (self-heal): backtest delta "
+                    f"ret={delta.get('ret')}, sharpe={delta.get('sharpe')}, "
+                    f"mdd={delta.get('mdd')}, pf={delta.get('pf')} (failed floor)"
+                )
+            elif passes is True or "skip" in result or "would_pass_total" in result:
+                rec.status = "pending"
+            else:
+                # validator didn't write a usable result; leave for next sweep
+                return
+            await session.commit()
+
+    async def task_recommendation_revalidate():
+        """Self-heal: find untriaged recs and detach the validator to a task.
+
+        2026-06-05 v2: never await the validator on the scheduler coroutine.
+        The scheduler runs every task serially in a single coroutine
+        (engine/scheduler.py); a single 2y backtest is 30-90s, so awaiting
+        N of them here used to starve evaluation_loop, position_sync,
+        WebSocket lifecycle, ETF engine, etc. Fix: discover the work, fire
+        one detached asyncio.task per rec. The validator's own
+        `_validation_lock` keeps backtests sequential.
+
+        We can't compare JSONB to literal {} in SQL (Postgres has no =
+        operator for json), so filter status in SQL and do the
+        empty-result check in Python.
+        """
+        try:
+            from sqlalchemy import or_, select
+
+            from core.models import AgentRecommendation
+
+            async with session_factory() as session:
+                stmt = (
+                    select(AgentRecommendation.id,
+                           AgentRecommendation.status,
+                           AgentRecommendation.backtest_result)
+                    .where(
+                        or_(
+                            AgentRecommendation.status == "pending_validation",
+                            AgentRecommendation.status == "pending",
+                        )
+                    )
+                    .order_by(AgentRecommendation.id)
+                    .limit(50)
+                )
+                all_rows = list((await session.execute(stmt)).all())
+            rows = [
+                (rid, st) for rid, st, br in all_rows
+                if (st == "pending_validation") or (not br)
+            ][:20]  # cap so a flood doesn't queue forever
+            if not rows:
+                return
+            rec_ids = [r[0] for r in rows]
+            logger.info(
+                "recommendation_revalidate: detaching %d untriaged recs (ids=%s)",
+                len(rec_ids), rec_ids,
+            )
+            for rid, status in rows:
+                # Detach — don't await. validator holds its own lock.
+                # RES-H7: tracked spawn so a GC-cancelled task doesn't
+                # silently drop a recommendation revalidation.
+                _spawn_bg(
+                    _revalidate_one_rec(rid, status),
+                    name=f"revalidate:#{rid}",
+                )
+        except Exception as e:
+            logger.error("recommendation_revalidate task failed: %s", e)
+
+    scheduler.add_task(
+        "recommendation_revalidate",
+        task_recommendation_revalidate,
+        interval_sec=300,  # 5 min
+        phases=None,  # 24/7 — recs can land any time
+    )
+
     # WebSocket lifecycle management (market hours only)
     async def task_ws_lifecycle():
         """Manage KIS WebSocket connection lifecycle.
@@ -1694,8 +1962,12 @@ async def lifespan(app: FastAPI):
                         validate_recommendation,
                     )
                     for rid in new_rec_ids:
-                        asyncio.create_task(
-                            validate_recommendation(rid, session_factory)
+                        # RES-H7: tracked spawn — without retention the
+                        # validator coroutine can be GC-cancelled mid-
+                        # backtest and the rec sits in pending_validation.
+                        _spawn_bg(
+                            validate_recommendation(rid, session_factory),
+                            name=f"trade_review_validate:#{rid}",
                         )
                     logger.info(
                         "Spawned %d backtest validations for new recommendations",
@@ -1862,16 +2134,35 @@ async def lifespan(app: FastAPI):
 
     # Event calendar refresh (earnings, insider transactions)
     async def task_event_calendar_refresh():
-        """Daily: refresh earnings calendar + insider transactions."""
-        if not earnings_svc.available:
+        """Daily: refresh earnings calendar + insider transactions.
+
+        Passes BOTH US and KR watchlist symbols — refresh_all() routes
+        US tickers (alpha) to Finnhub and KR codes (6-digit numeric) to
+        DART internally.
+        """
+        # Bug-019 (2026-06-05): the previous guard short-circuited on
+        # the Finnhub-only `earnings_svc.available` flag, which made
+        # KR-only deployments (DART_API_KEY set, no FINNHUB_API_KEY)
+        # silently skip refresh_all → DART._last_refresh stayed None →
+        # every KR symbol got the neutral 0.0 adjustment forever.
+        # Now we gate on EITHER service being usable so a single-side
+        # operator posture still drives the refresh.
+        kr_insider_ready = bool(
+            getattr(event_calendar, "kr_insider", None)
+            and event_calendar.kr_insider.enabled
+        )
+        if not earnings_svc.available and not kr_insider_ready:
             return
         try:
             from db.trade_repository import TradeRepository
 
             async with session_factory() as session:
                 repo = TradeRepository(session)
-                wl = await repo.get_watchlist(active_only=True, market="US")
-                symbols = [w.symbol for w in wl if w.source != "etf_universe"][:40]
+                us_wl = await repo.get_watchlist(active_only=True, market="US")
+                kr_wl = await repo.get_watchlist(active_only=True, market="KR")
+                us_syms = [w.symbol for w in us_wl if w.source != "etf_universe"][:40]
+                kr_syms = [w.symbol for w in kr_wl if w.source != "etf_universe"][:80]
+                symbols = us_syms + kr_syms
 
             if not symbols:
                 return
@@ -2028,6 +2319,10 @@ async def lifespan(app: FastAPI):
     # DB watchlist would be traded by individual-stock strategies (e.g.
     # dual_momentum bought KODEX 은행 091170 as if it were a bank stock).
     kr_evaluation_loop.set_etf_exclusions(set(kr_etf_universe.all_etf_symbols))
+    # review #10 (2026-06-09): also tell the KR position tracker which
+    # symbols the ETF engine manages, so its SL/TP sweep never auto-sells
+    # an EW-hedge/rotation ETF the ETF engine holds.
+    kr_position_tracker.set_etf_managed_symbols(set(kr_etf_universe.all_etf_symbols))
 
     # STOCK-65: Apply KR market-specific overrides (eval loop + disabled strategies)
     # from strategies.yaml. Also stored on app.state so hot-reload can re-apply.
@@ -2080,14 +2375,29 @@ async def lifespan(app: FastAPI):
                             "strategy": change.get("strategy", ""),
                             "status": "filled",
                             "market": "KR",
-                            "created_at": datetime.utcnow().isoformat(),
+                            "created_at": now_utc_naive().isoformat(),
                         }
                     )
                     # STOCK-52: When a pending SELL order is confirmed filled,
                     # untrack the position and update PnL via position_tracker.
                     if change["side"] == "SELL":
                         strategy = change.get("strategy", "")
-                        reason = strategy.split(":")[-1] if ":" in strategy else ""
+                        # STATE-H2 (2026-06-05): protective_sells emit
+                        # strategy names like "negative_sentiment(-0.42)"
+                        # or "regime_protect(pnl=-2.1%)" — no colon →
+                        # reason="" → is_loss=False → whipsaw counter
+                        # silently bypassed. Map these explicitly so
+                        # the counter sees them as losses.
+                        if ":" in strategy:
+                            reason = strategy.split(":")[-1]
+                        elif strategy.startswith("regime_protect"):
+                            reason = "regime_protect"
+                        elif strategy.startswith("negative_sentiment"):
+                            reason = "negative_sentiment"
+                        elif strategy in ("position_cleanup", "profit_protection"):
+                            reason = strategy
+                        else:
+                            reason = ""
                         await kr_position_tracker.handle_sell_fill(
                             symbol=change["symbol"],
                             filled_price=change.get("filled_price"),
@@ -2106,6 +2416,25 @@ async def lifespan(app: FastAPI):
                     kis_order_id=s["order_id"],
                     status="cancelled",
                 )
+                # STATE-B2 (2026-06-05): mirror US side — untrack
+                # stale BUYs only when KIS confirms we don't hold them.
+                if s["side"] == "BUY":
+                    sym = s["symbol"]
+                    try:
+                        live_positions = await kr_market_data.get_positions()
+                        live_symbols = {
+                            p.symbol for p in live_positions if p.quantity > 0
+                        }
+                        if sym not in live_symbols:
+                            kr_position_tracker.untrack(sym)
+                            logger.info(
+                                "KR stale BUY %s untracked (no live position)", sym,
+                            )
+                    except Exception as e:
+                        logger.warning(
+                            "KR stale BUY cleanup failed for %s: %s — leaving "
+                            "tracker entry in place", sym, e,
+                        )
             if notification:
                 symbols = ", ".join(f"{s['side']} {s['symbol']}" for s in stale)
                 await notification.notify_system_event(
@@ -2276,7 +2605,7 @@ async def lifespan(app: FastAPI):
         try:
             from datetime import datetime, timedelta
             from sqlalchemy import text
-            cutoff = datetime.utcnow() - timedelta(days=30)
+            cutoff = now_utc_naive() - timedelta(days=30)
             async with session_factory() as session:
                 result = await session.execute(
                     text("DELETE FROM funnel_events WHERE ts < :cutoff"),
@@ -2370,13 +2699,23 @@ async def lifespan(app: FastAPI):
     # generated high trade volume (+16 orders in 6 days) with minimal PnL
     # (+23k KRW total, many round-trips). KR dual_momentum alone is more
     # efficient. Re-enable after ETF allocation cap is implemented.
-    # scheduler.add_task(
-    #     "kr_etf_evaluation",
-    #     task_kr_etf_evaluation,
-    #     interval_sec=900,
-    #     phases=[MarketPhase.REGULAR],
-    #     market="KR",
-    # )
+    # 2026-06-03: RE-ENABLED. KR strategy combo expanded (4 active
+    # strategies post-bnf-weight-0.20) + risk caps in kr_etf_universe.yaml
+    # are now binding. compare_kr_etf_engine_full.py KR 2y on
+    # post-bnf-weight-0.20 baseline:
+    #   V0_no_etf:   Ret +18.5% Sharpe +0.97 MDD -11.0% PF 1.34 Dep 68.9%
+    #   V1-V5 +etf:  Ret +25.1% Sharpe +1.53 MDD -10.7% PF 1.44 Dep 82.5% ← ✓ 4/4
+    #               +6.6pp Ret, +0.56 Sharpe, MDD actually better (-0.3pp,
+    #               defensive regime-based ETF rotation hedges downturns).
+    # All five cap variants (10/5 to 50/25) returned identical metrics →
+    # the cap is no longer binding; ETF engine sizes itself per regime.
+    scheduler.add_task(
+        "kr_etf_evaluation",
+        task_kr_etf_evaluation,
+        interval_sec=900,
+        phases=[MarketPhase.REGULAR],
+        market="KR",
+    )
 
     # ── Extended Hours Tasks ─────────────────────────────────────────
     # SL/TP monitoring during pre-market/after-hours (US + KR)
@@ -2635,7 +2974,8 @@ async def lifespan(app: FastAPI):
             except Exception as e:
                 logger.error("Failed to send startup failure notification: %s", e)
 
-    asyncio.create_task(_initial_data_fetch(), name="initial-data-fetch")
+    # RES-H7: tracked spawn for the startup background fetch.
+    _spawn_bg(_initial_data_fetch(), name="initial-data-fetch")
 
     # Auto-start scheduler (store task ref to detect crashes)
     _scheduler_task = asyncio.create_task(scheduler.start(), name="scheduler")
@@ -2662,13 +3002,56 @@ async def lifespan(app: FastAPI):
 
     yield
 
-    # Shutdown
+    # Shutdown.
+    #
+    # RES-H7 (2026-06-06): scheduler.stop() only flips `_running=False`;
+    # without explicitly waiting for the in-flight tick to finish, the
+    # adapter teardown a few lines below races against an active
+    # eval cycle. A KIS call mid-await would raise "Session is
+    # closed", a DB commit would hand back into a disposed pool, and
+    # an in-flight order could be left half-submitted (POST sent,
+    # response never persisted). Now we:
+    #   1. stop the scheduler (sets the flag),
+    #   2. await the scheduler task with a bounded timeout so a stuck
+    #      tick can't block shutdown forever,
+    #   3. drain tracked background tasks (funnel persists,
+    #      revalidations, validator spawns, initial-data-fetch),
+    #   4. close adapters / cache / engine.
     if scheduler.running:
         await scheduler.stop()
+    sched_task = getattr(app.state, "scheduler_task", None)
+    if sched_task and not sched_task.done():
+        try:
+            await asyncio.wait_for(sched_task, timeout=15)
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Scheduler tick did not finish within 15s — cancelling",
+            )
+            sched_task.cancel()
+            try:
+                await sched_task
+            except Exception:
+                pass
+    drained = await _drain_bg_tasks(timeout=10)
+    logger.info("Drained %d background tasks", drained)
     if kis_ws and kis_ws.is_connected:
         await kis_ws.close()
     await news_service.close()
     await naver_news_service.close()
+    # External-service aiohttp sessions also need closing — without
+    # this each systemd restart leaks a few sockets per service.
+    # bug_004 (2026-06-09): these services are never assigned to
+    # app.state (only event_calendar is), so the old getattr() lookups
+    # all returned None and the loop was a no-op. Reference the in-scope
+    # lifespan locals directly — they're still bound at the shutdown
+    # site (single lifespan coroutine). DARTInsiderService has no
+    # close(), so the hasattr gate filters it out harmlessly.
+    for svc in (earnings_svc, insider_svc, kr_insider_svc):
+        if svc is not None and hasattr(svc, "close"):
+            try:
+                await svc.close()
+            except Exception as e:
+                logger.debug("svc.close() failed: %s", e)
     await cache.close()
     await adapter.close()
     await kr_adapter.close()
@@ -2682,12 +3065,148 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# SEC-B1 (2026-06-06): CORS lockdown. Earlier config used
+# allow_origins=['*'] WITH allow_credentials=True, which makes
+# browsers reflect the requesting Origin and set Allow-Credentials:
+# true. Any random page the operator visited could then issue
+# credentialed GETs against /portfolio/summary, /positions, /trades,
+# etc. Now: explicit whitelist for the dashboards we ship, optional
+# extra origins via env, no wildcard with credentials.
+_DEFAULT_ALLOWED_ORIGINS = [
+    "http://localhost:3001",
+    "http://127.0.0.1:3001",
+    "https://localhost:8443",
+    "https://127.0.0.1:8443",
+]
+_extra_origins = [
+    o.strip()
+    for o in os.environ.get("ALLOWED_ORIGINS", "").split(",")
+    if o.strip()
+]
+_ALLOWED_ORIGINS = _DEFAULT_ALLOWED_ORIGINS + _extra_origins
+
+# bug_008 (2026-06-09): CORSMiddleware is registered AFTER
+# bearer_auth_middleware (further down) so that — under Starlette's
+# LIFO wrapping (last-added = outermost) — CORS becomes the OUTER
+# layer. Otherwise the auth middleware's short-circuit 401/403
+# JSONResponses never traverse CORS, arrive without
+# Access-Control-Allow-Origin, and browsers reject them as opaque
+# CORS errors instead of delivering the status to the frontend
+# (ApiErrorBanner). See the add_middleware call below the auth mw.
+
+
+# SEC-B1 (2026-06-06): Bearer auth lockdown — replaces the earlier
+# fail-open / GETs-exempt middleware.
+#
+# Key changes vs RES-B2 (2026-06-05):
+#   • Fail-CLOSED at startup when running live without a token.
+#     Previously `if not _AUTH_TOKEN: return await call_next(request)`
+#     silently disabled the entire gate the moment systemd forgot to
+#     pass AUTH_API_TOKEN, exposing /portfolio/positions, /trades,
+#     equity history, and (worse) POST /engine/start.
+#   • Drop the blanket GET exemption. GETs leak the live portfolio.
+#     We still skip /health, /docs, /openapi.json, /redoc so monitoring
+#     and the API explorer keep working.
+#   • Constant-time token compare via secrets.compare_digest — prevents
+#     length / first-byte-differ timing side channel.
+import secrets
+
+_AUTH_TOKEN = os.environ.get("AUTH_API_TOKEN", "").strip()
+_AUTH_EXEMPT_PATHS = {
+    "/health",
+    "/docs",
+    "/openapi.json",
+    "/redoc",
+}
+
+
+def _auth_required_for_live() -> bool:
+    """Live trading must have a token. Paper / dev keep the old
+    fall-through so local development isn't broken."""
+    try:
+        cfg = AppConfig()
+        return cfg.is_live
+    except Exception:
+        # Config unreadable — be conservative.
+        return True
+
+
+if _auth_required_for_live() and not _AUTH_TOKEN:
+    # Fail-closed startup: refuse to run in live mode without a token.
+    # Print rather than logger so the error is visible even if logging
+    # init failed.
+    print(
+        "[FATAL] AUTH_API_TOKEN is required in live mode (SEC-B1). "
+        "Set it in deploy/usstock-backend.service or env and restart.",
+        file=__import__("sys").stderr,
+    )
+    raise SystemExit(2)
+
+# 2026-06-10: inverse guard — AUTH token present but mode resolved to
+# paper means the env only PARTIALLY loaded (TRADING_MODE missing →
+# config default "paper" kicks in). Exactly this silent fallback wrote
+# the paper-default ₩500M into live snapshot history on 06-05. A
+# deliberate paper run unsets AUTH_API_TOKEN; an env hiccup doesn't.
+# Refuse to guess.
+if _AUTH_TOKEN:
+    try:
+        _cfg_probe = AppConfig()
+        if _cfg_probe.is_paper:
+            print(
+                "[FATAL] AUTH_API_TOKEN is set but TRADING_MODE resolved "
+                "to 'paper' — env likely only partially loaded (the 06-05 "
+                "₩500M snapshot poisoning boot). Set TRADING_MODE=live "
+                "explicitly, or unset AUTH_API_TOKEN for a real paper run.",
+                file=__import__("sys").stderr,
+            )
+            raise SystemExit(2)
+    except SystemExit:
+        raise
+    except Exception:
+        # Config unreadable here → the lifespan will surface it.
+        pass
+
+
+@app.middleware("http")
+async def bearer_auth_middleware(request, call_next):
+    if not _AUTH_TOKEN:
+        # Paper/dev mode — gate disabled. Hardened at startup
+        # above so live deployments cannot reach this branch.
+        return await call_next(request)
+    if request.url.path in _AUTH_EXEMPT_PATHS:
+        return await call_next(request)
+    # CORS preflight needs to pass through without auth.
+    if request.method == "OPTIONS":
+        return await call_next(request)
+
+    auth = request.headers.get("authorization", "")
+    if not auth.startswith("Bearer "):
+        from fastapi.responses import JSONResponse
+        return JSONResponse(
+            {"detail": "Missing Bearer token"}, status_code=401,
+        )
+    token = auth[len("Bearer "):].strip()
+    # SEC-B1: constant-time compare. `!=` is timing-leaky and the
+    # token here is operator-controlled, so the leak window is real.
+    if not secrets.compare_digest(token, _AUTH_TOKEN):
+        from fastapi.responses import JSONResponse
+        return JSONResponse(
+            {"detail": "Invalid token"}, status_code=403,
+        )
+    return await call_next(request)
+
+
+# bug_008 (2026-06-09): registered AFTER bearer_auth_middleware so CORS
+# is the OUTER layer (Starlette LIFO). This guarantees auth-failure
+# (401/403) responses carry Access-Control-Allow-Origin headers, so the
+# browser delivers the status to client.ts → ApiErrorBanner instead of
+# blocking it as an opaque CORS error.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_ALLOWED_ORIGINS,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type"],
 )
 
 

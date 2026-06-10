@@ -161,17 +161,52 @@ def apply_yaml_change(
 
     parent[leaf] = new_value
 
-    # Backup + atomic write
-    backup = p.with_suffix(p.suffix + ".bak")
-    shutil.copy2(p, backup)
+    # M18 (2026-06-07): timestamped backup + always-rotating .bak
+    # symlink. Was a single .bak file that overwrote on every accept,
+    # losing intermediate states when the operator chained mutations.
+    # Now: foo.yaml.bak.<utc-iso> per mutation + foo.yaml.bak symlink
+    # always points to the most recent so existing rollback tooling
+    # keeps working unchanged.
+    # M19 (2026-06-07): atomic write was already in place
+    # (temp file + os.replace); fsync the temp file before rename so a
+    # power-cut between rename and journal flush doesn't leave the new
+    # file with stale contents.
+    from datetime import datetime, timezone as _tz
+    stamp = datetime.now(_tz.utc).strftime("%Y%m%dT%H%M%SZ")
+    backup_stamped = p.with_suffix(p.suffix + f".bak.{stamp}")
+    shutil.copy2(p, backup_stamped)
+
+    backup_latest = p.with_suffix(p.suffix + ".bak")
+    try:
+        if backup_latest.exists() or backup_latest.is_symlink():
+            backup_latest.unlink()
+        # Try symlink first (cheap); fall back to copy on filesystems
+        # without symlink support (e.g. some FAT/NFS mounts).
+        try:
+            backup_latest.symlink_to(backup_stamped.name)
+        except (OSError, NotImplementedError):
+            shutil.copy2(backup_stamped, backup_latest)
+    except Exception as e:
+        # Don't fail the mutation just because the .bak pointer can't
+        # be updated — the timestamped copy is the source of truth.
+        logger.warning("backup pointer update failed (%s): %s", backup_latest, e)
+
     tmp = p.with_suffix(p.suffix + ".tmp")
-    tmp.write_text(
-        yaml.safe_dump(data, allow_unicode=True, sort_keys=False, default_flow_style=False),
-        encoding="utf-8",
+    serialized = yaml.safe_dump(
+        data, allow_unicode=True, sort_keys=False, default_flow_style=False,
     )
+    # Open + write + fsync + close so the rename promotes durable data
+    with open(tmp, "w", encoding="utf-8") as fh:
+        fh.write(serialized)
+        fh.flush()
+        try:
+            os.fsync(fh.fileno())
+        except OSError:
+            # fsync unsupported (some FS); rename still atomic-enough
+            pass
     os.replace(tmp, p)
     logger.info(
         "yaml mutated: %s : %r → %r (backup at %s)",
-        param_path, old_value, new_value, backup.name,
+        param_path, old_value, new_value, backup_stamped.name,
     )
     return old_value, new_value

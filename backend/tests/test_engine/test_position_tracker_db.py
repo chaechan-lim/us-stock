@@ -183,16 +183,40 @@ class TestSyncToDb:
         assert record.stop_loss == 0.12
 
     @pytest.mark.asyncio
-    async def test_sync_empty_clears_all(self, adapter, risk, order_mgr, db_factory):
-        """sync_to_db with empty tracked dict should clear all DB positions."""
+    async def test_sync_explicit_untrack_removes_row(self, adapter, risk, order_mgr, db_factory):
+        """STATE-B3 (2026-06-05): explicit untrack() is the safe way to
+        remove a position from the DB. Wiping `_tracked` and re-running
+        sync no longer mass-deletes — that turned out to be the
+        catastrophic restart-race vector. Callers must signal removal
+        explicitly through untrack().
+        """
         tracker = _make_tracker(adapter, risk, order_mgr)
         tracker.track("AAPL", 150.0, 10)
         await tracker.sync_to_db(db_factory)
         assert await _count_positions(db_factory, "US") == 1
 
-        tracker._tracked.clear()
+        tracker.untrack("AAPL")
         await tracker.sync_to_db(db_factory)
         assert await _count_positions(db_factory, "US") == 0
+
+    @pytest.mark.asyncio
+    async def test_sync_preserves_db_when_tracker_wholly_empty(
+        self, adapter, risk, order_mgr, db_factory,
+    ):
+        """STATE-B3 regression: tracker emptied without explicit
+        untrack() = "haven't restored yet" pattern. DB rows must be
+        preserved so a restart race doesn't lose state."""
+        tracker = _make_tracker(adapter, risk, order_mgr)
+        tracker.track("AAPL", 150.0, 10)
+        tracker.track("MSFT", 300.0, 5)
+        await tracker.sync_to_db(db_factory)
+        assert await _count_positions(db_factory, "US") == 2
+
+        # Simulate the restart-race: tracker forgets without untrack.
+        tracker._tracked.clear()
+        await tracker.sync_to_db(db_factory)
+        # Both rows must survive.
+        assert await _count_positions(db_factory, "US") == 2
 
     @pytest.mark.asyncio
     async def test_sync_returns_zero_without_session_factory(self, adapter, risk, order_mgr):
@@ -340,7 +364,8 @@ class TestDualMarketIsolation:
 
     @pytest.mark.asyncio
     async def test_sync_only_removes_own_market(self, adapter, risk, order_mgr, db_factory):
-        """sync_to_db for US should not remove KR positions."""
+        """sync_to_db for US must not remove KR positions when an
+        explicit untrack() drives the deletion."""
         us_tracker = _make_tracker(adapter, risk, order_mgr, market="US")
         kr_tracker = _make_tracker(adapter, risk, order_mgr, market="KR")
 
@@ -349,11 +374,11 @@ class TestDualMarketIsolation:
         await us_tracker.sync_to_db(db_factory)
         await kr_tracker.sync_to_db(db_factory)
 
-        # Clear US tracker and sync
-        us_tracker._tracked.clear()
+        # Explicit untrack on US side (post-STATE-B3 semantics).
+        us_tracker.untrack("AAPL")
         await us_tracker.sync_to_db(db_factory)
 
-        # KR should still be there
+        # KR market should be untouched.
         assert await _count_positions(db_factory, "US") == 0
         assert await _count_positions(db_factory, "KR") == 1
 
@@ -1711,6 +1736,661 @@ class TestRestoreFromDb:
         restored = await tracker2.restore_from_db(db_factory)
         assert len(restored) == 1
         assert restored[0]["source"] == "db"
+
+    @pytest.mark.asyncio
+    async def test_lookup_strict_mode_returns_none_for_paper_only(
+        self, adapter, risk, order_mgr, db_factory
+    ):
+        """Strict (default) mode: paper BUY does NOT satisfy.
+        Used by _upsert_position_record so PositionRecord.opened_at
+        only reflects real live trades."""
+        from datetime import datetime, timedelta
+
+        from core.models import Order
+
+        async with db_factory() as session:
+            session.add(
+                Order(
+                    account_id="ACC001",
+                    symbol="PAPER1", side="BUY",
+                    order_type="market", quantity=10, price=100.0,
+                    status="filled", strategy_name="trend",
+                    is_paper=True,
+                    created_at=datetime.utcnow() - timedelta(days=2),
+                )
+            )
+            await session.commit()
+
+        tracker = _make_tracker(adapter, risk, order_mgr)
+        async with db_factory() as session:
+            ts = await tracker._lookup_first_buy_time(session, "PAPER1")
+        assert ts is None  # strict — paper rejected
+
+    @pytest.mark.asyncio
+    async def test_lookup_lenient_falls_back_to_paper(
+        self, adapter, risk, order_mgr, db_factory
+    ):
+        """Lenient mode (allow_fallback=True): paper BUY is acceptable
+        rather than letting entry_unix reset to time.time()."""
+        from datetime import datetime, timedelta
+
+        from core.models import Order
+
+        paper_time = datetime.utcnow() - timedelta(days=2)
+        async with db_factory() as session:
+            session.add(
+                Order(
+                    account_id="ACC001",
+                    symbol="PAPER1", side="BUY",
+                    order_type="market", quantity=10, price=100.0,
+                    status="filled", strategy_name="trend",
+                    is_paper=True,
+                    created_at=paper_time,
+                )
+            )
+            await session.commit()
+
+        tracker = _make_tracker(adapter, risk, order_mgr)
+        async with db_factory() as session:
+            ts = await tracker._lookup_first_buy_time(
+                session, "PAPER1", allow_fallback=True,
+            )
+        assert ts is not None
+        assert abs((ts - paper_time).total_seconds()) < 1.0
+
+    @pytest.mark.asyncio
+    async def test_lookup_lenient_falls_back_to_sell_proxy(
+        self, adapter, risk, order_mgr, db_factory
+    ):
+        """When neither live nor paper BUY exists (legacy data) but a
+        SELL is present, return SELL.created_at − 1d as a proxy."""
+        from datetime import datetime, timedelta
+
+        from core.models import Order
+
+        sell_time = datetime.utcnow() - timedelta(days=3)
+        async with db_factory() as session:
+            session.add(
+                Order(
+                    account_id="ACC001",
+                    symbol="LEGACY", side="SELL",
+                    order_type="market", quantity=10, price=100.0,
+                    status="filled", buy_strategy="legacy",
+                    is_paper=False,
+                    created_at=sell_time,
+                )
+            )
+            await session.commit()
+
+        tracker = _make_tracker(adapter, risk, order_mgr)
+        async with db_factory() as session:
+            ts = await tracker._lookup_first_buy_time(
+                session, "LEGACY", allow_fallback=True,
+            )
+        assert ts is not None
+        expected = sell_time - timedelta(days=1)
+        assert abs((ts - expected).total_seconds()) < 1.0
+
+    @pytest.mark.asyncio
+    async def test_lookup_lenient_returns_none_with_no_orders(
+        self, adapter, risk, order_mgr, db_factory
+    ):
+        """No orders at all → None even in lenient mode. Caller falls
+        through to default time.time() (which IS right — brand-new
+        position with no order trail)."""
+        tracker = _make_tracker(adapter, risk, order_mgr)
+        async with db_factory() as session:
+            ts = await tracker._lookup_first_buy_time(
+                session, "NEVER", allow_fallback=True,
+            )
+        assert ts is None
+
+    @pytest.mark.asyncio
+    async def test_lookup_prefers_live_over_paper_in_lenient(
+        self, adapter, risk, order_mgr, db_factory
+    ):
+        """Even in lenient mode, live BUY beats paper BUY when both
+        exist (paper is only the fallback)."""
+        from datetime import datetime, timedelta
+
+        from core.models import Order
+
+        live_time = datetime.utcnow() - timedelta(days=1)
+        paper_time = datetime.utcnow() - timedelta(days=10)  # older
+        async with db_factory() as session:
+            for created, paper in [(paper_time, True), (live_time, False)]:
+                session.add(
+                    Order(
+                        account_id="ACC001",
+                        symbol="DUAL", side="BUY",
+                        order_type="market", quantity=10, price=100.0,
+                        status="filled", strategy_name="trend",
+                        is_paper=paper,
+                        created_at=created,
+                    )
+                )
+            await session.commit()
+
+        tracker = _make_tracker(adapter, risk, order_mgr)
+        async with db_factory() as session:
+            ts = await tracker._lookup_first_buy_time(
+                session, "DUAL", allow_fallback=True,
+            )
+        assert abs((ts - live_time).total_seconds()) < 1.0
+
+    @pytest.mark.asyncio
+    async def test_lookup_prefer_recent_anchors_to_current_holding(
+        self, adapter, risk, order_mgr, db_factory
+    ):
+        """2026-06-09: a symbol round-tripped weeks ago (BUY → SELL →
+        re-BUY today). prefer_recent must anchor to the CURRENT holding's
+        first BUY (the re-buy after the last SELL), not the ancient
+        earliest-ever BUY — otherwise min_hold is instantly satisfied and
+        the stale-time cleanup exit dumps a position bought minutes ago.
+        A continuously-held add-on (no SELL) still anchors to earliest."""
+        from datetime import datetime, timedelta
+
+        from core.models import Order
+
+        old_buy = datetime.utcnow() - timedelta(days=20)
+        old_sell = datetime.utcnow() - timedelta(days=18)
+        recent_buy = datetime.utcnow() - timedelta(minutes=9)
+        async with db_factory() as session:
+            session.add(Order(
+                account_id="ACC001", symbol="CHURN", side="BUY",
+                order_type="market", quantity=10, price=100.0,
+                status="filled", strategy_name="supertrend",
+                is_paper=False, created_at=old_buy,
+            ))
+            session.add(Order(
+                account_id="ACC001", symbol="CHURN", side="SELL",
+                order_type="market", quantity=10, price=110.0,
+                status="filled", strategy_name="supertrend",
+                is_paper=False, created_at=old_sell,
+            ))
+            session.add(Order(
+                account_id="ACC001", symbol="CHURN", side="BUY",
+                order_type="market", quantity=10, price=100.0,
+                status="filled", strategy_name="supertrend",
+                is_paper=False, created_at=recent_buy,
+            ))
+            await session.commit()
+
+        tracker = _make_tracker(adapter, risk, order_mgr)
+        async with db_factory() as session:
+            # Default (earliest-ever) → old buy
+            ts_old = await tracker._lookup_first_buy_time(
+                session, "CHURN", allow_fallback=True,
+            )
+            # prefer_recent → the re-buy after the last SELL (current holding)
+            ts_recent = await tracker._lookup_first_buy_time(
+                session, "CHURN", allow_fallback=True, prefer_recent=True,
+            )
+        assert abs((ts_old - old_buy).total_seconds()) < 1.0
+        assert abs((ts_recent - recent_buy).total_seconds()) < 1.0
+
+    @pytest.mark.asyncio
+    async def test_lookup_prefer_recent_addon_anchors_to_earliest(
+        self, adapter, risk, order_mgr, db_factory
+    ):
+        """Continuously-held add-on (two BUYs, no SELL between) must
+        anchor to the EARLIEST BUY even with prefer_recent — the holding
+        genuinely started at the first buy."""
+        from datetime import datetime, timedelta
+
+        from core.models import Order
+
+        first_buy = datetime.utcnow() - timedelta(days=10)
+        addon_buy = datetime.utcnow() - timedelta(days=2)
+        async with db_factory() as session:
+            for created in (first_buy, addon_buy):
+                session.add(Order(
+                    account_id="ACC001", symbol="ADDON", side="BUY",
+                    order_type="market", quantity=10, price=100.0,
+                    status="filled", strategy_name="supertrend",
+                    is_paper=False, created_at=created,
+                ))
+            await session.commit()
+
+        tracker = _make_tracker(adapter, risk, order_mgr)
+        async with db_factory() as session:
+            ts = await tracker._lookup_first_buy_time(
+                session, "ADDON", allow_fallback=True, prefer_recent=True,
+            )
+        assert abs((ts - first_buy).total_seconds()) < 1.0
+
+    @pytest.mark.asyncio
+    async def test_add_on_blends_cost_basis(
+        self, risk, order_mgr, db_factory
+    ):
+        """FIN-B1 (2026-06-05): KR sizing-up add-on BUYs were calling
+        track() and wiping entry_price/quantity/highest_price. add_on()
+        must blend the cost basis correctly so PnL math and SL anchor
+        survive sizing-up events.
+        """
+        import time as _t
+
+        adapter = AsyncMock()
+        tracker = _make_tracker(adapter, risk, order_mgr)
+
+        # Original entry — 10 shares at $40
+        tracker.track("KO", entry_price=40.0, quantity=10, strategy="trend")
+        orig_unix = tracker._tracked["KO"].entry_unix
+        tracker._tracked["KO"].highest_price = 55.0  # peak before add-on
+        tracker._tracked["KO"].partial_profit_taken = True  # earlier scale-out
+
+        # Sizing-up: +5 shares at $52
+        tracker.add_on("KO", add_price=52.0, add_quantity=5)
+
+        pos = tracker._tracked["KO"]
+        # Blended entry: (10*40 + 5*52) / 15 = 44.0
+        assert abs(pos.entry_price - 44.0) < 1e-6
+        assert pos.quantity == 15
+        # Highest price: max(55, 52) = 55 (preserved)
+        assert pos.highest_price == 55.0
+        # Original cooldown clock preserved
+        assert pos.entry_unix == orig_unix
+        # Original partial-profit history preserved
+        assert pos.partial_profit_taken is True
+
+    @pytest.mark.asyncio
+    async def test_add_on_updates_highest_when_addon_is_higher(
+        self, risk, order_mgr, db_factory
+    ):
+        adapter = AsyncMock()
+        tracker = _make_tracker(adapter, risk, order_mgr)
+        tracker.track("MS", entry_price=100.0, quantity=10)
+        # highest_price defaults to entry_price = 100
+        tracker.add_on("MS", add_price=120.0, add_quantity=5)
+        assert tracker._tracked["MS"].highest_price == 120.0
+
+    @pytest.mark.asyncio
+    async def test_add_on_untracked_falls_back_to_track(
+        self, risk, order_mgr, db_factory
+    ):
+        """Defensive: caller bug shouldn't lose the position."""
+        adapter = AsyncMock()
+        tracker = _make_tracker(adapter, risk, order_mgr)
+        tracker.add_on("NEW", add_price=100.0, add_quantity=10)
+        assert "NEW" in tracker._tracked
+        assert tracker._tracked["NEW"].entry_price == 100.0
+        assert tracker._tracked["NEW"].quantity == 10
+
+    @pytest.mark.asyncio
+    async def test_add_on_rejects_invalid_quantity(
+        self, risk, order_mgr, db_factory
+    ):
+        adapter = AsyncMock()
+        tracker = _make_tracker(adapter, risk, order_mgr)
+        tracker.track("X", entry_price=50.0, quantity=10)
+        tracker.add_on("X", add_price=60.0, add_quantity=0)
+        # Quantity unchanged
+        assert tracker._tracked["X"].quantity == 10
+        assert tracker._tracked["X"].entry_price == 50.0
+
+    @pytest.mark.asyncio
+    async def test_sync_to_db_does_not_wipe_when_tracker_empty(
+        self, adapter, risk, order_mgr, db_factory
+    ):
+        """STATE-B3 (2026-06-05): a thin/empty tracker (mid-recovery,
+        race after restart) used to mass-delete every PositionRecord
+        row for the account+market. Now sync_to_db detects the
+        "tracker hasn't loaded yet" pattern and skips the prune."""
+        from core.models import PositionRecord
+
+        # Seed DB with real rows.
+        async with db_factory() as session:
+            for sym in ("AAPL", "MSFT"):
+                session.add(
+                    PositionRecord(
+                        market="US",
+                        symbol=sym,
+                        exchange="NASD",
+                        quantity=10,
+                        avg_price=100.0,
+                        strategy_name="trend",
+                    )
+                )
+            await session.commit()
+
+        # Fresh tracker with empty _tracked simulating "haven't restored yet"
+        tracker = _make_tracker(adapter, risk, order_mgr)
+        assert not tracker._tracked
+
+        synced = await tracker.sync_to_db(db_factory)
+        assert synced == 0  # nothing to sync
+
+        async with db_factory() as session:
+            rows = (await session.execute(select(PositionRecord))).scalars().all()
+        # CRITICAL: real rows preserved.
+        assert {r.symbol for r in rows} == {"AAPL", "MSFT"}
+
+    @pytest.mark.asyncio
+    async def test_ensure_tracked_fills_individual_gap(
+        self, risk, order_mgr, db_factory
+    ):
+        """ensure_tracked must register an exchange position missing
+        from _tracked, with entry_unix pulled from orders. This is the
+        gap-fill that prevents fail-closed _check_min_hold from
+        permanently blocking cleanup SELLs on a single dropped symbol.
+
+        Key difference from _auto_recover_untracked: works even when
+        OTHER symbols are already tracked (the recover path early-
+        returns when _tracked is non-empty).
+        """
+        import time as _t
+        from datetime import datetime, timedelta, timezone
+
+        from core.models import Order
+        from exchange.base import Position
+
+        true_buy = datetime.utcnow() - timedelta(days=4)
+        async with db_factory() as session:
+            session.add(
+                Order(
+                    account_id="ACC001",
+                    symbol="GAP", side="BUY",
+                    order_type="market", quantity=5, price=100.0,
+                    status="filled", strategy_name="trend",
+                    is_paper=False,
+                    created_at=true_buy,
+                )
+            )
+            await session.commit()
+
+        adapter = AsyncMock()
+        tracker = _make_tracker(adapter, risk, order_mgr)
+        # Seed an UNRELATED tracked position so _auto_recover_untracked
+        # wouldn't fire (it only fires when _tracked is empty).
+        tracker.track("OTHER", 50.0, 5, strategy="manual")
+        tracker._session_factory = db_factory
+
+        positions = [
+            Position(symbol="OTHER", exchange="NASD", quantity=5,
+                     avg_price=50.0, current_price=50.0),
+            Position(symbol="GAP", exchange="NASD", quantity=5,
+                     avg_price=100.0, current_price=110.0),
+        ]
+        recovered = await tracker.ensure_tracked(positions)
+        assert recovered == 1
+        assert "GAP" in tracker._tracked
+        # entry_unix matches the 4-day-old BUY, NOT time.time() now.
+        gap = tracker._tracked["GAP"]
+        expected = true_buy.replace(tzinfo=timezone.utc).timestamp()
+        assert abs(gap.entry_unix - expected) < 1.0
+        elapsed = _t.time() - gap.entry_unix
+        assert 3.9 * 86400 < elapsed < 4.1 * 86400
+
+    @pytest.mark.asyncio
+    async def test_ensure_tracked_is_idempotent(
+        self, risk, order_mgr, db_factory
+    ):
+        """ensure_tracked must not re-track already-tracked symbols
+        (would reset entry_unix and re-arm the 72h clock)."""
+        import time as _t
+
+        from exchange.base import Position
+
+        adapter = AsyncMock()
+        tracker = _make_tracker(adapter, risk, order_mgr)
+        tracker._session_factory = db_factory
+
+        # Manually set entry_unix to 10 days ago.
+        tracker.track("HELD", 100.0, 5, strategy="trend")
+        original_unix = _t.time() - 10 * 86400
+        tracker._tracked["HELD"].entry_unix = original_unix
+
+        positions = [
+            Position(symbol="HELD", exchange="NASD", quantity=5,
+                     avg_price=100.0, current_price=110.0),
+        ]
+        recovered = await tracker.ensure_tracked(positions)
+        assert recovered == 0
+        # entry_unix preserved — NOT overwritten with time.time().
+        assert tracker._tracked["HELD"].entry_unix == original_unix
+
+    @pytest.mark.asyncio
+    async def test_ensure_tracked_skips_zero_quantity(
+        self, risk, order_mgr, db_factory
+    ):
+        """Defensive: positions with qty 0 (closed) must not be re-tracked."""
+        from exchange.base import Position
+
+        adapter = AsyncMock()
+        tracker = _make_tracker(adapter, risk, order_mgr)
+
+        positions = [
+            Position(symbol="ZERO", exchange="NASD", quantity=0,
+                     avg_price=100.0, current_price=110.0),
+        ]
+        recovered = await tracker.ensure_tracked(positions)
+        assert recovered == 0
+        assert "ZERO" not in tracker._tracked
+
+    @pytest.mark.asyncio
+    async def test_auto_recover_survives_db_error(
+        self, risk, order_mgr, db_factory
+    ):
+        """If the entry_unix DB lookup blows up, _auto_recover_untracked
+        must still register the position (with default entry_unix) and
+        log a warning. The position itself is more important than the
+        exact hold-time accuracy."""
+        from exchange.base import Position
+
+        adapter = AsyncMock()
+        adapter.fetch_positions = AsyncMock(return_value=[
+            Position(symbol="ERR", exchange="NASD", quantity=5,
+                     avg_price=200.0, current_price=200.0),
+        ])
+        market_data = AsyncMock()
+        market_data.get_positions = AsyncMock(
+            return_value=adapter.fetch_positions.return_value,
+        )
+
+        # session_factory that always raises when entered
+        def bad_factory():
+            class _Ctx:
+                async def __aenter__(self_):
+                    raise RuntimeError("DB unreachable")
+                async def __aexit__(self_, *a):
+                    return False
+            return _Ctx()
+
+        tracker = PositionTracker(
+            adapter=adapter, risk_manager=risk, order_manager=order_mgr,
+            market_data=market_data, session_factory=bad_factory,
+        )
+        tracker._last_auto_recover = -1e9
+        await tracker._auto_recover_untracked()
+        # Position still tracked despite DB error.
+        assert "ERR" in tracker._tracked
+
+    @pytest.mark.asyncio
+    async def test_restore_from_exchange_records_first_buy_without_strategy(
+        self, adapter, risk, order_mgr, db_factory
+    ):
+        """The 'no strategy resolution but have first_buy_time' fallback
+        branch: a symbol with only NULL-strategy BUY orders should
+        still get a real entry_unix rather than time.time()."""
+        from datetime import datetime, timedelta, timezone
+        import time as _t
+
+        from core.models import Order
+        from exchange.base import Position
+
+        old_time = datetime.utcnow() - timedelta(days=3)
+        async with db_factory() as session:
+            session.add(
+                Order(
+                    account_id="ACC001",
+                    symbol="NOSTRAT", side="BUY",
+                    order_type="market", quantity=10, price=100.0,
+                    status="filled",
+                    strategy_name=None,  # legacy: NULL strategy
+                    is_paper=False,
+                    created_at=old_time,
+                )
+            )
+            await session.commit()
+
+        adapter.fetch_positions = AsyncMock(return_value=[
+            Position(symbol="NOSTRAT", exchange="NASD", quantity=10,
+                     avg_price=100.0, current_price=105.0),
+        ])
+        tracker = _make_tracker(adapter, risk, order_mgr)
+        await tracker.restore_from_exchange(db_factory)
+        assert "NOSTRAT" in tracker._tracked
+        tracked = tracker._tracked["NOSTRAT"]
+        expected = old_time.replace(tzinfo=timezone.utc).timestamp()
+        assert abs(tracked.entry_unix - expected) < 1.0
+        elapsed = _t.time() - tracked.entry_unix
+        assert 2.9 * 86400 < elapsed < 3.1 * 86400
+
+    @pytest.mark.asyncio
+    async def test_restore_from_exchange_populates_entry_unix_from_orders(
+        self, adapter, risk, order_mgr, db_factory
+    ):
+        """restore_from_exchange must pull first BUY time from orders so
+        the min_hold gate counts from the true entry, not restart time.
+
+        2026-06-05 regression: prior fix only patched restore_from_db.
+        restore_from_exchange ran first at startup, so positions
+        re-entered the tracker with entry_unix=time.time() (the restart
+        moment) and the 72h clock was effectively re-armed every
+        restart.
+        """
+        import time as _t
+        from datetime import datetime, timedelta, timezone
+
+        from core.models import Order
+        from exchange.base import Position
+
+        true_buy_time = datetime.utcnow() - timedelta(days=4)
+        async with db_factory() as session:
+            session.add(
+                Order(
+                    account_id="ACC001",
+                    symbol="AAPL", side="BUY",
+                    order_type="market", quantity=10, price=150.0,
+                    status="filled", strategy_name="trend",
+                    is_paper=False,
+                    created_at=true_buy_time,
+                )
+            )
+            await session.commit()
+
+        adapter.fetch_positions = AsyncMock(return_value=[
+            Position(symbol="AAPL", exchange="NASD", quantity=10,
+                     avg_price=150.0, current_price=155.0),
+        ])
+        tracker = _make_tracker(adapter, risk, order_mgr)
+        restored = await tracker.restore_from_exchange(db_factory)
+        assert len(restored) == 1
+
+        tracked = tracker._tracked["AAPL"]
+        expected = true_buy_time.replace(tzinfo=timezone.utc).timestamp()
+        assert abs(tracked.entry_unix - expected) < 1.0
+        # Sanity: tracked should look ~4 days old, not 0 seconds.
+        elapsed = _t.time() - tracked.entry_unix
+        assert 3.9 * 86400 < elapsed < 4.1 * 86400
+
+    @pytest.mark.asyncio
+    async def test_auto_recover_populates_entry_unix_from_orders(
+        self, risk, order_mgr, db_factory
+    ):
+        """_auto_recover_untracked must look up orders for entry_unix.
+
+        2026-06-05 regression: every 10 min auto-recover called track()
+        with no entry_unix → time.time() default → the 72h min_hold
+        clock effectively reset on every cycle for held positions.
+        """
+        import time as _t
+        from datetime import datetime, timedelta, timezone
+
+        from core.models import Order
+        from exchange.base import Position
+
+        true_buy_time = datetime.utcnow() - timedelta(days=5)
+        async with db_factory() as session:
+            session.add(
+                Order(
+                    account_id="ACC001",
+                    symbol="MSFT", side="BUY",
+                    order_type="market", quantity=5, price=300.0,
+                    status="filled", strategy_name="trend",
+                    is_paper=False,
+                    created_at=true_buy_time,
+                )
+            )
+            await session.commit()
+
+        adapter = AsyncMock()
+        adapter.fetch_positions = AsyncMock(return_value=[
+            Position(symbol="MSFT", exchange="NASD", quantity=5,
+                     avg_price=300.0, current_price=310.0),
+        ])
+        # market_data is what auto_recover calls first (when set);
+        # adapter is the fallback. Test the market_data path.
+        market_data = AsyncMock()
+        market_data.get_positions = AsyncMock(return_value=adapter.fetch_positions.return_value)
+
+        tracker = PositionTracker(
+            adapter=adapter, risk_manager=risk, order_manager=order_mgr,
+            market_data=market_data, session_factory=db_factory,
+        )
+        # Force auto-recover by setting last-recover to far in the past
+        tracker._last_auto_recover = -1e9
+        await tracker._auto_recover_untracked()
+
+        assert "MSFT" in tracker._tracked
+        tracked = tracker._tracked["MSFT"]
+        expected = true_buy_time.replace(tzinfo=timezone.utc).timestamp()
+        assert abs(tracked.entry_unix - expected) < 1.0
+        elapsed = _t.time() - tracked.entry_unix
+        assert 4.9 * 86400 < elapsed < 5.1 * 86400
+
+    @pytest.mark.asyncio
+    async def test_restore_from_db_populates_entry_unix(
+        self, adapter, risk, order_mgr, db_factory
+    ):
+        """entry_unix must be restored from PositionRecord.opened_at.
+
+        2026-06-04 regression: monotonic tracked_at resets on every process
+        restart, which made the min_hold gate think every position was
+        freshly opened. The wall-clock entry_unix derived from opened_at
+        is the source of truth that survives restart.
+        """
+        import time as _t
+        from datetime import datetime, timedelta, timezone
+
+        from core.models import PositionRecord
+
+        opened = datetime.utcnow() - timedelta(days=5)
+        async with db_factory() as session:
+            session.add(
+                PositionRecord(
+                    market="US",
+                    symbol="OLD",
+                    exchange="NASD",
+                    quantity=10,
+                    avg_price=150.0,
+                    strategy_name="trend",
+                    opened_at=opened,
+                )
+            )
+            await session.commit()
+
+        tracker = _make_tracker(adapter, risk, order_mgr)
+        restored = await tracker.restore_from_db(db_factory)
+        assert len(restored) == 1
+
+        tracked = tracker._tracked["OLD"]
+        expected = opened.replace(tzinfo=timezone.utc).timestamp()
+        # Allow small float jitter from timestamp() round-trip.
+        assert abs(tracked.entry_unix - expected) < 1.0
+        # And the wall-clock elapsed since entry_unix should be ~5 days.
+        elapsed = _t.time() - tracked.entry_unix
+        assert 4.9 * 86400 < elapsed < 5.1 * 86400
 
 
 # ── Auto-Recovery in check_all (STOCK-7) ────────────────────────────

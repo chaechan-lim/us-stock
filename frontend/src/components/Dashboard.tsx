@@ -174,9 +174,13 @@ export default function Dashboard() {
                   <div className="flex items-center justify-between mt-1 text-[11px] text-gray-400">
                     <span>{p.quantity}주 · avg {formatCurrency(p.avg_price, cur)}</span>
                     <span>
-                      SL <span className="text-rose-400">-{((ext.stop_loss_pct ?? 0.08) * 100).toFixed(0)}%</span>
+                      SL {ext.stop_loss_pct != null
+                        ? <span className="text-rose-400">-{(ext.stop_loss_pct * 100).toFixed(0)}%</span>
+                        : <span className="text-gray-300">—</span>}
                       {' / '}
-                      TP <span className="text-emerald-400">+{((ext.take_profit_pct ?? 0.20) * 100).toFixed(0)}%</span>
+                      TP {ext.take_profit_pct != null
+                        ? <span className="text-emerald-400">+{(ext.take_profit_pct * 100).toFixed(0)}%</span>
+                        : <span className="text-gray-300">—</span>}
                     </span>
                   </div>
                 </div>
@@ -222,9 +226,13 @@ export default function Dashboard() {
                       <td className="text-right"><PnLText value={pnl} currency={cur} /></td>
                       <td className="text-right"><PctBadge value={pnlPct} /></td>
                       <td className="text-right px-4 text-xs text-gray-400">
-                        <span className="text-rose-400">-{((ext.stop_loss_pct ?? 0.08) * 100).toFixed(0)}%</span>
+                        {ext.stop_loss_pct != null
+                          ? <span className="text-rose-400">-{(ext.stop_loss_pct * 100).toFixed(0)}%</span>
+                          : <span className="text-gray-300">—</span>}
                         {' / '}
-                        <span className="text-emerald-400">+{((ext.take_profit_pct ?? 0.20) * 100).toFixed(0)}%</span>
+                        {ext.take_profit_pct != null
+                          ? <span className="text-emerald-400">+{(ext.take_profit_pct * 100).toFixed(0)}%</span>
+                          : <span className="text-gray-300">—</span>}
                         {ext.trailing_active && <span className="ml-1 text-amber-500 font-medium">T</span>}
                       </td>
                     </tr>

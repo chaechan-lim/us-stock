@@ -17,6 +17,8 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import DeclarativeBase
 
+from core.timeutil import now_utc_naive
+
 
 class Base(DeclarativeBase):
     pass
@@ -46,7 +48,7 @@ class Order(Base):
     session = Column(
         String(20), nullable=True, default="regular"
     )  # regular/pre_market/after_hours/extended_nxt
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=now_utc_naive)
     filled_at = Column(DateTime)
 
     __table_args__ = (
@@ -56,6 +58,13 @@ class Order(Base):
         Index("idx_orders_is_paper", "is_paper"),
         Index("idx_orders_kis_order_id", "kis_order_id"),
         Index("idx_orders_account_market_symbol", "account_id", "market", "symbol"),
+        # DB-M6 (2026-06-07): composite index for has_pending_order /
+        # restore_trade_log lookup path (account_id + symbol + side +
+        # status + created_at). Was a full table scan on hot path.
+        Index(
+            "idx_orders_account_symbol_side_status_created",
+            "account_id", "symbol", "side", "status", "created_at",
+        ),
     )
 
 
@@ -79,8 +88,8 @@ class PositionRecord(Base):
     highest_price = Column(Float)
     # STOCK-58: Prevent duplicate partial sells on restart
     partial_profit_taken = Column(Boolean, nullable=False, default=False)
-    opened_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    opened_at = Column(DateTime, default=now_utc_naive)
+    updated_at = Column(DateTime, default=now_utc_naive, onupdate=now_utc_naive)
 
     __table_args__ = (
         UniqueConstraint(
@@ -115,7 +124,7 @@ class PortfolioSnapshot(Base):
     # Only populated by the KR portfolio_manager (the KR adapter calls
     # CTRP6548R). NULL on legacy rows + US snapshots.
     integrated_total_krw = Column(Float)
-    recorded_at = Column(DateTime, default=datetime.utcnow)
+    recorded_at = Column(DateTime, default=now_utc_naive)
 
     __table_args__ = (
         Index("idx_snapshots_recorded", "recorded_at"),
@@ -134,7 +143,7 @@ class StrategyLog(Base):
     confidence = Column(Float, nullable=False)
     indicators = Column(JSONB)
     market_state = Column(String(20))
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=now_utc_naive)
 
     __table_args__ = (
         Index("idx_strategy_logs_created", "created_at"),
@@ -151,7 +160,7 @@ class ScannerResult(Base):
     exchange = Column(String(10))
     score = Column(Float)
     details = Column(JSONB)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=now_utc_naive)
 
     __table_args__ = (Index("idx_scanner_created", "created_at"),)
 
@@ -167,7 +176,7 @@ class SectorAnalysis(Base):
     return_1m = Column(Float)
     return_3m = Column(Float)
     trend = Column(String(10))
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=now_utc_naive)
 
 
 class AgentLog(Base):
@@ -177,7 +186,7 @@ class AgentLog(Base):
     agent_type = Column(String(30), nullable=False)
     content = Column(Text, nullable=False)
     metadata_ = Column("metadata", JSONB)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=now_utc_naive)
 
 
 class AgentMemory(Base):
@@ -192,7 +201,7 @@ class AgentMemory(Base):
     content = Column(Text, nullable=False)  # insight text
     token_count = Column(Integer, nullable=False, default=0)
     importance = Column(Integer, nullable=False, default=5)  # 1-10 priority
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=now_utc_naive)
     expires_at = Column(DateTime, nullable=False)  # auto-cleanup
 
     __table_args__ = (
@@ -209,7 +218,7 @@ class Event(Base):
     severity = Column(String(10), nullable=False)
     message = Column(Text, nullable=False)
     details = Column(JSONB)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=now_utc_naive)
 
 
 class BacktestResult(Base):
@@ -221,7 +230,7 @@ class BacktestResult(Base):
     metrics = Column(JSONB, nullable=False)
     trades = Column(JSONB)
     equity_curve = Column(JSONB)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=now_utc_naive)
 
 
 class Watchlist(Base):
@@ -237,8 +246,8 @@ class Watchlist(Base):
     source = Column(String(20))
     score = Column(Float)
     is_active = Column(Boolean, default=True)
-    added_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    added_at = Column(DateTime, default=now_utc_naive)
+    updated_at = Column(DateTime, default=now_utc_naive, onupdate=now_utc_naive)
 
     __table_args__ = (
         UniqueConstraint("market", "symbol", name="uq_watchlist_market_symbol"),
@@ -253,7 +262,7 @@ class AgentRecommendation(Base):
     __tablename__ = "agent_recommendations"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=now_utc_naive)
     agent_type = Column(String(50), nullable=False)   # trade_review, ...
     # Yaml dotted path, e.g. "markets.KR.risk.max_positions"
     param_path = Column(String(200), nullable=False)
@@ -289,7 +298,7 @@ class FunnelEvent(Base):
     __tablename__ = "funnel_events"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    ts = Column(DateTime, default=datetime.utcnow, nullable=False)
+    ts = Column(DateTime, default=now_utc_naive, nullable=False)
     market = Column(String(2), nullable=False)         # US | KR
     symbol = Column(String(20), nullable=False)
     strategy_name = Column(String(50))
@@ -302,4 +311,11 @@ class FunnelEvent(Base):
         Index("idx_funnel_ts", "ts"),
         Index("idx_funnel_market_ts", "market", "ts"),
         Index("idx_funnel_decision_reason", "decision", "reject_reason"),
+        # DB-M6 (2026-06-07): composite index for counterfactual-replay
+        # WHERE market=? AND decision='rejected' AND reject_reason=?
+        # ORDER BY ts DESC scan — was a partial scan on (market,ts).
+        Index(
+            "idx_funnel_market_decision_reason_ts",
+            "market", "decision", "reject_reason", "ts",
+        ),
     )

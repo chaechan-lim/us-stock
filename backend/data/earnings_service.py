@@ -125,8 +125,19 @@ class EarningsCalendarService:
         )
 
     def get_upcoming(self, symbol: str, days_ahead: int = 3) -> list[EarningsEvent]:
-        """Get earnings within N days for a symbol."""
-        today = date.today()
+        """Get earnings within N days for a symbol.
+
+        DT-H10 (2026-06-06): cached earnings dates are ET-anchored
+        (Finnhub returns the symbol's local exchange date). Server is
+        Asia/Seoul; `date.today()` rolls at 00:00 KST = 10:00 ET, so
+        on the KST-morning of a US earnings date the local server
+        already flipped to the day-after while the actual event is
+        ~9h away. Buy-block lifted prematurely. Now we anchor on ET.
+        """
+        from datetime import datetime as _dt
+        from zoneinfo import ZoneInfo
+
+        today = _dt.now(ZoneInfo("America/New_York")).date()
         cutoff = (today + timedelta(days=days_ahead)).isoformat()
         return [
             e for e in self._cache.get(symbol, [])

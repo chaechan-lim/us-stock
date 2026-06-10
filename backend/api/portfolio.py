@@ -6,6 +6,7 @@ from datetime import date, datetime, timedelta
 from typing import Optional
 from zoneinfo import ZoneInfo
 
+from core.timeutil import now_utc_naive
 from fastapi import APIRouter, Depends, Request
 from sqlalchemy import func, select
 
@@ -93,6 +94,11 @@ async def portfolio_summary(
     until then account_id is accepted for validation only — the returned data
     reflects all accounts regardless of which account_id is provided.
     """
+    # HIGH-13 (2026-06-07): account_id was silently ignored — frontend
+    # received an all-accounts view but had no way to know its filter
+    # was a no-op. Surface this on the response so callers can warn
+    # the user instead of pretending the number is filtered.
+    account_filter_applied = False  # always False until multi-adapter lands
     if account_id is not None:
         logger.warning(
             "account_id=%s provided to /portfolio/summary but per-account "
@@ -100,7 +106,10 @@ async def portfolio_summary(
             account_id,
         )
     if market == "ALL":
-        return await _combined_summary(request)
+        combined = await _combined_summary(request)
+        combined["account_id"] = account_id
+        combined["account_filter_applied"] = account_filter_applied
+        return combined
 
     md = get_market_data(request, market)
     if not md:
@@ -127,7 +136,48 @@ async def portfolio_summary(
         "total_unrealized_pnl": total_unrealized_pnl,
         "total_unrealized_pnl_pct": total_unrealized_pnl_pct,
         "total_equity": balance.total,
+        # HIGH-13 (2026-06-07): always echo so frontend can detect
+        # the no-op filter case symmetrically with the ALL branch.
+        "account_id": account_id,
+        "account_filter_applied": account_filter_applied,
     }
+
+
+async def _refresh_usd_krw(request: Request) -> float:
+    """Refresh the module-level USD/KRW cache from the live US adapter.
+
+    FIN-H1 (2026-06-05): the cache used to update ONLY when /summary
+    fired. /returns and /trade-summary read the same module global,
+    so they computed cross-currency totals against whatever stale rate
+    /summary had cached. The user observed 4291만 (live, fresh rate)
+    vs 4302만 (snapshot equity, snapshot's own rate). Now every
+    cross-currency endpoint calls this helper at entry.
+
+    Falls back to the adapter's last seen rate, then to USD_KRW_FALLBACK,
+    so a transient API error never returns 0.
+    """
+    global _cached_usd_krw
+    us_md = getattr(request.app.state, "market_data", None)
+    if us_md:
+        try:
+            rate = await us_md.get_exchange_rate()
+            if rate and rate > 0:
+                _cached_usd_krw = rate
+                return rate
+        except Exception as e:
+            logger.warning("USD/KRW fetch failed: %s", e)
+    adapter = getattr(request.app.state, "adapter", None)
+    if adapter:
+        cached = getattr(adapter, "_last_exchange_rate", _cached_usd_krw)
+        try:
+            cached_f = float(cached)
+            if cached_f > 0:
+                _cached_usd_krw = cached_f
+        except (TypeError, ValueError):
+            pass  # MagicMock / non-numeric — leave cache alone
+    if _cached_usd_krw <= 0:
+        _cached_usd_krw = USD_KRW_FALLBACK
+    return _cached_usd_krw
 
 
 async def _combined_summary(request: Request) -> dict:
@@ -167,20 +217,9 @@ async def _combined_summary(request: Request) -> dict:
     usd_total = us_balance.total if us_balance else 0
     usd_available = us_balance.available if us_balance else 0
 
-    # Fetch exchange rate — prefer MarketDataService cache (5-min TTL),
-    # fall back to adapter's cached rate from last balance fetch.
-    adapter = getattr(request.app.state, "adapter", None)
-    if us_md:
-        try:
-            rate = await us_md.get_exchange_rate()
-            if rate > 0:
-                _cached_usd_krw = rate
-        except Exception as e:
-            logger.warning("Exchange rate fetch failed: %s", e)
-    elif adapter:
-        _cached_usd_krw = getattr(adapter, "_last_exchange_rate", _cached_usd_krw)
-    if _cached_usd_krw <= 0:
-        _cached_usd_krw = USD_KRW_FALLBACK
+    # FIN-H1: single helper updates the module cache so every
+    # cross-currency endpoint sees the same rate.
+    await _refresh_usd_krw(request)
 
     # Total equity — combine KR and US totals, avoiding deposit double-count.
     # In 통합증거금 accounts, the KRW deposit (예수금) appears in BOTH:
@@ -403,14 +442,16 @@ async def portfolio_returns(request: Request):
     if not _session_factory:
         return {"daily": None, "weekly": None, "monthly": None}
 
-    now = datetime.utcnow()
+    now = now_utc_naive()
     periods = {
         "daily": now - timedelta(days=1),
         "weekly": now - timedelta(days=7),
         "monthly": now - timedelta(days=30),
     }
 
-    rate = _cached_usd_krw if _cached_usd_krw > 0 else USD_KRW_FALLBACK
+    # FIN-H1: refresh the rate at every call instead of reading whatever
+    # /summary cached last.
+    rate = await _refresh_usd_krw(request)
 
     async with _session_factory() as session:
         result = {}
@@ -593,7 +634,7 @@ def _build_equity_timeline(
 ) -> list[tuple[datetime, float, float]]:
     """Build a combined equity timeline using carry-forward for mismatched timestamps.
 
-    In production, US and KR save_snapshot() each call datetime.utcnow()
+    In production, US and KR save_snapshot() each call now_utc_naive()
     independently, so their recorded_at values differ by at least milliseconds.
     Exact-timestamp aggregation would compare single-market equity values against
     each other, producing nonsensical sub-period returns.
@@ -873,7 +914,7 @@ async def performance_metrics(
         if market:
             orders = [o for o in orders if getattr(o, "market", "US") == market]
         # Last `days` window
-        cutoff = datetime.utcnow() - timedelta(days=days)
+        cutoff = now_utc_naive() - timedelta(days=days)
         orders = [o for o in orders if (o.filled_at or o.created_at or cutoff) >= cutoff]
         trade_dicts = [
             {
@@ -994,6 +1035,11 @@ async def trade_summary_periods(request: Request, market: str | None = None):
 
     if not _session_factory:
         return _empty_summary()
+
+    # FIN-H1: refresh USD/KRW so combined-currency PnL conversion uses
+    # the same rate /summary would. Previously _cached_usd_krw could be
+    # hours stale if /summary hadn't been hit recently.
+    await _refresh_usd_krw(request)
 
     try:
         from db.trade_repository import TradeRepository

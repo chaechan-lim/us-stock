@@ -13,6 +13,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from core.models import AgentMemory
+from core.timeutil import now_utc_naive
 
 logger = logging.getLogger(__name__)
 
@@ -81,7 +82,7 @@ class AgentContextService:
                 content=content.strip(),
                 token_count=token_count,
                 importance=min(10, max(1, importance)),
-                expires_at=datetime.utcnow() + timedelta(days=days),
+                expires_at=now_utc_naive() + timedelta(days=days),
             )
             session.add(entry)
             await session.commit()
@@ -105,7 +106,7 @@ class AgentContextService:
         Returns empty string if no relevant memories found.
         """
         async with self._session_factory() as session:
-            now = datetime.utcnow()
+            now = now_utc_naive()
 
             # Fetch non-expired memories for this agent, ordered by importance desc
             stmt = (
@@ -176,7 +177,7 @@ class AgentContextService:
         """Delete expired memory entries. Returns count deleted."""
         async with self._session_factory() as session:
             stmt = delete(AgentMemory).where(
-                AgentMemory.expires_at <= datetime.utcnow()
+                AgentMemory.expires_at <= now_utc_naive()
             )
             result = await session.execute(stmt)
             await session.commit()

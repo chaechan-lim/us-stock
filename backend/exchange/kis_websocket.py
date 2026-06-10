@@ -111,8 +111,23 @@ class KISWebSocket:
         logger.info("KIS WebSocket connected (max %d subs, session limit %ds)",
                      MAX_SUBSCRIPTIONS, self._max_session_sec)
 
-        # Start listener
+        # Start listener with done_callback so a silent crash is
+        # surfaced rather than killing the price stream invisibly.
+        # M9 (2026-06-06).
         self._listen_task = asyncio.create_task(self._listen())
+
+        def _on_listen_done(t: asyncio.Task) -> None:
+            if t.cancelled():
+                return
+            exc = t.exception()
+            if exc is not None:
+                logger.error(
+                    "KIS WS listen task crashed — price stream is dead "
+                    "until next reconnect: %s",
+                    exc, exc_info=exc,
+                )
+
+        self._listen_task.add_done_callback(_on_listen_done)
 
     async def close(self) -> None:
         """Gracefully close WebSocket connection."""
@@ -140,6 +155,20 @@ class KISWebSocket:
         if sub_key in self._subscriptions:
             return True
 
+        # M20 (2026-06-07): KR symbols (6-digit numeric, exchange=KRX)
+        # were silently sent with prefix=DNAS, producing an invalid
+        # tr_key that KIS rejected without surfacing the misroute.
+        # This WS client is US-overseas only; bail loudly so the
+        # caller can route via the KR WS path (or future KR client).
+        if exchange not in _EXCHANGE_PREFIX or symbol.isdigit():
+            logger.warning(
+                "KISWebSocket.subscribe refused %s (exchange=%s): "
+                "this client handles US overseas only. Likely a KR "
+                "symbol mis-routed to the US adapter.",
+                symbol, exchange,
+            )
+            return False
+
         if len(self._subscriptions) >= MAX_SUBSCRIPTIONS:
             logger.warning(
                 "WebSocket subscription limit reached (%d/%d). Cannot subscribe %s",
@@ -152,7 +181,7 @@ class KISWebSocket:
 
         tr_id = WS_TR_EXECUTION if data_type == "price" else WS_TR_ORDERBOOK
         approval_key = await self._auth.get_approval_key()
-        prefix = _EXCHANGE_PREFIX.get(exchange, "DNAS")
+        prefix = _EXCHANGE_PREFIX[exchange]
 
         msg = {
             "header": {
@@ -307,6 +336,14 @@ class KISWebSocket:
             try:
                 # Check session age — refresh if exceeded
                 if self.session_age_sec > self._max_session_sec:
+                    # M9: guard against overlapping refreshes. If a
+                    # prior refresh is still mid-flight, don't spawn
+                    # a second one — they'd race on self._ws.
+                    if self._refresh_task and not self._refresh_task.done():
+                        logger.warning(
+                            "WS refresh already in progress — skipping spawn",
+                        )
+                        return
                     logger.info("WS session expired (%.0fs > %ds), refreshing",
                                 self.session_age_sec, self._max_session_sec)
                     self._refresh_task = asyncio.create_task(self.refresh_session())

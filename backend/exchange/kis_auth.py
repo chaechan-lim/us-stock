@@ -57,7 +57,12 @@ class KISAuth:
         if self._session and not self._session.closed:
             # Already initialized — skip to avoid session leak
             return
-        self._session = aiohttp.ClientSession()
+        # ERR-B2 (2026-06-06): bound auth requests so a hung KIS
+        # auth-domain socket can't freeze every coroutine waiting on
+        # ensure_valid_token.
+        self._session = aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=10, connect=5),
+        )
         # Try to restore token from Redis first (avoid 1/day limit)
         if self._redis:
             await self._restore_from_redis()
@@ -135,7 +140,18 @@ class KISAuth:
             data = await resp.json()
             key = data.get("approval_key")
             if not key:
-                logger.error("KIS approval key missing from response: %s", data)
+                # M14 (2026-06-06): KIS does not normally echo app keys
+                # but the body has historically included partial token
+                # fragments. Whitelist safe fields instead of dumping
+                # the whole dict to logs / Discord.
+                safe_summary = {
+                    k: data.get(k)
+                    for k in ("rt_cd", "msg_cd", "msg1", "error_description")
+                }
+                logger.error(
+                    "KIS approval key missing — response (redacted): %s",
+                    safe_summary,
+                )
                 raise RuntimeError("Failed to obtain KIS WebSocket approval key")
             self._approval_key = key
 

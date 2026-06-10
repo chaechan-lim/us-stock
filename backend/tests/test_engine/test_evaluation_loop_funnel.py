@@ -1,7 +1,16 @@
 """F1 attribution funnel tests — BUY-flow rejection counters."""
 
-from datetime import date as _date
+from datetime import date as _date, datetime as _dt
 from unittest.mock import AsyncMock, MagicMock
+from zoneinfo import ZoneInfo
+
+
+def _market_today(market: str) -> str:
+    """DT-H8 (2026-06-06): reset is anchored on market-local
+    timezone now, so tests need to set _daily_buy_date to the
+    market's local date rather than the server's."""
+    tz = ZoneInfo("America/New_York") if market == "US" else ZoneInfo("Asia/Seoul")
+    return _dt.now(tz).date().isoformat()
 
 import numpy as np
 import pandas as pd
@@ -114,14 +123,15 @@ class TestDailyResetIsolation:
 
         loop._reset_daily_counters_if_needed()
 
-        today = _date.today().isoformat()
+        # DT-H8: counters now reset on the loop's market-local date.
+        today = _market_today(loop._market)
         assert loop._daily_buy_date == today
         assert loop._daily_buy_count == 0
         assert loop._reject_counters == {}
         assert loop._buy_flow_counters == {"buy_signals_total": 0, "buys_placed": 0}
 
     def test_reset_no_op_when_date_same(self, loop):
-        today = _date.today().isoformat()
+        today = _market_today(loop._market)
         loop._daily_buy_date = today
         loop._daily_buy_count = 2
         loop._reject_counters = {"foo": 1}
@@ -152,19 +162,19 @@ class TestRejectionCounters:
     async def test_daily_limit_bump(self, loop, buy_signal):
         loop._daily_buy_limit = 1
         loop._daily_buy_count = 1
-        loop._daily_buy_date = _date.today().isoformat()
+        loop._daily_buy_date = _market_today(loop._market)
         # confidence 0.8 < override 0.9 → blocked
         await loop._execute_signal(buy_signal, "AAPL", _df())
         assert loop._reject_counters.get("daily_limit") == 1
 
     async def test_pending_order_bump(self, loop, buy_signal):
-        loop._daily_buy_date = _date.today().isoformat()
+        loop._daily_buy_date = _market_today(loop._market)
         loop._order_manager.has_pending_order = MagicMock(return_value=True)
         await loop._execute_signal(buy_signal, "AAPL", _df())
         assert loop._reject_counters.get("pending_order") == 1
 
     async def test_already_held_bump(self, loop, buy_signal):
-        loop._daily_buy_date = _date.today().isoformat()
+        loop._daily_buy_date = _market_today(loop._market)
         tracker = MagicMock()
         tracker.tracked_symbols = {"AAPL"}
         loop._position_tracker = tracker
@@ -174,7 +184,7 @@ class TestRejectionCounters:
     async def test_sell_cooldown_bump(self, loop, buy_signal):
         import time as _time
 
-        loop._daily_buy_date = _date.today().isoformat()
+        loop._daily_buy_date = _market_today(loop._market)
         loop._sell_cooldown_secs = 3600
         loop._recovery_watch["AAPL"] = _time.time() - 10  # just sold
         await loop._execute_signal(buy_signal, "AAPL", _df())
@@ -194,7 +204,7 @@ class TestRejectionCounters:
             fake_persist,
         )
 
-        loop._daily_buy_date = _date.today().isoformat()
+        loop._daily_buy_date = _market_today(loop._market)
         loop._sell_cooldown_secs = 3600
         loop._recovery_watch["AAPL"] = __import__("time").time() - 10
         await loop._execute_signal(buy_signal, "AAPL", _df())
@@ -211,7 +221,7 @@ class TestRejectionCounters:
         still catches genuine loser-symbol cases."""
         import time as _time
 
-        loop._daily_buy_date = _date.today().isoformat()
+        loop._daily_buy_date = _market_today(loop._market)
         loop._sell_cooldown_secs = 3600
         loop._recovery_watch["AAPL"] = _time.time() - 10
         tracker = MagicMock()
@@ -226,7 +236,7 @@ class TestRejectionCounters:
     async def test_whipsaw_block_bump(self, loop, buy_signal):
         import time as _time
 
-        loop._daily_buy_date = _date.today().isoformat()
+        loop._daily_buy_date = _market_today(loop._market)
         loop._max_loss_sells = 2
         loop._loss_sell_history["AAPL"] = [_time.time() - 100, _time.time() - 200]
         await loop._execute_signal(buy_signal, "AAPL", _df())
@@ -235,7 +245,7 @@ class TestRejectionCounters:
     async def test_same_signal_24h_bump(self, loop, buy_signal):
         import time as _time
 
-        loop._daily_buy_date = _date.today().isoformat()
+        loop._daily_buy_date = _market_today(loop._market)
         loop._last_signal["AAPL"] = ("BUY", _time.time() - 100)
         await loop._execute_signal(buy_signal, "AAPL", _df())
         assert loop._reject_counters.get("same_signal_24h") == 1
@@ -247,7 +257,7 @@ class TestRejectionCounters:
         1-share forever."""
         import time as _time
 
-        loop._daily_buy_date = _date.today().isoformat()
+        loop._daily_buy_date = _market_today(loop._market)
         loop._last_signal["AAPL"] = ("BUY", _time.time() - 100)
         # Held + sizing_up enabled
         tracker = MagicMock()
@@ -262,7 +272,7 @@ class TestRejectionCounters:
 
 class TestSuccessCounter:
     async def test_buys_placed_increments_on_successful_order(self, loop, buy_signal):
-        loop._daily_buy_date = _date.today().isoformat()
+        loop._daily_buy_date = _market_today(loop._market)
         await loop._execute_signal(buy_signal, "AAPL", _df())
         # signal counted at top, order placed → both counters move
         assert loop._buy_flow_counters["buy_signals_total"] == 1
@@ -274,7 +284,7 @@ class TestSizingTokenCategorization:
     """sizing.reason like 'max_exposure: 80%' should bucket into sizing_max_exposure."""
 
     async def test_sizing_reason_prefix_extracted(self, loop, buy_signal):
-        loop._daily_buy_date = _date.today().isoformat()
+        loop._daily_buy_date = _market_today(loop._market)
         # Force sizing rejection with structured reason
         from engine.risk_manager import PositionSizeResult
 

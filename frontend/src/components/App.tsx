@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import Dashboard from './Dashboard'
+import ApiErrorBanner from './ApiErrorBanner'
 import StrategyPanel from './StrategyPanel'
 import StrategyPerformance from './StrategyPerformance'
 import EngineControl from './EngineControl'
@@ -52,6 +53,7 @@ export default function App() {
 function AppContent({ tab, setTab }: { tab: Tab; setTab: (t: Tab) => void }) {
   return (
     <div className="min-h-screen bg-gray-50">
+      <ApiErrorBanner />
       {/* Header */}
       <header className="bg-white border-b border-gray-200 px-4 sm:px-6 py-3 flex flex-wrap items-center justify-between gap-2">
         <h1 className="text-lg font-bold text-gray-900">Trading Engine</h1>

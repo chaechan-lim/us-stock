@@ -4,18 +4,20 @@ from data.macro_calendar import MacroCalendarService, ALL_EVENTS
 
 
 def test_fomc_count():
+    # M17 (2026-06-07): 2026 + 2027 → 16 meetings × 2 days
     fomc = [e for e in ALL_EVENTS if e.event_type == "FOMC"]
-    assert len(fomc) == 16  # 8 meetings × 2 days
+    assert len(fomc) == 32
 
 
 def test_cpi_count():
+    # 12 (2026) + 12 (2027)
     cpi = [e for e in ALL_EVENTS if e.event_type == "CPI"]
-    assert len(cpi) == 12
+    assert len(cpi) == 24
 
 
 def test_jobs_count():
     jobs = [e for e in ALL_EVENTS if e.event_type == "JOBS"]
-    assert len(jobs) == 12
+    assert len(jobs) == 24
 
 
 def test_events_sorted():

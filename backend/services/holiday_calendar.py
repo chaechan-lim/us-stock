@@ -49,8 +49,26 @@ _KR_HOLIDAYS_FALLBACK: set[date] = {
     date(2026, 10, 9),   # 한글날
     date(2026, 12, 25),  # 성탄절
     date(2026, 12, 31),  # 연말휴장
-    # 2027 — extend yearly
-    date(2027, 1, 1),
+    # 2027 — fallback (KIS API refresh overrides at runtime)
+    # M17 (2026-06-07): expanded so a KIS holiday API outage during
+    # New Year doesn't leave the engine treating Jan 2/3 as trading
+    # days. Major fixed-date + estimated lunar holidays from 한국거래소
+    # 2027 휴장일 (verify Jan 2027).
+    date(2027, 1, 1),    # 신정
+    date(2027, 2, 8),    # 설날 연휴 (lunar 1/1 = Feb 7 일)
+    date(2027, 2, 9),    # 설날
+    date(2027, 2, 10),   # 설날 연휴
+    date(2027, 3, 1),    # 삼일절
+    date(2027, 5, 5),    # 어린이날
+    date(2027, 5, 13),   # 부처님오신날 (lunar 4/8)
+    date(2027, 8, 16),   # 광복절 대체공휴일 (8/15 일)
+    date(2027, 9, 14),   # 추석 연휴 (lunar 8/15 = Sep 15 수)
+    date(2027, 9, 15),   # 추석
+    date(2027, 9, 16),   # 추석 연휴
+    date(2027, 10, 4),   # 개천절 대체공휴일 (10/3 일)
+    date(2027, 10, 11),  # 한글날 대체공휴일 (10/9 토)
+    date(2027, 12, 25),  # 성탄절 (토요일이지만 한국은 휴일)
+    date(2027, 12, 31),  # 연말휴장
 }
 
 _US_HOLIDAYS: set[date] = {
@@ -153,4 +171,25 @@ def next_kr_trading_day(start: date) -> date:
         d = d + timedelta(days=1)
         if d.weekday() < 5 and not is_kr_holiday(d):
             return d
+    return d  # 14-day window exhausted; return whatever we have
+
+
+def is_us_trading_day(d: date) -> bool:
+    """True iff `d` is a US weekday and not a known NYSE holiday."""
+    return d.weekday() < 5 and not is_us_holiday(d)
+
+
+def previous_us_trading_day(start: date) -> date:
+    """Most recent US trading day on-or-before `start`.
+
+    Used by the daily post-market script to skip Sunday/holiday runs:
+    Sunday-KST 06:00 targets Saturday-ET which is not a session; walk
+    back until we hit Friday (or the last weekday before a long
+    weekend).
+    """
+    d = start
+    for _ in range(14):
+        if is_us_trading_day(d):
+            return d
+        d = d - timedelta(days=1)
     return d  # 14-day window exhausted; return whatever we have

@@ -303,3 +303,336 @@ class TestFilterPhantomPaths:
         fake_yaml.write_text("markets: {}\n", encoding="utf-8")
         monkeypatch.setattr(gr, "YAML_PATH", fake_yaml)
         assert gr._filter_phantom_paths([]) == []
+
+
+# ---------------------------------------------------------------------------
+# _validate_and_promote — pre-submission backtest gate (2026-06-05)
+# ---------------------------------------------------------------------------
+
+
+class TestValidateAndPromote:
+    """Verify the synchronous backtest gate flips status correctly.
+
+    The gate must:
+    - promote rows whose backtest passes the floor (passes_floor=True)
+    - auto-reject rows that fail the floor (passes_floor=False)
+    - leave rows in operator queue when backtest data is unusable
+      (skip / error / replay-only) — defer to human judgement
+    """
+
+    @pytest.mark.asyncio
+    async def test_promotes_when_passes_floor(self, monkeypatch):
+        from sqlalchemy.ext.asyncio import (
+            AsyncSession, async_sessionmaker, create_async_engine,
+        )
+        from sqlalchemy.pool import StaticPool
+
+        from core.models import AgentRecommendation, Base
+
+        engine = create_async_engine(
+            "sqlite+aiosqlite://",
+            poolclass=StaticPool,
+            connect_args={"check_same_thread": False},
+        )
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+        monkeypatch.setattr(gr, "get_session_factory", lambda: factory)
+
+        # Stub the validator: just stamp passes_floor=True
+        async def stub_validate(rec_id, sf):
+            async with sf() as s:
+                rec = await s.get(AgentRecommendation, rec_id)
+                rec.backtest_result = {
+                    "baseline": {"ret": 10.0, "sharpe": 1.0, "mdd": -10.0, "pf": 1.3},
+                    "proposed": {"ret": 12.0, "sharpe": 1.1, "mdd": -10.0, "pf": 1.35},
+                    "delta": {"ret": 2.0, "sharpe": 0.1, "mdd": 0.0, "pf": 0.05},
+                    "passes_floor": True,
+                }
+                await s.commit()
+
+        import services.recommendation_validator as rv
+        monkeypatch.setattr(rv, "validate_recommendation", stub_validate)
+
+        async with factory() as s:
+            rec = AgentRecommendation(
+                agent_type="llm_claude_daily",
+                param_path="markets.KR.risk.max_positions",
+                current_value=18, proposed_value=22,
+                status="pending_validation",
+            )
+            s.add(rec)
+            await s.commit()
+            rid = rec.id
+
+        promoted, rejected = await gr._validate_and_promote([rid])
+        assert promoted == [rid]
+        assert rejected == []
+
+        async with factory() as s:
+            rec = await s.get(AgentRecommendation, rid)
+            assert rec.status == "pending"
+
+        await engine.dispose()
+
+    @pytest.mark.asyncio
+    async def test_auto_rejects_when_fails_floor(self, monkeypatch):
+        from sqlalchemy.ext.asyncio import (
+            AsyncSession, async_sessionmaker, create_async_engine,
+        )
+        from sqlalchemy.pool import StaticPool
+
+        from core.models import AgentRecommendation, Base
+
+        engine = create_async_engine(
+            "sqlite+aiosqlite://",
+            poolclass=StaticPool,
+            connect_args={"check_same_thread": False},
+        )
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+        monkeypatch.setattr(gr, "get_session_factory", lambda: factory)
+
+        async def stub_validate(rec_id, sf):
+            async with sf() as s:
+                rec = await s.get(AgentRecommendation, rec_id)
+                rec.backtest_result = {
+                    "baseline": {"ret": 10.0, "sharpe": 1.0, "mdd": -10.0, "pf": 1.3},
+                    "proposed": {"ret": 5.0, "sharpe": 0.3, "mdd": -20.0, "pf": 0.9},
+                    "delta": {"ret": -5.0, "sharpe": -0.7, "mdd": -10.0, "pf": -0.4},
+                    "passes_floor": False,
+                }
+                await s.commit()
+
+        import services.recommendation_validator as rv
+        monkeypatch.setattr(rv, "validate_recommendation", stub_validate)
+
+        async with factory() as s:
+            rec = AgentRecommendation(
+                agent_type="llm_codex_daily",
+                param_path="markets.KR.evaluation_loop.sell_cooldown_days",
+                current_value=3, proposed_value=0,
+                status="pending_validation",
+            )
+            s.add(rec)
+            await s.commit()
+            rid = rec.id
+
+        promoted, rejected = await gr._validate_and_promote([rid])
+        assert promoted == []
+        assert rejected == [rid]
+
+        async with factory() as s:
+            rec = await s.get(AgentRecommendation, rid)
+            assert rec.status == "rejected_by_backtest"
+            assert "auto-reject" in (rec.rejected_reason or "")
+            assert "ret=-5" in (rec.rejected_reason or "")
+
+        await engine.dispose()
+
+    @pytest.mark.asyncio
+    async def test_validator_raises_leaves_in_pending_validation(self, monkeypatch):
+        """When the validator raises, the rec stays in pending_validation
+        so the self-heal scheduler can retry it. The old code would have
+        silently promoted (passes_floor missing → False → True branch)."""
+        from sqlalchemy.ext.asyncio import (
+            AsyncSession, async_sessionmaker, create_async_engine,
+        )
+        from sqlalchemy.pool import StaticPool
+
+        from core.models import AgentRecommendation, Base
+
+        engine = create_async_engine(
+            "sqlite+aiosqlite://",
+            poolclass=StaticPool,
+            connect_args={"check_same_thread": False},
+        )
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+        monkeypatch.setattr(gr, "get_session_factory", lambda: factory)
+
+        async def raising_validate(rec_id, sf):
+            raise RuntimeError("simulated backtest engine failure")
+
+        import services.recommendation_validator as rv
+        monkeypatch.setattr(rv, "validate_recommendation", raising_validate)
+
+        async with factory() as s:
+            rec = AgentRecommendation(
+                agent_type="llm_test",
+                param_path="markets.KR.risk.max_positions",
+                current_value=18, proposed_value=22,
+                status="pending_validation",
+            )
+            s.add(rec)
+            await s.commit()
+            rid = rec.id
+
+        promoted, rejected = await gr._validate_and_promote([rid])
+        assert promoted == []
+        assert rejected == []
+
+        async with factory() as s:
+            rec = await s.get(AgentRecommendation, rid)
+            # Must NOT silently promote — that was the bypass bug.
+            assert rec.status == "pending_validation"
+
+        await engine.dispose()
+
+    @pytest.mark.asyncio
+    async def test_empty_backtest_result_left_for_self_heal(self, monkeypatch):
+        """Validator that returns without writing backtest_result is the
+        same regression as a raise. Treat empty {} as 'not yet validated'
+        and leave for the self-heal task."""
+        from sqlalchemy.ext.asyncio import (
+            AsyncSession, async_sessionmaker, create_async_engine,
+        )
+        from sqlalchemy.pool import StaticPool
+
+        from core.models import AgentRecommendation, Base
+
+        engine = create_async_engine(
+            "sqlite+aiosqlite://",
+            poolclass=StaticPool,
+            connect_args={"check_same_thread": False},
+        )
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+        monkeypatch.setattr(gr, "get_session_factory", lambda: factory)
+
+        async def noop_validate(rec_id, sf):
+            # Doesn't raise, doesn't write — exactly the silent-bypass case.
+            return
+
+        import services.recommendation_validator as rv
+        monkeypatch.setattr(rv, "validate_recommendation", noop_validate)
+
+        async with factory() as s:
+            rec = AgentRecommendation(
+                agent_type="llm_test",
+                param_path="markets.KR.risk.max_positions",
+                current_value=18, proposed_value=22,
+                status="pending_validation",
+            )
+            s.add(rec)
+            await s.commit()
+            rid = rec.id
+
+        promoted, rejected = await gr._validate_and_promote([rid])
+        assert promoted == []
+        assert rejected == []
+
+        async with factory() as s:
+            rec = await s.get(AgentRecommendation, rid)
+            assert rec.status == "pending_validation"
+
+        await engine.dispose()
+
+    @pytest.mark.asyncio
+    async def test_operator_decision_wins_over_promotion(self, monkeypatch):
+        """If the operator accepts a rec between validator-return and
+        the status-flip session.get, _validate_and_promote must not
+        overwrite the operator's decision."""
+        from sqlalchemy.ext.asyncio import (
+            AsyncSession, async_sessionmaker, create_async_engine,
+        )
+        from sqlalchemy.pool import StaticPool
+
+        from core.models import AgentRecommendation, Base
+
+        engine = create_async_engine(
+            "sqlite+aiosqlite://",
+            poolclass=StaticPool,
+            connect_args={"check_same_thread": False},
+        )
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+        monkeypatch.setattr(gr, "get_session_factory", lambda: factory)
+
+        async def race_validate(rec_id, sf):
+            # Validator writes a passing result AND the operator flips
+            # status to "accepted" mid-flight.
+            async with sf() as s:
+                rec = await s.get(AgentRecommendation, rec_id)
+                rec.backtest_result = {"passes_floor": True}
+                rec.status = "accepted"  # operator wins
+                await s.commit()
+
+        import services.recommendation_validator as rv
+        monkeypatch.setattr(rv, "validate_recommendation", race_validate)
+
+        async with factory() as s:
+            rec = AgentRecommendation(
+                agent_type="llm_test",
+                param_path="markets.KR.risk.max_positions",
+                current_value=18, proposed_value=22,
+                status="pending_validation",
+            )
+            s.add(rec)
+            await s.commit()
+            rid = rec.id
+
+        promoted, rejected = await gr._validate_and_promote([rid])
+        # Operator's accepted status must survive.
+        async with factory() as s:
+            rec = await s.get(AgentRecommendation, rid)
+            assert rec.status == "accepted"
+        # Counters should not claim ownership of an already-decided rec.
+        assert rid not in promoted
+        assert rid not in rejected
+
+        await engine.dispose()
+
+    @pytest.mark.asyncio
+    async def test_skip_result_promotes_to_pending(self, monkeypatch):
+        """When backtest is unavailable (skip), defer to operator."""
+        from sqlalchemy.ext.asyncio import (
+            AsyncSession, async_sessionmaker, create_async_engine,
+        )
+        from sqlalchemy.pool import StaticPool
+
+        from core.models import AgentRecommendation, Base
+
+        engine = create_async_engine(
+            "sqlite+aiosqlite://",
+            poolclass=StaticPool,
+            connect_args={"check_same_thread": False},
+        )
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+        monkeypatch.setattr(gr, "get_session_factory", lambda: factory)
+
+        async def stub_validate(rec_id, sf):
+            async with sf() as s:
+                rec = await s.get(AgentRecommendation, rec_id)
+                rec.backtest_result = {"skip": "path not in map"}
+                await s.commit()
+
+        import services.recommendation_validator as rv
+        monkeypatch.setattr(rv, "validate_recommendation", stub_validate)
+
+        async with factory() as s:
+            rec = AgentRecommendation(
+                agent_type="llm_claude_daily",
+                param_path="markets.KR.evaluation_loop.opening_avoidance_minutes",
+                current_value=30, proposed_value=15,
+                status="pending_validation",
+            )
+            s.add(rec)
+            await s.commit()
+            rid = rec.id
+
+        promoted, rejected = await gr._validate_and_promote([rid])
+        assert promoted == [rid]
+        assert rejected == []
+
+        async with factory() as s:
+            rec = await s.get(AgentRecommendation, rid)
+            assert rec.status == "pending"
+
+        await engine.dispose()

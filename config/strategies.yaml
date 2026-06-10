@@ -117,7 +117,7 @@ profiles:
     supertrend: 0.10
     cis_momentum: 0.05
     larry_williams: 0.07
-    bnf_deviation: 0.05
+    bnf_deviation: 0.20   # 2026-06-03: 0.05 → 0.20 (KR mean-reversion alpha)
     volume_surge: 0.13
 
   uptrend:
@@ -131,7 +131,7 @@ profiles:
     macd_histogram: 0.05
     cis_momentum: 0.04
     larry_williams: 0.07
-    bnf_deviation: 0.05
+    bnf_deviation: 0.20   # 2026-06-03: 0.05 → 0.20
     volume_surge: 0.15
 
   sideways:
@@ -148,7 +148,7 @@ profiles:
     volume_profile: 0.08
     cis_momentum: 0.02
     larry_williams: 0.05
-    bnf_deviation: 0.05
+    bnf_deviation: 0.20   # 2026-06-03: 0.05 → 0.20 (compare_kr_bnf_weight V3 +7.3pp Ret)
     volume_surge: 0.10
 
   weak_downtrend:
@@ -470,12 +470,23 @@ strategies:
 
   bnf_deviation:
     # 2026-04-23: disabled (Option A).
-    enabled: false
+    # 2026-06-02: RE-ENABLED for KR with looser deviation thresholds.
+    # compare_kr_mean_reversion.py V4 KR 2y on post-#183 baseline:
+    #   V0_live:       Ret +13.7% Sharpe +0.68 MDD -10.5% PF 1.25
+    #   V2 default(-5/+3):  Ret  +6.6% Sharpe +0.27  (too strict, 49 trades, -₩91K)
+    #   V4 loose(-3/+2):    Ret +15.9% Sharpe +0.84 MDD -11.1% PF 1.30 ← ✓ 4/4
+    #                        63 trades / 2y, +₩602K standalone contribution
+    #   V5 tight(-7/+4):    Ret +11.5% Sharpe +0.58 (36 trades, alpha-positive but V0 미달)
+    # Looser thresholds expose more mean-reversion candidates; KR mid-caps
+    # rarely deviate >5% from 20-SMA in a single bar but -3% deviations
+    # are common (~30-day mean reversion window). US-disabled defensively
+    # (untested on US universe; bnf is a KR-flavored strategy).
+    enabled: true
     timeframe: "1D"
     params:
-      sma_period: 20         # optimized: 25 -> 20
-      buy_deviation: -5.0    # optimized (unchanged)
-      sell_deviation: 3.0    # optimized (unchanged)
+      sma_period: 20
+      buy_deviation: -3.0    # 2026-06-02: was -5.0 (too strict)
+      sell_deviation: 2.0    # 2026-06-02: was 3.0
       rsi_boost_threshold: 35.0
     stop_loss:
       type: fixed_pct
@@ -592,6 +603,35 @@ strategies:
       activation_pct: 0.06
       trail_pct: 0.03
 
+  # 2026-06-01: FAILED on KR daily-bar backtest. compare_kr_gap_and_go.py:
+  #   V0_live:        Ret +13.7% Sharpe +0.68 MDD -10.5% PF 1.25
+  #   V2_gng_only:    Ret  -0.5% Sharpe -2.33 MDD  -1.7% PF 0.88 (37 trd, ₩-520K)
+  #   V1-V6 (combo):  Identical to V0 (combiner weight 0.10 too small)
+  # Per-trade avg -₩14K. KR daily-bar gap-up patterns FADE on the SAME day
+  # (oversold + circuit breakers + retail flip), so a buy at close = buy
+  # at fade-start. True ORB/Gap-and-Go needs intraday entry (09:00-09:30)
+  # which requires 1-min OHLCV infra (yfinance only has last 7d).
+  # Strategy code + tests retained as infrastructure for a future intraday
+  # version. enabled=false keeps it inert.
+  gap_and_go:
+    enabled: false   # backtest failed — see comment above
+    timeframe: "1D"
+    params:
+      min_gap_pct: 0.03         # 3% min gap up vs prev close
+      max_gap_pct: 0.15         # cap to filter pump-and-dump (>15%)
+      min_intraday_return: 0.005  # close >= open * 1.005 (gap holds)
+      min_vol_ratio: 1.5        # today vol vs 20-day avg
+    stop_loss:
+      type: fixed_pct
+      max_pct: 0.05             # 5% below entry — gap-fill protection
+    take_profit:
+      type: fixed_pct
+      max_pct: 0.10             # quick scalp target
+    trailing_stop:
+      enabled: true
+      activation_pct: 0.05
+      trail_pct: 0.03
+
 # Market-specific overrides
 # Each market key can override: disabled_strategies, risk, evaluation_loop
 markets:
@@ -628,6 +668,8 @@ markets:
     disabled_strategies:
       - dual_momentum
       - rsi_divergence  # 2026-05-28: KR-only enable for diversification (#XX). US backtest never validated rsi_div on top of current US combo; keep off until tested.
+      - gap_and_go      # 2026-06-01: KR-specific signal density strategy. US has PEAD for gap-drift already; gap_and_go untested on US universe.
+      - bnf_deviation   # 2026-06-02: KR-only mean-reversion (V4 loose params +2.3pp Ret). Untested on US universe; bnf-style 20-SMA deviation needs US-specific tuning.
     # P1-B (#55, 2026-05-14) Kelly fraction bump. compare_kelly_fraction.py
     # US 2y on Phase 2 + P1 baseline:
     #   V0_30  Ret +22.8% Sharpe +1.69 MDD -5.5% PF 1.63
@@ -805,15 +847,25 @@ markets:
     # 현금을 먹어버려 개별주 매수 기회를 차단. ETF 5개 수동매도 후에도
     # 파킹이 즉시 재매수(069500 42주)하며 Max exposure 100%로 개별주 BUY reject.
     # KR 전략이 2개 이상 활성화되어 매수 빈도가 올라가면 재활성화 검토.
+    # 2026-06-03: RE-enable attempt reverted per user — operator explicitly
+    # prefers to leave KR cash unparked rather than wrap idle cash in
+    # KODEX 200 (even though backtest V_parking_only shows +21pp Ret,
+    # +0.70 Sharpe). Reason recorded in user-feedback memory: don't
+    # re-propose without explicit ask. Find non-parking deploy levers.
     cash_parking:
       enabled: false
-      symbol: "069500"  # KODEX 200
-      threshold: 0.70   # 70% — backtest V3: PF 1.45 (best), 21 trades (lowest cost)
-      min_hold_days: 10  # 2주 최소 보유 (수수료 회수)
-      enable_unpark: true # BUY 시그널 시 현금 부족하면 parking 매도
+      symbol: "069500"
+      threshold: 0.70
+      min_hold_days: 10
+      enable_unpark: true
       buffer: 0.10
     risk:
-      kelly_fraction: 0.40       # Conservative (was 1.00, full Kelly too aggressive)
+      # 2026-06-03: tried 0.40 → 0.60 (V4 alone +0.8pp Ret on bnf-w-0.20
+      # baseline) but combo with min_position_pct 0.07 (V1) regressed
+      # -3.1pp Ret due to oversizing conflict. Reverted to 0.40; using
+      # min_position_pct=0.07 instead to capture the bigger deploy lift
+      # (V1 alone: AvgAlloc +22%, Dep 68.9%→77.7%, Ret roughly flat).
+      kelly_fraction: 0.40
       max_position_pct: 0.20     # 2026-04-17: 10→20% — KR backtest V4: Sharpe 0.56→1.05
       # 2026-05-28 (#XX): 0.04 → 0.05 to deploy idle cash. Live 5-28 was
       # 78% cash after #168 (vol scaling fix). compare_kr_cash_deployment.py
@@ -825,6 +877,11 @@ markets:
       #   V4_limit_15:          Ret +12.2% Sharpe +0.64 MDD -11.9% PF 1.24 (limit not binding)
       # V1 4/4 vs V0, AvgAlloc +12%. cooldown reduction hurts KR (dual_momentum
       # repeats same-symbol signals → whipsaw). limit raise is no-op.
+      # 2026-06-03: briefly 0.05 → 0.07 (V1 +8.8pp deploy) but cash_parking
+      # re-enable (below) is the much bigger win and works best with 0.05.
+      # compare_kr_aggressive_deploy V_V1_parking (0.07+park) = +37.2% Ret
+      # vs V_parking_only (0.05+park) = +39.6% Ret — 0.07 floor consumes
+      # cash that parking would otherwise productively deploy.
       min_position_pct: 0.05
       # 2026-05-04: 12 → 18. Live observation: 12 KR BUY signals rejected
       # the morning of 2026-05-04 ("Max positions reached") with cap full
@@ -840,8 +897,15 @@ markets:
       dynamic_sl_tp: true        # Enable ATR-based dynamic SL/TP
       # P3 (compare_trailing_activation.py 2026-05-08, KR 2y):
       # V0(4%/3%) Ret 0% → V2(8%/3%) Ret +44.9% Sharpe +1.90 MDD -9.2% PF 1.67.
-      default_trailing_activation_pct: 0.08
-      default_trailing_stop_pct: 0.03
+      # 2026-06-01: 8/3 → 10/4 — compare_kr_extra_levers.py V6 KR 2y on
+      # post-#183 baseline:
+      #   V0 (8/3):    Ret +14.1% Sharpe +0.72 MDD -11.1% PF 1.26
+      #   V5 (6/2):    Ret +10.0% Sharpe +0.47 MDD -10.6% PF 1.17  (too tight, exits early)
+      #   V6 (10/4):   Ret +16.1% Sharpe +0.82 MDD -12.8% PF 1.30  ← ✓ 4/4
+      # Activate later (+10% gain vs +8%) + give more room (4% trail vs 3%) =
+      # let winners run. Worth the 1.7pp MDD widen (still <13% absolute).
+      default_trailing_activation_pct: 0.10
+      default_trailing_stop_pct: 0.04
       # 2026-05-26 (#XX): vol scaling KR re-calibration. Live found 89%
       # idle cash with most BUYs sized to 1 share by apply_volatility_
       # scaling — target_risk_pct=0.02 + min_scale=0.30 (US default) was
@@ -863,7 +927,15 @@ markets:
         min_scale: 0.5
         max_scale: 1.5
     evaluation_loop:
-      min_confidence: 0.30       # 2026-04-17: 0.40→0.30 (backtest V3/V4 slight help)
+      # 2026-06-01: 0.30 → 0.20. compare_kr_levers.py V5 KR 2y on
+      # cd=3/w=2 live baseline:
+      #   V0_live:        Ret +11.9% Sharpe +0.57 MDD -11.0% PF 1.24
+      #   V5_min_conf_020: Ret +14.5% Sharpe +0.71 MDD -11.2% PF 1.30 ← ✓ 4/4
+      # Weaker signals through the combiner→ more entries (407→408 trades
+      # but per-trade quality up: PF 1.24→1.30). Companion change to
+      # stale_time below; together they free the placeholder-trapped
+      # capital that the cd=3 cooldown alone could not.
+      min_confidence: 0.20
       min_active_ratio: null
       # 2026-05-29: 1d → 3d to break sym-churn. Live 14d: 8 symbols had
       # 4 round-trips each (사팔사팔). 006400 -₩111K / 403870 -₩55K /
@@ -880,7 +952,21 @@ markets:
       # (pre-#171 rsi_div). Sweet spot moved with the new strategy mix.
       sell_cooldown_days: 3
       whipsaw_max_losses: 2
-      min_hold_days: 1
+      # 2026-06-04: 1 → 3. Live observed bnf↔supertrend conflict pattern
+      # (4 stocks BUY 09:31 → SELL 10:26 same day, +₩8K net but ~₩30K fees).
+      # compare_kr_min_hold.py on post-bnf-w-0.20 baseline:
+      #   V0 (1d):  Ret +18.5% Sharpe +0.97 MDD -11.0% PF 1.34 Trd 535
+      #   V1 (2d):  Ret +28.0% Sharpe +1.43 MDD  -9.6% PF 1.49 Trd 505 (+9.5pp)
+      #   V2 (3d):  Ret +35.4% Sharpe +1.72 MDD -11.6% PF 1.61 Trd 479 (+16.9pp) ← ✓ 4/4
+      #   V3 (5d):  Ret +37.4% Sharpe +1.67 MDD -12.8% PF 1.63 Trd 443 (V3 best Ret
+      #                                                         but MDD trade-off)
+      # Anti-churn: bnf (mean-reversion) BUY at oversold + supertrend (trend)
+      # SELL after 1d trend flip used to round-trip ~10% of buys at -1% to
+      # -2% per leg. 3-day minimum hold breaks that loop. Strategies still
+      # produce signals; combiner aggregates; positions just can't flip
+      # in <3 trading days. held_sell_bias / held_min_confidence tested
+      # in same sweep: no effect (bias) or net loss (conf 0.55+).
+      min_hold_days: 3
       # D1 sector strength boost on BUY (2026-04-24 sweep): KR 2y baseline
       # Ret +6.8% Sharpe 0.32 → weight=0.3 gives Ret +9.2% Sharpe 0.48, PF
       # 1.14 → 1.18. KR sector coverage 85% (35/41 symbols mapped).
@@ -899,6 +985,18 @@ markets:
       daily_buy_limit: 10
       daily_buy_escalation_low: 0.65
       daily_buy_escalation_high: 0.75
+      # 2026-06-01: stale_time exit RE-ENABLED for KR with longer threshold
+      # than the disabled US setting. compare_kr_levers.py V2 KR 2y:
+      #   V0_live:        Ret +11.9% Sharpe +0.57 MDD -11.0% PF 1.24
+      #   V2_stale_14d:   Ret +13.5% Sharpe +0.68 MDD -10.5% PF 1.25 ← ✓ 4/4
+      #   V1_stale_10d:   Ret  +8.8% Sharpe +0.39 MDD -11.4% PF 1.15 (too short)
+      # Exits any held position whose PnL after 14d is below +2% — frees
+      # capital from positions that failed to mature so new entries can
+      # use the cash at full size. 10d was too aggressive (cut winners
+      # mid-thesis). thr=+0.02 catches dead-money, NOT just losers (a
+      # 0% position for 14d is also tying up cash).
+      stale_time_days: 14
+      stale_time_pnl_threshold: 0.02
       # #59-C: sizing-up. Live state had 5 KR positions stuck at 1 share
       # each (placeholder via the 1-share round-up path) while 90% of
       # equity sat idle. Now that #59-B disables that round-up path,

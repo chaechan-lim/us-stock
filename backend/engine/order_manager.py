@@ -10,6 +10,7 @@ from datetime import datetime, timedelta
 
 from exchange.base import ExchangeAdapter, OrderResult
 from engine.risk_manager import RiskManager, PositionSizeResult
+from core.timeutil import now_utc_naive
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +49,14 @@ class ManagedOrder:
     slippage: float = 0.0
     created_at: str = ""
     exchange: str = "NASD"
+    # FIN-H3 (2026-06-05): tracks how much of `filled_quantity` was
+    # ALREADY processed by downstream handlers (handle_sell_fill,
+    # position_tracker.quantity -= fill_qty). KIS sometimes reports
+    # filled_quantity as the latest tranche rather than cumulative,
+    # so subtracting filled_quantity blindly on every reconcile cycle
+    # could double-decrement. The new delta we hand to handlers is
+    # `filled_quantity - processed_filled_quantity`.
+    processed_filled_quantity: int = 0
 
 
 class OrderManager:
@@ -98,6 +107,7 @@ class OrderManager:
         atr: float | None = None,
         sizing_override: PositionSizeResult | None = None,
         skip_position_limit: bool = False,
+        skip_already_held: bool = False,
         session: str = "regular",
     ) -> ManagedOrder | None:
         """Place a buy order after risk checks and deduplication.
@@ -107,6 +117,10 @@ class OrderManager:
                 internal sizing calculation when provided.
             skip_position_limit: If True, bypasses max_positions check (used by
                 ETF engine which has its own position limits).
+            skip_already_held: If True, bypasses the already-held guard. Used
+                by continuous-rebalance callers (ETF EW hedge) that legitimately
+                top up positions toward a target weight. The default-False
+                preserves the fail-closed dedup for every normal BUY path.
         """
         # Duplicate check: prevent double-buying same symbol
         if self.has_pending_order(symbol, "BUY"):
@@ -119,7 +133,11 @@ class OrderManager:
         # STOCK-26: On failure, reject the buy (fail-safe). Previously this
         # silently swallowed errors, allowing duplicate buys when the API
         # was down.
-        if self._market_data:
+        # bug_009 (2026-06-09): skip_already_held lets continuous-rebalance
+        # callers (EW hedge) top up held positions. Position-check failures
+        # still fail closed even when skipping the held guard — a down API
+        # must not let an unbounded add-on through.
+        if self._market_data and not skip_already_held:
             try:
                 exchange_positions = await self._market_data.get_positions()
                 if any(p.symbol == symbol and p.quantity > 0 for p in exchange_positions):
@@ -140,8 +158,77 @@ class OrderManager:
                 )
                 return None
 
+        # RISK-B3 (2026-06-06): Fat-finger guard. Caller's `price`
+        # ultimately becomes a KIS limit. evaluation_loop falls back
+        # to df.iloc[-1]['close'] on a fetch error, so a stale/corrupt
+        # OHLCV row can hand KIS a zero, negative, or 10× price.
+        # A runaway limit on a thin US name fills far above market;
+        # KR daily-limit-up still permits +30%. Reject the order
+        # before it reaches the broker.
+        if price is None or price <= 0:
+            logger.error(
+                "Buy rejected for %s: invalid price %s — feed corruption?",
+                symbol, price,
+            )
+            if self._notification:
+                await self._notification.notify_order_rejected(
+                    symbol, f"invalid_price:{price}",
+                )
+            return None
+        if self._market_data is not None:
+            try:
+                last_close = await self._market_data.get_price(symbol)
+                if last_close and last_close > 0:
+                    deviation = abs(price - last_close) / last_close
+                    # 10% bound covers a normal day's range comfortably
+                    # while catching feed corruption / fat-finger.
+                    if deviation > 0.10:
+                        logger.error(
+                            "Buy rejected for %s: limit price %.4f deviates "
+                            "%.1f%% from last_close %.4f (>10%% sanity bound)",
+                            symbol, price, deviation * 100, last_close,
+                        )
+                        if self._notification:
+                            await self._notification.notify_order_rejected(
+                                symbol,
+                                f"price_sanity:{price:.4f}_vs_close_{last_close:.4f}"
+                                f"_dev_{deviation:.1%}",
+                            )
+                        return None
+            except Exception as e:
+                # Don't block the order on a price-lookup failure —
+                # this is a guard, not a hard requirement.
+                logger.debug("Price sanity check skipped for %s: %s", symbol, e)
+
         if sizing_override is not None:
             sizing = sizing_override
+            # RISK-B4: sizing_override callers (ETFEngine,
+            # cash_parking) used to skip RiskManager entirely. Now we
+            # still gate them through the safety check — daily loss
+            # limit, max positions, max exposure — without
+            # re-running sizing math.
+            order_value = float(sizing.quantity) * float(price)
+            allowed, reason = self._risk.check_safety_gates(
+                symbol=symbol,
+                portfolio_value=portfolio_value,
+                current_positions=current_positions,
+                order_value=order_value,
+                skip_position_limit=skip_position_limit,
+                # review #4 (2026-06-09): validate against real cash so a
+                # stale balance across a multi-symbol rebalance can't
+                # over-ask (previously only the broker caught it).
+                cash_available=cash_available,
+            )
+            if not allowed:
+                logger.warning(
+                    "Buy (sizing_override) rejected for %s by safety gate: %s",
+                    symbol, reason,
+                )
+                if self._notification:
+                    await self._notification.notify_order_rejected(
+                        symbol, f"safety_gate:{reason}",
+                    )
+                return None
         else:
             sizing = self._risk.calculate_position_size(
                 symbol=symbol,
@@ -205,7 +292,7 @@ class OrderManager:
                 filled_quantity=filled_qty,
                 filled_price=result.filled_price,
                 slippage=slippage,
-                created_at=datetime.utcnow().isoformat(),
+                created_at=now_utc_naive().isoformat(),
                 exchange=exchange,
             )
             self._active_orders[result.order_id] = order
@@ -282,7 +369,12 @@ class OrderManager:
             return order
 
         except Exception as e:
-            logger.error("Failed to place buy order for %s: %s", symbol, e)
+            # LOG-H9 (2026-06-06): exc_info=True so the traceback lands
+            # in journald — without it the symptom is harder to chase
+            # than the bug.
+            logger.error(
+                "Failed to place buy order for %s: %s", symbol, e, exc_info=True,
+            )
             return None
 
     async def place_sell(
@@ -348,7 +440,7 @@ class OrderManager:
                 filled_quantity=filled_qty,
                 filled_price=result.filled_price,
                 slippage=slippage,
-                created_at=datetime.utcnow().isoformat(),
+                created_at=now_utc_naive().isoformat(),
                 exchange=exchange,
             )
             self._active_orders[result.order_id] = order
@@ -422,7 +514,9 @@ class OrderManager:
             return order
 
         except Exception as e:
-            logger.error("Failed to place sell order for %s: %s", symbol, e)
+            logger.error(
+                "Failed to place sell order for %s: %s", symbol, e, exc_info=True,
+            )
             return None
 
     async def cancel(self, order_id: str, symbol: str) -> bool:
@@ -505,17 +599,64 @@ class OrderManager:
             # STOCK-37: When fetch_order returns "not_found", don't overwrite
             # existing filled_price/filled_quantity with None/0. The order may
             # have been filled but KIS API can't find it (date boundary issue).
+            #
+            # FIN-H4 (2026-06-05): the position-based "we don't hold it
+            # anymore" heuristic was promoting manual SELLs (user clicked
+            # in the KIS app) to filled with a synthesized price, which
+            # corrupted the audit trail and PnL. Now we cross-check
+            # `fetch_executed_orders` for the actual order_id before
+            # fabricating a fill — and use the real fill price/qty
+            # when found rather than the limit price.
             if result.status == "not_found":
-                # BUY not_found: check if we actually hold the stock — if so,
-                # the order was filled despite KIS API not finding it.
-                if order.side == "BUY" and self._market_data:
+                executed_match = None
+                if hasattr(self._adapter, "fetch_executed_orders"):
+                    try:
+                        execs = await self._adapter.fetch_executed_orders()
+                        for ex in execs:
+                            if ex.order_id == order_id:
+                                executed_match = ex
+                                break
+                    except Exception as e:
+                        logger.debug(
+                            "executed-orders lookup failed for %s: %s",
+                            order_id, e,
+                        )
+
+                if executed_match and executed_match.status == "filled":
+                    # Authoritative: KIS confirmed the fill in the
+                    # execution log. Use the REAL fill price/qty.
+                    logger.info(
+                        "Order %s %s %s: not_found in inquire but found in "
+                        "executed-orders (filled %s @ %s)",
+                        order_id, order.side, order.symbol,
+                        executed_match.filled_quantity,
+                        executed_match.filled_price,
+                    )
+                    result = OrderResult(
+                        order_id=result.order_id,
+                        symbol=result.symbol,
+                        side=result.side,
+                        order_type=result.order_type,
+                        quantity=result.quantity,
+                        status="filled",
+                        filled_price=executed_match.filled_price,
+                        filled_quantity=executed_match.filled_quantity,
+                    )
+                elif order.side == "BUY" and self._market_data:
+                    # Defence-in-depth: position check is a weaker signal
+                    # than execution log, but we keep it for BUYs because
+                    # the failure mode (treating our own BUY as filled
+                    # when we hold the symbol) is less harmful than
+                    # missing a fill entirely. Log clearly so any abuse
+                    # of the heuristic shows up in journals.
                     try:
                         positions = await self._market_data.get_positions()
                         if any(p.symbol == order.symbol and p.quantity > 0 for p in positions):
-                            logger.info(
-                                "Order %s BUY %s: not_found but stock is held — treating as filled",
-                                order_id,
-                                order.symbol,
+                            logger.warning(
+                                "Order %s BUY %s: not_found + no exec-log "
+                                "confirmation; treating as filled because "
+                                "position is held (best-effort price)",
+                                order_id, order.symbol,
                             )
                             result = OrderResult(
                                 order_id=result.order_id,
@@ -528,43 +669,21 @@ class OrderManager:
                                 filled_quantity=order.quantity,
                             )
                     except Exception:
-                        pass  # Fall through to not_found handling below
-                # 2026-05-07: Same treatment for SELL not_found — if we no
-                # longer hold the stock, the SELL filled. KIS sometimes marks
-                # market SELLs as not_found across date boundaries; without
-                # this conversion main.py:906 (status=="filled" gate) skipped
-                # handle_sell_fill, so register_sell_cooldown was never
-                # invoked → ENIC whipsaw on 2026-05-07.
-                elif order.side == "SELL" and self._market_data:
-                    try:
-                        positions = await self._market_data.get_positions()
-                        still_held = any(
-                            p.symbol == order.symbol and p.quantity > 0 for p in positions
-                        )
-                        if not still_held:
-                            logger.info(
-                                "Order %s SELL %s: not_found but stock no longer held — treating as filled",
-                                order_id,
-                                order.symbol,
-                            )
-                            result = OrderResult(
-                                order_id=result.order_id,
-                                symbol=result.symbol,
-                                side=result.side,
-                                order_type=result.order_type,
-                                quantity=result.quantity,
-                                status="filled",
-                                # Best-effort fill price: order limit price if
-                                # set, else market price preserved on the order
-                                filled_price=(
-                                    order.filled_price
-                                    if order.filled_price is not None
-                                    else order.price
-                                ),
-                                filled_quantity=order.quantity,
-                            )
-                    except Exception:
                         pass
+                elif order.side == "SELL":
+                    # FIN-H4: deliberately do NOT promote SELL not_found
+                    # based on "position no longer held" alone — that
+                    # was the manual-sell fabrication vector. Without
+                    # an executed-orders match, leave the status as
+                    # not_found so it bubbles up as unresolved. Operator
+                    # then sees the stuck order in the dashboard and
+                    # can manually reconcile.
+                    logger.warning(
+                        "Order %s SELL %s: not_found and no exec-log "
+                        "confirmation — leaving as not_found (was the "
+                        "manual-sell fabrication vector pre-FIN-H4)",
+                        order_id, order.symbol,
+                    )
 
                 # Preserve any existing fill data on the ManagedOrder
                 if result.filled_price is None and order.filled_price is not None:
@@ -581,11 +700,19 @@ class OrderManager:
 
             order.status = result.status
             order.filled_price = result.filled_price
-            order.filled_quantity = int(result.filled_quantity) if result.filled_quantity else 0
+            new_filled = int(result.filled_quantity) if result.filled_quantity else 0
+            # FIN-H3 (2026-06-05): emit a change record only when the
+            # status flips AND new cumulative fill > already-processed.
+            # Without this, the same fill could be handed to
+            # handle_sell_fill twice on overlapping reconcile cycles —
+            # position_tracker.quantity -= fill_qty would double-
+            # decrement and the next SELL would go negative.
+            delta_filled = max(0, new_filled - order.processed_filled_quantity)
+            order.filled_quantity = new_filled
             if result.filled_price and order.price:
                 order.slippage = result.filled_price - order.price
 
-            if old_status != result.status:
+            if old_status != result.status and (delta_filled > 0 or new_filled == 0):
                 changes.append(
                     {
                         "order_id": order_id,
@@ -593,7 +720,15 @@ class OrderManager:
                         "side": order.side,
                         "old_status": old_status,
                         "new_status": result.status,
+                        # legacy: cumulative (kept so existing callers
+                        # that subtract delta on the assumption "this
+                        # is the only fill" still see the right value
+                        # on a single-tranche fill)
                         "filled_quantity": order.filled_quantity,
+                        # FIN-H3: new delta semantic — additional shares
+                        # filled since last processed. Downstream code
+                        # can use this to avoid double-decrementing.
+                        "filled_quantity_delta": delta_filled,
                         "filled_price": order.filled_price,
                         "quantity": order.quantity,
                         "price": order.price,
@@ -601,8 +736,13 @@ class OrderManager:
                         "market": getattr(order, "exchange", "NASD"),
                     }
                 )
+                # Mark this much fill as handed off. If the next reconcile
+                # cycle sees the same cumulative value, delta will be 0
+                # and no duplicate change record is emitted.
+                order.processed_filled_quantity = new_filled
                 logger.info(
-                    "Order %s (%s %s): %s -> %s (filled=%d/%d)",
+                    "Order %s (%s %s): %s -> %s (cumulative_filled=%d/%d, "
+                    "delta=%d)",
                     order_id,
                     order.side,
                     order.symbol,
@@ -610,6 +750,7 @@ class OrderManager:
                     result.status,
                     order.filled_quantity,
                     order.quantity,
+                    delta_filled,
                 )
                 if result.status == "filled":
                     has_new_fill = True
@@ -631,7 +772,7 @@ class OrderManager:
         if not self._active_orders or ttl_minutes <= 0:
             return []
 
-        now = datetime.utcnow()
+        now = now_utc_naive()
         cutoff = now - timedelta(minutes=ttl_minutes)
         cancelled = []
 

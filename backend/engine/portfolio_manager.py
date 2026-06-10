@@ -8,10 +8,11 @@ equity curve tracking and daily PnL calculation.
 import logging
 from datetime import datetime, timedelta
 
-from sqlalchemy import delete, desc, select
+from sqlalchemy import delete, desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from core.models import PortfolioSnapshot
+from core.timeutil import now_utc_naive
 from data.market_data_service import MarketDataService
 
 logger = logging.getLogger(__name__)
@@ -19,6 +20,13 @@ logger = logging.getLogger(__name__)
 # Anomaly detection: skip snapshot if total_value drops more than this
 # fraction vs the previous snapshot (e.g. 0.5 = 50% drop).
 ANOMALY_DROP_THRESHOLD = 0.5
+# 2026-06-10: self-healing. If the anomaly guard rejects this many
+# CONSECUTIVE snapshots, the "previous" baseline is almost certainly the
+# corrupt one (live case: a paper-default ₩500M row wedged the KR guard
+# for 5 days — every real ~₩31M snapshot read as a 93.8% "drop" and the
+# stale baseline never got replaced). After N consecutive rejections,
+# accept the new value and let the next snapshot re-baseline.
+ANOMALY_MAX_CONSECUTIVE_SKIPS = 5
 
 # STOCK-46 / P1-F (2026-05-15): Cash flow detection thresholds.
 # Old single-threshold (5% for US, 10% for KR) generated noise records —
@@ -105,10 +113,21 @@ class PortfolioManager:
         market_data: MarketDataService,
         session_factory: async_sessionmaker[AsyncSession],
         market: str = "US",
+        is_paper: bool = False,
     ):
         self._market_data = market_data
         self._session_factory = session_factory
         self._market = market
+        # 2026-06-10: paper-mode write guard. Paper and live share the
+        # SAME portfolio_snapshots table (no is_paper column). On 06-05
+        # a brief paper-mode boot (config default mode="paper" — an env
+        # read hiccup is enough) wrote the KR paper default ₩500M into
+        # live history, which wedged the anomaly guard for 5 days and
+        # froze the frontend's net equity. Paper runs don't need
+        # persisted equity history, so simply never write.
+        self._is_paper = bool(is_paper)
+        # 2026-06-10: consecutive anomaly-skip counter for self-healing
+        self._anomaly_skip_count = 0
 
     async def get_summary(self) -> dict:
         """Get current portfolio state: balance, positions, total equity, unrealized PnL."""
@@ -147,6 +166,16 @@ class PortfolioManager:
         against timing issues where balance.total does not yet include
         position market value (STOCK-45).
         """
+        # 2026-06-10: paper boots must never write into the shared live
+        # snapshots table (see __init__ comment — the 06-05 ₩500M
+        # poisoning incident).
+        if self._is_paper:
+            logger.debug(
+                "[%s] Paper mode — snapshot not persisted to shared DB",
+                self._market,
+            )
+            return
+
         balance = await self._market_data.get_balance()
         positions = await self._market_data.get_positions()
 
@@ -188,15 +217,39 @@ class PortfolioManager:
         if prev is not None and prev.total_value_usd > 0:
             drop_ratio = 1.0 - total_equity / prev.total_value_usd
             if drop_ratio > ANOMALY_DROP_THRESHOLD:
-                logger.warning(
-                    "[%s] Snapshot anomaly: total_equity=%.2f vs "
-                    "previous=%.2f (%.1f%% drop). Skipping snapshot.",
+                # 2026-06-10: self-heal. A persistent "drop" means the
+                # BASELINE is corrupt, not the new value (live: a
+                # paper-default ₩500M row blocked all KR snapshots for
+                # 5 days; net equity froze at the stale figure). Count
+                # consecutive rejections; past the limit, accept the
+                # new snapshot and re-baseline.
+                self._anomaly_skip_count += 1
+                if self._anomaly_skip_count <= ANOMALY_MAX_CONSECUTIVE_SKIPS:
+                    logger.warning(
+                        "[%s] Snapshot anomaly: total_equity=%.2f vs "
+                        "previous=%.2f (%.1f%% drop). Skipping snapshot "
+                        "(%d/%d consecutive).",
+                        self._market,
+                        total_equity,
+                        prev.total_value_usd,
+                        drop_ratio * 100,
+                        self._anomaly_skip_count,
+                        ANOMALY_MAX_CONSECUTIVE_SKIPS,
+                    )
+                    return
+                logger.error(
+                    "[%s] Snapshot anomaly persisted %d consecutive "
+                    "checks — previous baseline %.2f is likely corrupt. "
+                    "Accepting new total_equity=%.2f and re-baselining.",
                     self._market,
-                    total_equity,
+                    self._anomaly_skip_count,
                     prev.total_value_usd,
-                    drop_ratio * 100,
+                    total_equity,
                 )
-                return
+                # fall through to write the snapshot
+            self._anomaly_skip_count = 0
+        else:
+            self._anomaly_skip_count = 0
 
         daily_pnl = await self._calculate_daily_pnl(total_equity)
 
@@ -218,19 +271,62 @@ class PortfolioManager:
             if self._market == "KR"
             else CASH_FLOW_STRONG_ABS_THRESHOLD_US
         )
-        if prev is not None and prev.total_value_usd > 0:
-            cash_flow = detect_cash_flow(
-                prev_total=prev.total_value_usd,
-                new_total=total_equity,
-                rel_threshold=CASH_FLOW_REL_THRESHOLD,
-                abs_threshold=abs_thr,
-                strong_abs_threshold=strong_abs_thr,
+        # P1-F.3 (2026-06-04): suppress cash-flow detection during this
+        # market's REGULAR session. Live observed false positive:
+        # 6/4 01:32 UTC (= 10:32 KST, KR market active) detected
+        # ₩+5.03M "deposit" that was actually a transient KIS CTRP6548R
+        # accounting hiccup (integrated total briefly recomputed after
+        # an ETF buy + sell round-trip). True deposits land in 입출금
+        # outside trading hours; intraday CTRP swings are normally just
+        # evaluation timing. Only the strong rule (≥30% rel) still fires
+        # during sessions — a real intraday flow of that magnitude would
+        # be impossible to miss anyway.
+        try:
+            from engine.scheduler import (
+                MarketPhase, get_kr_market_phase, get_market_phase,
             )
-            if cash_flow != 0.0:
-                action = "deposit" if cash_flow > 0 else "withdrawal"
-                logger.info(
-                    "[%s] Cash flow detected: %.2f (%s)", self._market, cash_flow, action
+            phase = (
+                get_kr_market_phase() if self._market == "KR"
+                else get_market_phase()
+            )
+            in_session = phase == MarketPhase.REGULAR
+        except Exception:
+            in_session = False
+        if prev is not None and prev.total_value_usd > 0:
+            # FIN-H2 (2026-06-05): skip detection when the snapshot gap
+            # is too long. A multi-hour outage during which positions
+            # moved 30%+ (compounded across the gap, normal for
+            # leveraged ETFs) would otherwise be tagged as a phantom
+            # deposit/withdrawal and corrupt the TWR-based metrics.
+            # 90 min is comfortably longer than the longest legitimate
+            # snapshot interval (5 min cadence × 18×) but short enough
+            # to catch real same-session deposits.
+            prev_age = (now_utc_naive() - prev.recorded_at).total_seconds()
+            if prev_age > 90 * 60:
+                logger.warning(
+                    "[%s] cash_flow detection skipped — prev snapshot is "
+                    "%.1f min old (outage gap). Use admin endpoint to "
+                    "annotate real deposits.",
+                    self._market, prev_age / 60,
                 )
+            else:
+                # Raise thresholds dramatically during session to make only
+                # genuine 30%+ swings count.
+                session_abs = abs_thr * 100 if in_session else abs_thr
+                session_rel = 1.0 if in_session else CASH_FLOW_REL_THRESHOLD
+                cash_flow = detect_cash_flow(
+                    prev_total=prev.total_value_usd,
+                    new_total=total_equity,
+                    rel_threshold=session_rel,
+                    abs_threshold=session_abs,
+                    strong_abs_threshold=strong_abs_thr,
+                )
+                if cash_flow != 0.0:
+                    action = "deposit" if cash_flow > 0 else "withdrawal"
+                    logger.info(
+                        "[%s] Cash flow detected: %.2f (%s) (in_session=%s)",
+                        self._market, cash_flow, action, in_session,
+                    )
 
         # STOCK-58: Capture exchange rate at snapshot time for accurate historical conversions.
         # 2026-04-14: Removed `if self._market == "US"` guard — KR snapshots
@@ -268,7 +364,7 @@ class PortfolioManager:
             cash_flow=cash_flow,
             usd_krw_rate=usd_krw_rate,
             integrated_total_krw=integrated_total_krw,
-            recorded_at=datetime.utcnow(),
+            recorded_at=now_utc_naive(),
         )
 
         async with self._session_factory() as session:
@@ -322,8 +418,14 @@ class PortfolioManager:
         return deleted
 
     async def _calculate_daily_pnl(self, current_equity: float) -> float | None:
-        """Calculate PnL vs the first snapshot of today."""
-        today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+        """Calculate PnL vs the first snapshot of today.
+
+        FIN-H2 (2026-06-05): subtract any cash_flow recorded since the
+        first snapshot of today. Otherwise a deposit shows up as a
+        spurious "gain" and trips RiskManager's daily-loss limit on a
+        withdrawal day (or fails to trip on a deposit day).
+        """
+        today_start = now_utc_naive().replace(hour=0, minute=0, second=0, microsecond=0)
 
         async with self._session_factory() as session:
             stmt = (
@@ -336,10 +438,22 @@ class PortfolioManager:
             result = await session.execute(stmt)
             first_today = result.scalar_one_or_none()
 
+            # Sum cash_flows since `first_today` (exclusive) so the PnL
+            # math reflects market-driven equity moves only.
+            cf_stmt = (
+                select(func.coalesce(func.sum(PortfolioSnapshot.cash_flow), 0.0))
+                .where(PortfolioSnapshot.recorded_at > (
+                    first_today.recorded_at if first_today else today_start
+                ))
+                .where(PortfolioSnapshot.market == self._market)
+            )
+            cf_result = await session.execute(cf_stmt)
+            cash_flow_total = float(cf_result.scalar() or 0.0)
+
         if first_today is None:
             return None
 
-        return current_equity - first_today.total_value_usd
+        return current_equity - first_today.total_value_usd - cash_flow_total
 
     async def get_daily_pnl(self) -> float:
         """Calculate today's PnL from snapshots."""
@@ -351,7 +465,7 @@ class PortfolioManager:
 
     async def get_equity_history(self, days: int = 30) -> list[dict]:
         """Get equity curve from snapshots."""
-        since = datetime.utcnow() - timedelta(days=days)
+        since = now_utc_naive() - timedelta(days=days)
 
         async with self._session_factory() as session:
             stmt = (
@@ -388,7 +502,7 @@ class PortfolioManager:
         unit. Rows where the field is NULL (legacy snapshots before
         2026-05-06) are skipped.
         """
-        since = datetime.utcnow() - timedelta(days=days)
+        since = now_utc_naive() - timedelta(days=days)
 
         async with self._session_factory() as session:
             stmt = (

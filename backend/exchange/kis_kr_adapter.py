@@ -56,6 +56,7 @@ TR_ID_KR_LIVE = {
     # Market data (same for live/paper)
     "PRICE": "FHKST01010100",
     "DAILY_CANDLE": "FHKST03010100",
+    "MINUTE_CANDLE": "FHKST03010200",  # 1-min intraday OHLCV (up to 30 bars per call)
     "ORDERBOOK": "FHKST01010200",
     # Orders
     "BUY": "TTTC0802U",
@@ -96,7 +97,7 @@ _MRKT_DIV = {"KRX": "J", "KOSDAQ": "K"}
 class KISKRAdapter(ExchangeAdapter):
     """KIS REST API adapter for Korean domestic stocks."""
 
-    def __init__(self, config: KISConfig, auth: KISAuth):
+    def __init__(self, config: KISConfig, auth: KISAuth, rate_limiter=None):
         self._config = config
         self._auth = auth
         self._session: aiohttp.ClientSession | None = None
@@ -105,11 +106,23 @@ class KISKRAdapter(ExchangeAdapter):
         self._tot_evlu_amt: float = 0.0  # 총평가금액 (통합증거금: KR+overseas)
         self._scts_evlu_amt: float = 0.0  # 국내주식 평가금액
         self._dnca_tot_amt: float = 0.0   # 예수금 총액
+        # Bug-009-1 (2026-06-05): mirror for `invested` so the api_empty
+        # restore branch can log a sensible value instead of 0.
+        self._pchs_amt_smtl_amt: float = 0.0  # 매입금액합계
         self._integrated_total_asset: float = 0.0  # CTRP6548R 통합 총자산
         self._integrated_total_asset_ts: float = 0.0  # last fetch time
+        # RES-B1 (2026-06-05): KIS REST throttle shared with US adapter.
+        # Without this, KR balance/orders/holiday calls bypassed the
+        # 20/s limit and contributed to today's EGW00133 storm.
+        self._rate_limiter = rate_limiter
 
     async def initialize(self) -> None:
-        self._session = aiohttp.ClientSession()
+        # ERR-B2 (2026-06-06): mirror the US adapter — 10s total /
+        # 5s connect timeout to prevent KIS socket hangs from
+        # freezing the eval loop forever.
+        self._session = aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=10, connect=5),
+        )
         await self._auth.initialize()
         logger.info(
             "KIS KR adapter initialized (mode=%s)",
@@ -206,6 +219,114 @@ class KISKRAdapter(ExchangeAdapter):
         candles.reverse()  # oldest first
         return candles[-limit:]
 
+    async def fetch_intraday_candles(
+        self,
+        symbol: str,
+        date_str: str,
+        end_time: str = "153000",
+        exchange: str = "KRX",
+    ) -> list[Candle]:
+        """Fetch 1-min intraday OHLCV bars for one trading day.
+
+        KIS endpoint `inquire-time-itemchartprice` returns up to 30 bars
+        per call ending at `end_time`. To cover a full session
+        (09:00-15:30, 390 minutes), call this ~13 times with descending
+        end_time values and concatenate.
+
+        Each Candle uses `timestamp = int("YYYYMMDDHHMM")` (12 digits)
+        so a sort still works chronologically.
+
+        Args:
+            symbol: 6-digit KR stock code (no exchange suffix)
+            date_str: trading date as "YYYYMMDD"
+            end_time: HHMMSS, bars at or before this time
+            exchange: "KRX" or "KOSDAQ"
+
+        Returns: list of Candle, oldest first, up to 30 entries.
+        """
+        await self._auth.ensure_valid_token()
+
+        params = {
+            "FID_ETC_CLS_CODE": "",
+            "FID_COND_MRKT_DIV_CODE": _MRKT_DIV.get(exchange, "J"),
+            "FID_INPUT_ISCD": symbol,
+            "FID_INPUT_HOUR_1": end_time,
+            "FID_PW_DATA_INCU_YN": "N",
+            "FID_INPUT_DATE_1": date_str,
+        }
+        data = await self._get(
+            "/uapi/domestic-stock/v1/quotations/inquire-time-itemchartprice",
+            self._tr["MINUTE_CANDLE"],
+            params,
+        )
+        candles = []
+        for item in data.get("output2", []):
+            try:
+                bar_date = item.get("stck_bsop_date", "")
+                bar_time = item.get("stck_cntg_hour", "")
+                if not bar_date or not bar_time:
+                    continue
+                # bar_time is HHMMSS → strip seconds for HHMM
+                hhmm = bar_time[:4]
+                ts = int(f"{bar_date}{hhmm}")
+                candles.append(
+                    Candle(
+                        timestamp=ts,
+                        open=float(item.get("stck_oprc", 0)),
+                        high=float(item.get("stck_hgpr", 0)),
+                        low=float(item.get("stck_lwpr", 0)),
+                        close=float(item.get("stck_prpr", 0)),  # 분봉 close field
+                        volume=float(item.get("cntg_vol", 0)),
+                    )
+                )
+            except (ValueError, KeyError):
+                continue
+        candles.sort(key=lambda c: c.timestamp)
+        return candles
+
+    async def fetch_intraday_session(
+        self,
+        symbol: str,
+        date_str: str,
+        exchange: str = "KRX",
+    ) -> list[Candle]:
+        """Fetch the full 09:00-15:30 KST session of 1-min bars.
+
+        KIS returns ≤30 bars per call ending at `end_time`. To cover
+        the 390-min session we call ~14 times with descending end_time
+        and de-dupe. Returns up to 390 candles, oldest first.
+
+        Caller MUST handle rate limiting (KIS 20 req/sec real). Each
+        full-session fetch is ~14 calls, so backfilling 79 symbols
+        across 90 days = 99k calls → ~83 minutes at 20/sec sustained.
+        """
+        all_candles: dict[int, Candle] = {}
+        # End times descending: 15:30, 15:00, 14:30, ..., 09:30, 09:00
+        # 30-bar window means we ask for ranges ending at each :30 / :00
+        # mark of every half-hour from 15:30 back to 09:00.
+        end_times = [
+            "153000", "150000", "143000", "140000",
+            "133000", "130000", "123000", "120000",
+            "113000", "110000", "103000", "100000",
+            "093000", "090000",
+        ]
+        for end_t in end_times:
+            try:
+                window = await self.fetch_intraday_candles(
+                    symbol, date_str, end_time=end_t, exchange=exchange,
+                )
+            except Exception as e:
+                logger.warning(
+                    "Intraday fetch failed for %s %s @%s: %s",
+                    symbol, date_str, end_t, e,
+                )
+                continue
+            for c in window:
+                all_candles[c.timestamp] = c
+
+        ordered = sorted(all_candles.values(), key=lambda c: c.timestamp)
+        return ordered
+
     async def fetch_orderbook(
         self, symbol: str, exchange: str = "KRX", limit: int = 20
     ) -> OrderBook:
@@ -268,11 +389,34 @@ class KISKRAdapter(ExchangeAdapter):
         # Use scts_evlu_amt (domestic stock evaluation only) instead.
         stock_eval = float(output2.get("scts_evlu_amt", 0))   # 유가증권평가금액 (domestic only)
         # Store tot_evlu_amt for combined total equity calculation (includes overseas in 통합증거금)
-        self._tot_evlu_amt = float(output2.get("tot_evlu_amt", 0))
+        tot_evlu_new = float(output2.get("tot_evlu_amt", 0))
         invested = float(output2.get("pchs_amt_smtl_amt", 0)) # 매입금액합계
         deposit = float(output2.get("dnca_tot_amt", 0))       # 예수금총금액
-        self._scts_evlu_amt = stock_eval
-        self._dnca_tot_amt = deposit
+        # 2026-06-04: Don't overwrite cached values with zero when API rate-
+        # limit returns an empty output2 (race with concurrent calls). Only
+        # update when we actually got non-zero data, OR when the response
+        # explicitly says holdings = 0 (deposit > 0 but stock_eval missing
+        # while having no positions). Heuristic: if BOTH deposit and
+        # stock_eval are 0 AND tot_evlu is 0, this is almost certainly an
+        # empty/throttled response → keep stale.
+        api_empty = (
+            stock_eval == 0 and deposit == 0 and tot_evlu_new == 0
+        )
+        if not api_empty:
+            self._scts_evlu_amt = stock_eval
+            self._tot_evlu_amt = tot_evlu_new
+            self._dnca_tot_amt = deposit
+            self._pchs_amt_smtl_amt = invested
+        else:
+            logger.warning(
+                "KR balance API returned empty output2; keeping cached "
+                "_scts_evlu_amt=%.0f _tot_evlu_amt=%.0f _dnca_tot_amt=%.0f",
+                self._scts_evlu_amt, self._tot_evlu_amt, self._dnca_tot_amt,
+            )
+            # Use cached values for the rest of this call
+            stock_eval = self._scts_evlu_amt
+            deposit = self._dnca_tot_amt
+            invested = self._pchs_amt_smtl_amt
 
         # Get actual orderable amount via 주문가능조회
         # dnca_tot_amt includes unsettled US stock buys — not actual buying power
@@ -960,6 +1104,8 @@ class KISKRAdapter(ExchangeAdapter):
         url = f"{self._config.base_url}{path}"
         data: dict[str, Any] = {}
         for attempt in range(max_retries):
+            if self._rate_limiter:
+                await self._rate_limiter.acquire()
             headers = self._auth.get_auth_headers(tr_id)
             async with self._session.get(url, headers=headers, params=params) as resp:
                 if resp.status >= 400:
@@ -1007,6 +1153,8 @@ class KISKRAdapter(ExchangeAdapter):
         url = f"{self._config.base_url}{path}"
         data: dict[str, Any] = {}
         for attempt in range(max_retries):
+            if self._rate_limiter:
+                await self._rate_limiter.acquire()
             headers = self._auth.get_auth_headers(tr_id, hashkey)
             async with self._session.post(url, headers=headers, json=body) as resp:
                 if resp.status >= 400:
