@@ -3142,6 +3142,30 @@ if _auth_required_for_live() and not _AUTH_TOKEN:
     )
     raise SystemExit(2)
 
+# 2026-06-10: inverse guard — AUTH token present but mode resolved to
+# paper means the env only PARTIALLY loaded (TRADING_MODE missing →
+# config default "paper" kicks in). Exactly this silent fallback wrote
+# the paper-default ₩500M into live snapshot history on 06-05. A
+# deliberate paper run unsets AUTH_API_TOKEN; an env hiccup doesn't.
+# Refuse to guess.
+if _AUTH_TOKEN:
+    try:
+        _cfg_probe = AppConfig()
+        if _cfg_probe.is_paper:
+            print(
+                "[FATAL] AUTH_API_TOKEN is set but TRADING_MODE resolved "
+                "to 'paper' — env likely only partially loaded (the 06-05 "
+                "₩500M snapshot poisoning boot). Set TRADING_MODE=live "
+                "explicitly, or unset AUTH_API_TOKEN for a real paper run.",
+                file=__import__("sys").stderr,
+            )
+            raise SystemExit(2)
+    except SystemExit:
+        raise
+    except Exception:
+        # Config unreadable here → the lifespan will surface it.
+        pass
+
 
 @app.middleware("http")
 async def bearer_auth_middleware(request, call_next):
