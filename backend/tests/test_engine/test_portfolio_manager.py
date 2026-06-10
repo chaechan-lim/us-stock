@@ -408,6 +408,35 @@ class TestSnapshotAnomalyDetection:
             result = await session.execute(stmt)
             assert result.scalar() == 1
 
+    async def test_paper_mode_never_writes_snapshot(self, db_setup):
+        """2026-06-10: paper boots share the live snapshots table — a
+        paper-default balance written there wedged the anomaly guard for
+        5 days (the ₩500M incident). is_paper=True must skip the DB
+        write entirely, before even fetching the balance."""
+        svc = AsyncMock()
+        svc.get_balance = AsyncMock(
+            return_value=Balance(
+                currency="KRW",
+                total=500_000_000,  # the poisonous paper default
+                available=500_000_000,
+            )
+        )
+        svc.get_positions = AsyncMock(return_value=[])
+        mgr = PortfolioManager(
+            market_data=svc, session_factory=db_setup,
+            market="KR", is_paper=True,
+        )
+
+        await mgr.save_snapshot()
+
+        async with db_setup() as session:
+            result = await session.execute(
+                select(func.count()).select_from(PortfolioSnapshot)
+            )
+            assert result.scalar() == 0  # nothing written
+        # Short-circuits before touching the adapter at all
+        svc.get_balance.assert_not_awaited()
+
     async def test_self_heals_after_persistent_anomaly(self, db_setup):
         """2026-06-10: a corrupt baseline (live case: paper-default ₩500M
         row) must not wedge the guard forever. After

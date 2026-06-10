@@ -619,6 +619,9 @@ async def lifespan(app: FastAPI):
     portfolio_manager = PortfolioManager(
         market_data=market_data,
         session_factory=session_factory,
+        # 2026-06-10: paper boots must never write the shared snapshots
+        # table (06-05 ₩500M poisoning incident).
+        is_paper=config.is_paper,
     )
     app.state.portfolio_manager = portfolio_manager
 
@@ -881,6 +884,9 @@ async def lifespan(app: FastAPI):
         market_data=kr_market_data,
         session_factory=session_factory,
         market="KR",
+        # 2026-06-10: the 06-05 incident was exactly this manager in a
+        # paper boot writing ₩500M into live history.
+        is_paper=config.is_paper,
     )
     app.state.kr_portfolio_manager = kr_portfolio_manager
 

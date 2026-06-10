@@ -113,10 +113,19 @@ class PortfolioManager:
         market_data: MarketDataService,
         session_factory: async_sessionmaker[AsyncSession],
         market: str = "US",
+        is_paper: bool = False,
     ):
         self._market_data = market_data
         self._session_factory = session_factory
         self._market = market
+        # 2026-06-10: paper-mode write guard. Paper and live share the
+        # SAME portfolio_snapshots table (no is_paper column). On 06-05
+        # a brief paper-mode boot (config default mode="paper" — an env
+        # read hiccup is enough) wrote the KR paper default ₩500M into
+        # live history, which wedged the anomaly guard for 5 days and
+        # froze the frontend's net equity. Paper runs don't need
+        # persisted equity history, so simply never write.
+        self._is_paper = bool(is_paper)
         # 2026-06-10: consecutive anomaly-skip counter for self-healing
         self._anomaly_skip_count = 0
 
@@ -157,6 +166,16 @@ class PortfolioManager:
         against timing issues where balance.total does not yet include
         position market value (STOCK-45).
         """
+        # 2026-06-10: paper boots must never write into the shared live
+        # snapshots table (see __init__ comment — the 06-05 ₩500M
+        # poisoning incident).
+        if self._is_paper:
+            logger.debug(
+                "[%s] Paper mode — snapshot not persisted to shared DB",
+                self._market,
+            )
+            return
+
         balance = await self._market_data.get_balance()
         positions = await self._market_data.get_positions()
 
