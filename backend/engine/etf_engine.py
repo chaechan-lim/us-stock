@@ -1330,7 +1330,12 @@ class ETFEngine:
         drawdown is held until the regime signal flips.
         """
         cfg = self._ew_hedge_cfg
-        actions: dict[str, list[str]] = {"ew_hedge": [], "risk": [], "regime": []}
+        # NB: include "sector" for caller compatibility — main.py's
+        # task_kr_etf_evaluation reads actions["regime"]/["sector"] for
+        # its log line (KeyError observed live 06-10 12:41).
+        actions: dict[str, list[str]] = {
+            "ew_hedge": [], "risk": [], "regime": [], "sector": [],
+        }
 
         # 2026-06-09: opening-auction guard. Skip ALL rebalancing during
         # the first N minutes after open. The first reconcile after
