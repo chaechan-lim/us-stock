@@ -33,7 +33,9 @@ def rate_limiter():
 
 @pytest.fixture
 def service(mock_adapter, rate_limiter):
-    return MarketDataService(adapter=mock_adapter, rate_limiter=rate_limiter)
+    svc = MarketDataService(adapter=mock_adapter, rate_limiter=rate_limiter)
+    yield svc
+    svc.shutdown()
 
 
 class TestMarketDataService:
@@ -294,7 +296,8 @@ class TestYfinanceNonBlocking:
             concurrent = asyncio.create_task(concurrent_task())
             await asyncio.gather(ohlcv_task, concurrent)
 
-        cancel_event.set()  # clean up the thread
+        # Note: cancel_event.set() is not needed here — by the time gather() returns,
+        # slow_yfinance has already unblocked via its 0.5s wait timeout and returned.
         assert concurrent_ran, "Concurrent async task should run while yfinance is in thread"
         svc.shutdown()
 
@@ -346,4 +349,18 @@ class TestYfinanceNonBlocking:
             rate_limiter=RateLimiter(max_per_second=100),
         )
         svc.shutdown()
-        assert svc._yf_executor._shutdown, "Executor should be shut down"
+        # Verify behavior: submitting new work to a shut-down executor raises RuntimeError
+        with pytest.raises(RuntimeError):
+            svc._yf_executor.submit(lambda: None)
+
+    async def test_async_context_manager(self, mock_adapter):
+        """MarketDataService supports async with for automatic cleanup."""
+        async with MarketDataService(
+            adapter=mock_adapter,
+            rate_limiter=RateLimiter(max_per_second=100),
+        ) as svc:
+            ticker = await svc.get_ticker("AAPL")
+            assert ticker.price == 150.0
+        # After exiting the context, the executor should be shut down
+        with pytest.raises(RuntimeError):
+            svc._yf_executor.submit(lambda: None)
